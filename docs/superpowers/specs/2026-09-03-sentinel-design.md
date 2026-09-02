@@ -264,6 +264,12 @@ so the evaluation set is built by perturbation — paraphrase, truncate, and inj
 typos into held-out complaints, then measure recall@k for retrieving the
 original. The benchmark result is published in the README either way.
 
+**This benchmark must be labelled honestly.** It measures synthetic
+duplicate-retrieval — whether a perturbed copy retrieves its original. It is not
+real-world duplicate-detection accuracy, because no labelled duplicate corpus
+exists here. The README states that distinction explicitly rather than letting a
+recall@k number imply more than it earned.
+
 ### 6.4 Risk
 
 Histogram gradient boosting on structured features. Label is SLA breach.
@@ -287,6 +293,20 @@ Categories therefore enter only through domain-neutral properties:
 
 This is the §3.1 principle applied to feature engineering: the model sees how a
 category *behaves*, never which category it *is*.
+
+**Cross-domain transfer is measured, not assumed.** Designing features to
+transfer is a hypothesis; the model trains on NYC 311 and serves CFPB, and that
+gap has to be quantified. It can be: CFPB carries its own `Timely response?`
+field — an independent SLA label from an unrelated domain. So the protocol is:
+
+1. Train on NYC 311, evaluate in-domain on held-out 311 (the ceiling).
+2. Evaluate the same model on CFPB's `Timely response?` labels (the transfer).
+3. Train a CFPB-native model as the in-domain reference (the other ceiling).
+
+The gap between (1)/(3) and (2) is the real cost of transfer, and it is published
+whatever it shows. A poor result is a legitimate finding about domain shift, not
+a failure to hide — and it is the number that determines whether a domain ships
+with the shared risk model or needs its own.
 
 **Evaluation:** ROC-AUC, precision@k (it ranks a queue, so the top of the list
 matters more than the global curve), and a calibration curve — an uncalibrated
