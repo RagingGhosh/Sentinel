@@ -14,6 +14,15 @@ ignore_missing_imports = true
 django_settings_module = "config.settings.dev"
 
 [tool.pytest.ini_options]
+# Deliberately NOT setting DJANGO_SETTINGS_MODULE here. If it is set (via this
+# ini key, --ds, or the env var) at ini-parse time, pytest-django's
+# pytest_load_initial_conftests hookimpl eagerly imports Django settings
+# *before* pytest's own trylast hookimpl of the same name has imported the
+# rootdir conftest.py -- so conftest.py's SECRET_KEY default has not been
+# applied yet, and collection aborts with ImproperlyConfigured. conftest.py
+# supplies DJANGO_SETTINGS_MODULE via os.environ instead, which pytest-django
+# picks up lazily, after conftest.py has already run. Do not re-add this key
+# without first re-reading conftest.py's comment on the same constraint.
 testpaths = ["tests"]
 markers = [
     "ml: marks tests that exercise ML model artifacts",
