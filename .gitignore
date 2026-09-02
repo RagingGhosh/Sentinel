@@ -32,3 +32,6 @@ htmlcov/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# SDD scratch workspace
+.superpowers/
