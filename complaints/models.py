@@ -90,11 +90,7 @@ class Complaint(models.Model):
     def is_overdue(self) -> bool:
         from django.utils import timezone
 
-        return (
-            self.due_at is not None
-            and self.resolved_at is None
-            and self.due_at < timezone.now()
-        )
+        return self.due_at is not None and self.resolved_at is None and self.due_at < timezone.now()
 
 
 class ImmutableRecordError(Exception):

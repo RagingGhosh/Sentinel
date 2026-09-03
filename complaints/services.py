@@ -35,9 +35,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 
 
 @transaction.atomic
-def transition(
-    complaint: Complaint, to_status: str, actor, note: str = ""
-) -> ComplaintEvent:
+def transition(complaint: Complaint, to_status: str, actor, note: str = "") -> ComplaintEvent:
     from_status = complaint.status
     if to_status not in ALLOWED_TRANSITIONS[from_status]:
         raise InvalidTransition(f"Cannot move a complaint from {from_status} to {to_status}")

@@ -72,8 +72,10 @@ All models sit behind protocols so implementations are swappable:
 class TriageModel(Protocol):
     def predict(self, text: str) -> TriagePrediction: ...
 
+
 class DedupIndex(Protocol):
     def query(self, text: str, k: int) -> list[Match]: ...
+
 
 class RiskModel(Protocol):
     def predict(self, features: RiskFeatures) -> RiskScore: ...
@@ -124,15 +126,15 @@ it — not at an arbitrary row count.
 
 ```python
 class Complaint(models.Model):
-    domain       = FK(Domain)
-    category     = FK(Category, null=True)     # human-owned ground truth
-    priority     = CharField(choices=...)       # human-owned
-    status       = CharField(choices=...)
-    title, body  = ...
+    domain = FK(Domain)
+    category = FK(Category, null=True)  # human-owned ground truth
+    priority = CharField(choices=...)  # human-owned
+    status = CharField(choices=...)
+    title, body = ...
     submitted_by = FK(User)
-    assignee     = FK(User, null=True)
+    assignee = FK(User, null=True)
     duplicate_of = FK("self", null=True)
-    embedding    = BinaryField(null=True)       # float32 bytes
+    embedding = BinaryField(null=True)  # float32 bytes
     created_at, triaged_at, due_at, resolved_at
 ```
 
@@ -142,12 +144,12 @@ class Complaint(models.Model):
 
 ```python
 class Prediction(models.Model):
-    complaint     = FK(Complaint, related_name="predictions")
-    kind          = CharField(choices=["triage", "risk", "dedup"])
-    payload       = JSONField()
-    model_name    = CharField()
+    complaint = FK(Complaint, related_name="predictions")
+    kind = CharField(choices=["triage", "risk", "dedup"])
+    payload = JSONField()
+    model_name = CharField()
     model_version = CharField()
-    created_at    = DateTimeField(auto_now_add=True)
+    created_at = DateTimeField(auto_now_add=True)
 ```
 
 `payload` is JSON because the three prediction shapes genuinely differ, but each
@@ -158,14 +160,13 @@ application owns the schema. Rows are never updated.
 
 ```python
 class ComplaintEvent(models.Model):
-    complaint  = FK(Complaint, related_name="events")
-    kind       = CharField(choices=["status", "category", "priority",
-                                    "assignment", "duplicate"])
+    complaint = FK(Complaint, related_name="events")
+    kind = CharField(choices=["status", "category", "priority", "assignment", "duplicate"])
     from_value = CharField(null=True)
-    to_value   = CharField(null=True)
-    actor      = FK(User, null=True)
+    to_value = CharField(null=True)
+    actor = FK(User, null=True)
     prediction = FK(Prediction, null=True)
-    note       = TextField(blank=True)
+    note = TextField(blank=True)
     created_at = DateTimeField(auto_now_add=True)
 ```
 

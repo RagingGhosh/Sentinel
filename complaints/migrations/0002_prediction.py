@@ -5,27 +5,53 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
-        ('complaints', '0001_initial'),
+        ("complaints", "0001_initial"),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='Prediction',
+            name="Prediction",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('kind', models.CharField(choices=[('triage', 'Triage'), ('dedup', 'Duplicate detection'), ('risk', 'SLA risk')], max_length=20)),
-                ('payload', models.JSONField()),
-                ('model_name', models.CharField(max_length=100)),
-                ('model_version', models.CharField(max_length=50)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('complaint', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='predictions', to='complaints.complaint')),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+                    ),
+                ),
+                (
+                    "kind",
+                    models.CharField(
+                        choices=[
+                            ("triage", "Triage"),
+                            ("dedup", "Duplicate detection"),
+                            ("risk", "SLA risk"),
+                        ],
+                        max_length=20,
+                    ),
+                ),
+                ("payload", models.JSONField()),
+                ("model_name", models.CharField(max_length=100)),
+                ("model_version", models.CharField(max_length=50)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "complaint",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="predictions",
+                        to="complaints.complaint",
+                    ),
+                ),
             ],
             options={
-                'ordering': ['-created_at'],
-                'permissions': [('view_ml_metrics', 'Can view model metrics')],
-                'indexes': [models.Index(fields=['complaint', 'kind', '-created_at'], name='complaints__complai_6d468b_idx')],
+                "ordering": ["-created_at"],
+                "permissions": [("view_ml_metrics", "Can view model metrics")],
+                "indexes": [
+                    models.Index(
+                        fields=["complaint", "kind", "-created_at"],
+                        name="complaints__complai_6d468b_idx",
+                    )
+                ],
             },
         ),
     ]

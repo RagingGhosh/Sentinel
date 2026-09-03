@@ -17,13 +17,33 @@ class ComplaintSerializer(serializers.ModelSerializer):
     class Meta:
         model = Complaint
         fields = [
-            "id", "domain", "category", "priority", "status", "title", "body",
-            "submitted_by", "assignee", "duplicate_of", "created_at",
-            "triaged_at", "due_at", "resolved_at", "is_overdue",
+            "id",
+            "domain",
+            "category",
+            "priority",
+            "status",
+            "title",
+            "body",
+            "submitted_by",
+            "assignee",
+            "duplicate_of",
+            "created_at",
+            "triaged_at",
+            "due_at",
+            "resolved_at",
+            "is_overdue",
         ]
         read_only_fields = [
-            "category", "priority", "status", "submitted_by", "assignee",
-            "duplicate_of", "created_at", "triaged_at", "due_at", "resolved_at",
+            "category",
+            "priority",
+            "status",
+            "submitted_by",
+            "assignee",
+            "duplicate_of",
+            "created_at",
+            "triaged_at",
+            "due_at",
+            "resolved_at",
         ]
 
 

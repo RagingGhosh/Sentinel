@@ -6,38 +6,129 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
     dependencies = [
-        ('domains', '0001_initial'),
+        ("domains", "0001_initial"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
         migrations.CreateModel(
-            name='Complaint',
+            name="Complaint",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('priority', models.CharField(blank=True, choices=[('low', 'Low'), ('medium', 'Medium'), ('high', 'High'), ('critical', 'Critical')], max_length=20, null=True)),
-                ('status', models.CharField(choices=[('submitted', 'Submitted'), ('in_review', 'In review'), ('in_progress', 'In progress'), ('resolved', 'Resolved'), ('closed', 'Closed'), ('duplicate', 'Duplicate')], default='submitted', max_length=20)),
-                ('title', models.CharField(max_length=300)),
-                ('body', models.TextField()),
-                ('embedding', models.BinaryField(blank=True, null=True)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('triaged_at', models.DateTimeField(blank=True, null=True)),
-                ('due_at', models.DateTimeField(blank=True, null=True)),
-                ('resolved_at', models.DateTimeField(blank=True, null=True)),
-                ('assignee', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='assigned_complaints', to=settings.AUTH_USER_MODEL)),
-                ('category', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='complaints', to='domains.category')),
-                ('domain', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='complaints', to='domains.domain')),
-                ('duplicate_of', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='duplicates', to='complaints.complaint')),
-                ('submitted_by', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='submitted_complaints', to=settings.AUTH_USER_MODEL)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True, primary_key=True, serialize=False, verbose_name="ID"
+                    ),
+                ),
+                (
+                    "priority",
+                    models.CharField(
+                        blank=True,
+                        choices=[
+                            ("low", "Low"),
+                            ("medium", "Medium"),
+                            ("high", "High"),
+                            ("critical", "Critical"),
+                        ],
+                        max_length=20,
+                        null=True,
+                    ),
+                ),
+                (
+                    "status",
+                    models.CharField(
+                        choices=[
+                            ("submitted", "Submitted"),
+                            ("in_review", "In review"),
+                            ("in_progress", "In progress"),
+                            ("resolved", "Resolved"),
+                            ("closed", "Closed"),
+                            ("duplicate", "Duplicate"),
+                        ],
+                        default="submitted",
+                        max_length=20,
+                    ),
+                ),
+                ("title", models.CharField(max_length=300)),
+                ("body", models.TextField()),
+                ("embedding", models.BinaryField(blank=True, null=True)),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("triaged_at", models.DateTimeField(blank=True, null=True)),
+                ("due_at", models.DateTimeField(blank=True, null=True)),
+                ("resolved_at", models.DateTimeField(blank=True, null=True)),
+                (
+                    "assignee",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="assigned_complaints",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
+                (
+                    "category",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.PROTECT,
+                        related_name="complaints",
+                        to="domains.category",
+                    ),
+                ),
+                (
+                    "domain",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.PROTECT,
+                        related_name="complaints",
+                        to="domains.domain",
+                    ),
+                ),
+                (
+                    "duplicate_of",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.SET_NULL,
+                        related_name="duplicates",
+                        to="complaints.complaint",
+                    ),
+                ),
+                (
+                    "submitted_by",
+                    models.ForeignKey(
+                        on_delete=django.db.models.deletion.PROTECT,
+                        related_name="submitted_complaints",
+                        to=settings.AUTH_USER_MODEL,
+                    ),
+                ),
             ],
             options={
-                'ordering': ['-created_at'],
-                'permissions': [('view_queue', 'Can view the agent work queue'), ('triage_complaint', 'Can confirm category and priority'), ('assign_complaint', 'Can assign complaints to agents'), ('resolve_complaint', 'Can resolve and close complaints'), ('mark_duplicate', 'Can mark a complaint as a duplicate')],
-                'constraints': [models.CheckConstraint(condition=models.Q(models.Q(('status', 'duplicate'), _negated=True), ('duplicate_of__isnull', False), _connector='OR'), name='duplicate_requires_canonical'), models.CheckConstraint(condition=models.Q(('duplicate_of', models.F('id')), _negated=True), name='duplicate_of_is_not_self')],
+                "ordering": ["-created_at"],
+                "permissions": [
+                    ("view_queue", "Can view the agent work queue"),
+                    ("triage_complaint", "Can confirm category and priority"),
+                    ("assign_complaint", "Can assign complaints to agents"),
+                    ("resolve_complaint", "Can resolve and close complaints"),
+                    ("mark_duplicate", "Can mark a complaint as a duplicate"),
+                ],
+                "constraints": [
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            models.Q(("status", "duplicate"), _negated=True),
+                            ("duplicate_of__isnull", False),
+                            _connector="OR",
+                        ),
+                        name="duplicate_requires_canonical",
+                    ),
+                    models.CheckConstraint(
+                        condition=models.Q(("duplicate_of", models.F("id")), _negated=True),
+                        name="duplicate_of_is_not_self",
+                    ),
+                ],
             },
         ),
     ]

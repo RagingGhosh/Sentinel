@@ -230,7 +230,9 @@ ML_ARTIFACT_VERSIONS: dict[str, dict[str, str]] = {}
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "formatters": {"json": {"format": '{"level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}'}},
+    "formatters": {
+        "json": {"format": '{"level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}'}
+    },
     "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "json"}},
     "root": {"handlers": ["console"], "level": "INFO"},
 }
@@ -247,11 +249,7 @@ from .base import BASE_DIR, env
 DEBUG = True
 ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 
-DATABASES = {
-    "default": env.db_url(
-        "DATABASE_URL", default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}"
-    )
-}
+DATABASES = {"default": env.db_url("DATABASE_URL", default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}")}
 ```
 
 `config/settings/prod.py`:
@@ -427,7 +425,9 @@ class Category(models.Model):
     class Meta:
         ordering = ["domain", "name"]
         constraints = [
-            models.UniqueConstraint(fields=["domain", "slug"], name="unique_category_slug_per_domain"),
+            models.UniqueConstraint(
+                fields=["domain", "slug"], name="unique_category_slug_per_domain"
+            ),
             models.CheckConstraint(condition=models.Q(sla_hours__gt=0), name="sla_hours_positive"),
         ]
 
@@ -1024,11 +1024,7 @@ class Complaint(models.Model):
     def is_overdue(self) -> bool:
         from django.utils import timezone
 
-        return (
-            self.due_at is not None
-            and self.resolved_at is None
-            and self.due_at < timezone.now()
-        )
+        return self.due_at is not None and self.resolved_at is None and self.due_at < timezone.now()
 ```
 
 - [ ] **Step 4: Add `ComplaintFactory` to `tests/factories.py`**
@@ -1324,7 +1320,10 @@ class ComplaintEvent(models.Model):
     from_value = models.CharField(max_length=200, null=True, blank=True)
     to_value = models.CharField(max_length=200, null=True, blank=True)
     actor = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="complaint_events"
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="complaint_events",
     )
     prediction = models.ForeignKey(
         "Prediction", on_delete=models.SET_NULL, null=True, blank=True, related_name="decisions"
@@ -1542,9 +1541,7 @@ ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 
 
 @transaction.atomic
-def transition(
-    complaint: Complaint, to_status: str, actor, note: str = ""
-) -> ComplaintEvent:
+def transition(complaint: Complaint, to_status: str, actor, note: str = "") -> ComplaintEvent:
     from_status = complaint.status
     if to_status not in ALLOWED_TRANSITIONS[from_status]:
         raise InvalidTransition(f"Cannot move a complaint from {from_status} to {to_status}")
@@ -2234,13 +2231,33 @@ class ComplaintSerializer(serializers.ModelSerializer):
     class Meta:
         model = Complaint
         fields = [
-            "id", "domain", "category", "priority", "status", "title", "body",
-            "submitted_by", "assignee", "duplicate_of", "created_at",
-            "triaged_at", "due_at", "resolved_at", "is_overdue",
+            "id",
+            "domain",
+            "category",
+            "priority",
+            "status",
+            "title",
+            "body",
+            "submitted_by",
+            "assignee",
+            "duplicate_of",
+            "created_at",
+            "triaged_at",
+            "due_at",
+            "resolved_at",
+            "is_overdue",
         ]
         read_only_fields = [
-            "category", "priority", "status", "submitted_by", "assignee",
-            "duplicate_of", "created_at", "triaged_at", "due_at", "resolved_at",
+            "category",
+            "priority",
+            "status",
+            "submitted_by",
+            "assignee",
+            "duplicate_of",
+            "created_at",
+            "triaged_at",
+            "due_at",
+            "resolved_at",
         ]
 
 
@@ -2497,7 +2514,9 @@ def submit(request):
             submitted_by=request.user,
         )
         return redirect("complaint-detail", pk=complaint.pk)
-    return render(request, "complaints/submit.html", {"domains": Domain.objects.filter(is_active=True)})
+    return render(
+        request, "complaints/submit.html", {"domains": Domain.objects.filter(is_active=True)}
+    )
 
 
 @login_required
