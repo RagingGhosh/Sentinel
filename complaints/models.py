@@ -95,3 +95,47 @@ class Complaint(models.Model):
             and self.resolved_at is None
             and self.due_at < timezone.now()
         )
+
+
+class ImmutableRecordError(Exception):
+    """Raised on any attempt to modify an append-only record."""
+
+
+class PredictionKind(models.TextChoices):
+    TRIAGE = "triage", "Triage"
+    DEDUP = "dedup", "Duplicate detection"
+    RISK = "risk", "SLA risk"
+
+
+class Prediction(models.Model):
+    """Append-only model output.
+
+    A Prediction records what a model said and which artifact said it. It is
+    never written into Complaint.category or Complaint.priority — those belong
+    to a human. Keeping the two apart is what makes live evaluation possible:
+    joining predictions to the human decisions in ComplaintEvent gives a real
+    accuracy figure rather than a test-set one.
+    """
+
+    complaint = models.ForeignKey(Complaint, on_delete=models.CASCADE, related_name="predictions")
+    kind = models.CharField(max_length=20, choices=PredictionKind.choices)
+    payload = models.JSONField()
+    model_name = models.CharField(max_length=100)
+    model_version = models.CharField(max_length=50)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["complaint", "kind", "-created_at"])]
+        permissions = [("view_ml_metrics", "Can view model metrics")]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise ImmutableRecordError("Prediction rows are append-only and cannot be updated")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutableRecordError("Prediction rows are append-only and cannot be deleted")
+
+    def __str__(self) -> str:
+        return f"{self.kind}@{self.model_version} for #{self.complaint_id}"
