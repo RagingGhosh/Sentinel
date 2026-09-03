@@ -7,13 +7,16 @@ from rest_framework.response import Response
 
 from complaints import services
 from complaints.models import Complaint, Priority, Status
-from domains.models import Category
+from domains.models import Category, Domain
 from ml.registry import registry_status
 
 
 class ComplaintSerializer(serializers.ModelSerializer):
     submitted_by = serializers.SlugRelatedField(slug_field="username", read_only=True)
     is_overdue = serializers.BooleanField(read_only=True)
+    # The submit form only ever offers active domains; the API must not accept
+    # a retired one just because its pk still resolves.
+    domain = serializers.PrimaryKeyRelatedField(queryset=Domain.objects.filter(is_active=True))
 
     class Meta:
         model = Complaint

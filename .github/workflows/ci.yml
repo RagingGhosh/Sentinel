@@ -19,7 +19,7 @@ jobs:
       - name: Format check
         run: ruff format --check .
       - name: Type check
-        run: mypy complaints domains ml
+        run: mypy complaints domains ml accounts
       - name: Check for missing migrations
         run: python manage.py makemigrations --check --dry-run
       - name: Test

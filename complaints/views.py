@@ -2,7 +2,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
 from django.contrib.auth.models import User
-from django.db.models import Q
+from django.db.models import F, Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.generic import ListView
 
@@ -50,7 +50,7 @@ class QueueView(LoginRequiredMixin, PermissionRequiredMixin, ListView):
         return (
             Complaint.objects.exclude(status__in=[Status.CLOSED, Status.DUPLICATE])
             .select_related("domain", "category", "assignee")
-            .order_by("due_at", "-created_at")
+            .order_by(F("due_at").asc(nulls_first=True), "-created_at")
         )
 
 
@@ -64,7 +64,7 @@ def submit(request):
             messages.error(request, "Domain, title and body are all required.")
             return redirect("complaint-submit")
         complaint = Complaint.objects.create(
-            domain=get_object_or_404(Domain, pk=domain_id),
+            domain=get_object_or_404(Domain, pk=domain_id, is_active=True),
             title=title,
             body=body,
             submitted_by=request.user,

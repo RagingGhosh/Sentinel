@@ -106,6 +106,20 @@ def test_creating_a_complaint_records_the_submitter(api):
 
 
 @pytest.mark.django_db
+def test_creating_a_complaint_against_an_inactive_domain_is_a_400(api):
+    bootstrap_groups()
+    user = UserFactory()
+    domain = DomainFactory(is_active=False)
+    api.force_authenticate(user)
+    response = api.post(
+        "/api/complaints/",
+        {"domain": domain.pk, "title": "Should not work", "body": "Inactive domain."},
+        format="json",
+    )
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
 def test_healthz_reports_model_registry_state(api):
     response = api.get("/healthz")
     assert response.status_code == 200

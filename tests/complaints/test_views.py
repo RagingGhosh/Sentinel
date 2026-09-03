@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from complaints.models import Complaint, Status
 from complaints.permissions import AGENT, bootstrap_groups
+from complaints.views import QueueView
 from tests.factories import CategoryFactory, ComplaintFactory, DomainFactory, UserFactory
 
 
@@ -243,6 +244,27 @@ def test_non_agent_cannot_close(client):
     assert response.status_code == 302
     complaint.refresh_from_db()
     assert complaint.status == Status.RESOLVED
+
+
+@pytest.mark.django_db
+def test_queue_orders_untriaged_complaints_before_triaged_ones_using_explicit_nulls_first():
+    """NULL due_at sorts first on SQLite by default but last on PostgreSQL. The
+    ordering must say NULLS FIRST explicitly so both backends agree."""
+    sql = str(QueueView().get_queryset().query)
+    assert "NULLS FIRST" in sql.upper()
+
+
+@pytest.mark.django_db
+def test_submit_rejects_an_inactive_domain(client):
+    user = UserFactory()
+    domain = DomainFactory(is_active=False)
+    client.force_login(user)
+    response = client.post(
+        reverse("complaint-submit"),
+        {"domain": domain.pk, "title": "Should not work", "body": "Inactive domain."},
+    )
+    assert response.status_code == 404
+    assert Complaint.objects.count() == 0
 
 
 @pytest.mark.django_db

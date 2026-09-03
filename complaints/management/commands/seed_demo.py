@@ -71,12 +71,16 @@ class Command(BaseCommand):
             first_category = pack_categories[0]
             second_category = pack_categories[1] if len(pack_categories) > 1 else first_category
 
+            # title has no unique constraint, so every lookup below is keyed on
+            # (title, submitted_by): a real user's complaint sharing a seeded
+            # title must never make get_or_create raise MultipleObjectsReturned.
+
             # One complaint left untouched, as submitted by the demo user.
             Complaint.objects.get_or_create(
                 title=f"Unreviewed {domain.name} report",
+                submitted_by=submitter,
                 defaults={
                     "domain": domain,
-                    "submitted_by": submitter,
                     "body": f"A newly submitted complaint awaiting triage in {domain.name}.",
                 },
             )
@@ -84,9 +88,9 @@ class Command(BaseCommand):
             # One complaint triaged via the service layer.
             triaged, created = Complaint.objects.get_or_create(
                 title=f"{first_category.name} issue reported in {domain.name}",
+                submitted_by=submitter,
                 defaults={
                     "domain": domain,
-                    "submitted_by": submitter,
                     "body": f"A {first_category.name.lower()} complaint awaiting agent review.",
                 },
             )
@@ -96,9 +100,9 @@ class Command(BaseCommand):
             # One complaint carried all the way through to resolved.
             resolved_complaint, created = Complaint.objects.get_or_create(
                 title=f"{second_category.name} issue resolved in {domain.name}",
+                submitted_by=submitter,
                 defaults={
                     "domain": domain,
-                    "submitted_by": submitter,
                     "body": f"A {second_category.name.lower()} complaint that has been "
                     "fully worked.",
                 },
@@ -111,9 +115,9 @@ class Command(BaseCommand):
             # One complaint marked as a duplicate of the first triaged complaint.
             duplicate_complaint, created = Complaint.objects.get_or_create(
                 title=f"Duplicate {first_category.name} report in {domain.name}",
+                submitted_by=submitter,
                 defaults={
                     "domain": domain,
-                    "submitted_by": submitter,
                     "body": "Same issue as another report already on file.",
                 },
             )

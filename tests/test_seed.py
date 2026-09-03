@@ -4,6 +4,7 @@ from django.core.management import call_command
 from complaints.models import Complaint
 from domains.models import Domain
 from domains.packs import PACKS
+from tests.factories import UserFactory
 
 
 @pytest.mark.django_db
@@ -25,6 +26,23 @@ def test_seed_is_idempotent():
     first = Complaint.objects.count()
     call_command("seed_demo")
     assert Complaint.objects.count() == first
+
+
+@pytest.mark.django_db
+def test_seed_is_not_confused_by_a_same_titled_complaint_from_another_user():
+    """title has no unique constraint. seed_demo must key on (title, submitted_by),
+    not title alone, or a real user's complaint sharing a seeded title raises
+    MultipleObjectsReturned on the next seed run -- and build.sh runs this on
+    every deploy with set -o errexit, so that aborts the deploy."""
+    call_command("seed_demo")
+    existing = Complaint.objects.first()
+    Complaint.objects.create(
+        title=existing.title,
+        domain=existing.domain,
+        submitted_by=UserFactory(),
+        body="An unrelated complaint that happens to share a seeded title.",
+    )
+    call_command("seed_demo")  # must not raise MultipleObjectsReturned
 
 
 class _ThirdPack:
