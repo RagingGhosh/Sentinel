@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Queue - Sentinel{% endblock %}
+
+{% block content %}
+    <h1>Agent queue</h1>
+
+    {% if complaints %}
+        <table>
+            <caption class="visually-hidden">Open complaints ordered by due date</caption>
+            <thead>
+                <tr>
+                    <th scope="col">Title</th>
+                    <th scope="col">Domain</th>
+                    <th scope="col">Category</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Assignee</th>
+                    <th scope="col">Due</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for complaint in complaints %}
+                    <tr class="{% if complaint.is_overdue %}row--overdue{% endif %}">
+                        <td><a href="{% url 'complaint-detail' complaint.pk %}">{{ complaint.title }}</a></td>
+                        <td>{{ complaint.domain.name }}</td>
+                        <td>{{ complaint.category.name|default:"Untriaged" }}</td>
+                        <td>{{ complaint.get_status_display }}</td>
+                        <td>{{ complaint.assignee.username|default:"Unassigned" }}</td>
+                        <td>
+                            {% if complaint.due_at %}
+                                <time datetime="{{ complaint.due_at|date:'c' }}">{{ complaint.due_at|date:"N j, Y H:i" }}</time>
+                            {% else %}
+                                &mdash;
+                            {% endif %}
+                            {% if complaint.is_overdue %}
+                                <span class="badge badge--overdue">Overdue</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if is_paginated %}
+            <nav class="pagination" aria-label="Queue pages">
+                {% if page_obj.has_previous %}
+                    <a href="?page={{ page_obj.previous_page_number }}">Previous</a>
+                {% endif %}
+                <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+                {% if page_obj.has_next %}
+                    <a href="?page={{ page_obj.next_page_number }}">Next</a>
+                {% endif %}
+            </nav>
+        {% endif %}
+    {% else %}
+        <p>The queue is empty.</p>
+    {% endif %}
+{% endblock %}

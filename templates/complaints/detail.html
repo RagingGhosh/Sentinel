@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+
+{% block title %}Complaint #{{ complaint.pk }} - Sentinel{% endblock %}
+
+{% block content %}
+    <h1>{{ complaint.title }}</h1>
+
+    <dl class="complaint-fields">
+        <dt>Domain</dt>
+        <dd>{{ complaint.domain.name }}</dd>
+
+        <dt>Category</dt>
+        <dd>{{ complaint.category.name|default:"Untriaged" }}</dd>
+
+        <dt>Priority</dt>
+        <dd>{{ complaint.get_priority_display|default:"Not set" }}</dd>
+
+        <dt>Status</dt>
+        <dd>{{ complaint.get_status_display }}</dd>
+
+        <dt>Submitted by</dt>
+        <dd>{{ complaint.submitted_by.username }}</dd>
+
+        <dt>Submitted</dt>
+        <dd><time datetime="{{ complaint.created_at|date:'c' }}">{{ complaint.created_at|date:"N j, Y H:i" }}</time></dd>
+
+        <dt>Due</dt>
+        <dd>
+            {% if complaint.due_at %}
+                <time datetime="{{ complaint.due_at|date:'c' }}">{{ complaint.due_at|date:"N j, Y H:i" }}</time>
+                {% if complaint.is_overdue %}<span class="badge badge--overdue">Overdue</span>{% endif %}
+            {% else %}
+                &mdash;
+            {% endif %}
+        </dd>
+    </dl>
+
+    <section class="complaint-body">
+        <h2>Description</h2>
+        <p>{{ complaint.body }}</p>
+    </section>
+
+    {# Phase 3 will render ML triage suggestions and duplicate candidates here,
+       sourced from complaints.models.Prediction. Left intentionally empty. #}
+
+    {% if perms.complaints.triage_complaint %}
+        <section class="triage-form">
+            <h2>Triage</h2>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="triage">
+
+                <div class="form-row">
+                    <label for="id_category">Category</label>
+                    <select name="category" id="id_category" required>
+                        <option value="" selected disabled>Choose a category&hellip;</option>
+                        {% for category in categories %}
+                            <option value="{{ category.pk }}">{{ category.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-row">
+                    <label for="id_priority">Priority</label>
+                    <select name="priority" id="id_priority" required>
+                        <option value="" selected disabled>Choose a priority&hellip;</option>
+                        {% for value, label in priorities %}
+                            <option value="{{ value }}">{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <button type="submit">Triage complaint</button>
+            </form>
+        </section>
+    {% endif %}
+
+    <section class="timeline">
+        <h2>History</h2>
+        {% if events %}
+            <ul class="timeline-list">
+                {% for event in events %}
+                    <li>
+                        <time datetime="{{ event.created_at|date:'c' }}">{{ event.created_at|date:"N j, Y H:i" }}</time>
+                        &mdash;
+                        {{ event.get_kind_display }}: {{ event.from_value|default:"—" }} &rarr; {{ event.to_value|default:"—" }}
+                        {% if event.actor %}<span class="timeline-actor">by {{ event.actor.username }}</span>{% endif %}
+                        {% if event.note %}<p class="timeline-note">{{ event.note }}</p>{% endif %}
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <p>No history yet.</p>
+        {% endif %}
+    </section>
+{% endblock %}

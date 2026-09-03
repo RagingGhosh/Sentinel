@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block title %}My complaints - Sentinel{% endblock %}
+
+{% block content %}
+    <h1>My complaints</h1>
+
+    <p><a href="{% url 'complaint-submit' %}">Submit a new complaint</a></p>
+
+    {% if complaints %}
+        <table>
+            <caption class="visually-hidden">Complaints you have submitted</caption>
+            <thead>
+                <tr>
+                    <th scope="col">Title</th>
+                    <th scope="col">Domain</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Submitted</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for complaint in complaints %}
+                    <tr>
+                        <td><a href="{% url 'complaint-detail' complaint.pk %}">{{ complaint.title }}</a></td>
+                        <td>{{ complaint.domain.name }}</td>
+                        <td>{{ complaint.get_status_display }}</td>
+                        <td><time datetime="{{ complaint.created_at|date:'c' }}">{{ complaint.created_at|date:"N j, Y" }}</time></td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if is_paginated %}
+            <nav class="pagination" aria-label="Complaint pages">
+                {% if page_obj.has_previous %}
+                    <a href="?page={{ page_obj.previous_page_number }}">Previous</a>
+                {% endif %}
+                <span>Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}</span>
+                {% if page_obj.has_next %}
+                    <a href="?page={{ page_obj.next_page_number }}">Next</a>
+                {% endif %}
+            </nav>
+        {% endif %}
+    {% else %}
+        <p>You have not submitted any complaints yet.</p>
+    {% endif %}
+{% endblock %}

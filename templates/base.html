@@ -1,0 +1,38 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Sentinel{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'css/sentinel.css' %}">
+</head>
+<body>
+    <nav class="site-nav">
+        <a class="brand" href="{% url 'complaint-list' %}">Sentinel</a>
+        <ul>
+            {% if user.is_authenticated %}
+                <li><a href="{% url 'complaint-list' %}">My complaints</a></li>
+                <li><a href="{% url 'complaint-submit' %}">Submit a complaint</a></li>
+                {% if perms.complaints.view_queue %}
+                    <li><a href="{% url 'complaint-queue' %}">Queue</a></li>
+                {% endif %}
+                <li><a href="{% url 'account_logout' %}">Log out ({{ user.username }})</a></li>
+            {% else %}
+                <li><a href="{% url 'account_login' %}">Log in</a></li>
+            {% endif %}
+        </ul>
+    </nav>
+
+    <main class="site-main">
+        {% if messages %}
+            <ul class="messages">
+                {% for message in messages %}
+                    <li class="message message--{{ message.tags }}">{{ message }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

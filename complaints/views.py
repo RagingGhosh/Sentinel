@@ -1,0 +1,85 @@
+from django.contrib import messages
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
+from django.shortcuts import get_object_or_404, redirect, render
+from django.views.generic import ListView
+
+from complaints import services
+from complaints.models import Complaint, Priority, Status
+from domains.models import Category, Domain
+
+
+class ComplaintListView(LoginRequiredMixin, ListView):
+    """A submitter's own complaints."""
+
+    template_name = "complaints/list.html"
+    context_object_name = "complaints"
+    paginate_by = 25
+
+    def get_queryset(self):
+        return Complaint.objects.filter(submitted_by=self.request.user).select_related(
+            "domain", "category"
+        )
+
+
+class QueueView(LoginRequiredMixin, PermissionRequiredMixin, ListView):
+    """The agent work queue: everything not yet finished."""
+
+    permission_required = "complaints.view_queue"
+    raise_exception = True
+    template_name = "complaints/queue.html"
+    context_object_name = "complaints"
+    paginate_by = 25
+
+    def get_queryset(self):
+        return (
+            Complaint.objects.exclude(status__in=[Status.CLOSED, Status.DUPLICATE])
+            .select_related("domain", "category", "assignee")
+            .order_by("due_at", "-created_at")
+        )
+
+
+@login_required
+def submit(request):
+    if request.method == "POST":
+        complaint = Complaint.objects.create(
+            domain=get_object_or_404(Domain, pk=request.POST["domain"]),
+            title=request.POST["title"],
+            body=request.POST["body"],
+            submitted_by=request.user,
+        )
+        return redirect("complaint-detail", pk=complaint.pk)
+    return render(
+        request, "complaints/submit.html", {"domains": Domain.objects.filter(is_active=True)}
+    )
+
+
+@login_required
+def detail(request, pk):
+    queryset = Complaint.objects.select_related("domain", "category", "submitted_by")
+    if not request.user.has_perm("complaints.view_queue"):
+        queryset = queryset.filter(submitted_by=request.user)
+    complaint = get_object_or_404(queryset, pk=pk)
+
+    if request.method == "POST":
+        action = request.POST.get("action")
+        try:
+            if action == "triage" and request.user.has_perm("complaints.triage_complaint"):
+                category = get_object_or_404(Category, pk=request.POST["category"])
+                services.triage(complaint, category, request.POST["priority"], request.user)
+            elif action == "resolve" and request.user.has_perm("complaints.resolve_complaint"):
+                services.resolve(complaint, request.user)
+        except services.InvalidTransition as exc:
+            messages.error(request, str(exc))
+        return redirect("complaint-detail", pk=complaint.pk)
+
+    return render(
+        request,
+        "complaints/detail.html",
+        {
+            "complaint": complaint,
+            "events": complaint.events.select_related("actor", "prediction"),
+            "categories": Category.objects.filter(domain=complaint.domain),
+            "priorities": Priority.choices,
+        },
+    )
