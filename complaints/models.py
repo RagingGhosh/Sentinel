@@ -200,11 +200,30 @@ class ComplaintEvent(models.Model):
 
     @property
     def was_prediction_accepted(self) -> bool | None:
-        """None when the decision responded to no suggestion."""
+        """Whether this decision matched the prediction it responded to.
+
+        Tri-state, not a boolean:
+        - None when the decision responded to no suggestion, or when the
+          suggestion's kind carries no accept/override verdict (RISK: a risk
+          score is not something a human accepts or overrides).
+        - True when the decision matches what was suggested (acceptance).
+        - False when it differs (override — the retraining signal).
+
+        The comparison is keyed off the prediction's kind because different
+        kinds carry differently shaped payloads: TRIAGE suggests a single
+        category_slug, DEDUP suggests a list of candidate matches, and RISK
+        suggests neither.
+        """
         if self.prediction is None:
             return None
-        suggested = self.prediction.payload.get("category_slug")
-        return suggested == self.to_value
+        if self.prediction.kind == PredictionKind.TRIAGE:
+            suggested = self.prediction.payload.get("category_slug")
+            return suggested == self.to_value
+        if self.prediction.kind == PredictionKind.DEDUP:
+            matches = self.prediction.payload.get("matches", [])
+            suggested_ids = {str(match["complaint_id"]) for match in matches}
+            return self.to_value in suggested_ids
+        return None
 
     def __str__(self) -> str:
         return f"{self.kind}: {self.from_value} -> {self.to_value}"

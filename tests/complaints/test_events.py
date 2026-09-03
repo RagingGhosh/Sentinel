@@ -1,6 +1,6 @@
 import pytest
 
-from complaints.models import ComplaintEvent, EventKind
+from complaints.models import ComplaintEvent, EventKind, PredictionKind
 from tests.factories import ComplaintFactory, PredictionFactory, UserFactory
 
 
@@ -47,3 +47,61 @@ def test_differing_decision_counts_as_override():
         prediction=prediction,
     )
     assert event.was_prediction_accepted is False
+
+
+@pytest.mark.django_db
+def test_dedup_decision_matching_a_suggested_complaint_counts_as_acceptance():
+    complaint = ComplaintFactory()
+    canonical = ComplaintFactory()
+    prediction = PredictionFactory(
+        complaint=complaint,
+        kind=PredictionKind.DEDUP,
+        payload={"matches": [{"complaint_id": canonical.id, "similarity": 0.95}]},
+    )
+    event = ComplaintEvent.objects.create(
+        complaint=complaint,
+        kind=EventKind.DUPLICATE,
+        to_value=str(canonical.id),
+        actor=UserFactory(),
+        prediction=prediction,
+    )
+    assert event.was_prediction_accepted is True
+
+
+@pytest.mark.django_db
+def test_dedup_decision_naming_an_unsuggested_complaint_counts_as_override():
+    complaint = ComplaintFactory()
+    canonical = ComplaintFactory()
+    other = ComplaintFactory()
+    prediction = PredictionFactory(
+        complaint=complaint,
+        kind=PredictionKind.DEDUP,
+        payload={"matches": [{"complaint_id": canonical.id, "similarity": 0.95}]},
+    )
+    event = ComplaintEvent.objects.create(
+        complaint=complaint,
+        kind=EventKind.DUPLICATE,
+        to_value=str(other.id),
+        actor=UserFactory(),
+        prediction=prediction,
+    )
+    assert event.was_prediction_accepted is False
+
+
+@pytest.mark.django_db
+def test_risk_prediction_has_no_acceptance_verdict():
+    """A risk score is not something a human accepts or overrides."""
+    complaint = ComplaintFactory()
+    prediction = PredictionFactory(
+        complaint=complaint,
+        kind=PredictionKind.RISK,
+        payload={"band": "high", "score": 0.8},
+    )
+    event = ComplaintEvent.objects.create(
+        complaint=complaint,
+        kind=EventKind.PRIORITY,
+        to_value="high",
+        actor=UserFactory(),
+        prediction=prediction,
+    )
+    assert event.was_prediction_accepted is None
