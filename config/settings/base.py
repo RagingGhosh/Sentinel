@@ -108,6 +108,13 @@ LOGOUT_REDIRECT_URL = "/"
 # Model artifact versions pinned per domain/model. Phase 1 ships none.
 ML_ARTIFACT_VERSIONS: dict[str, dict[str, str]] = {}
 
+REST_FRAMEWORK = {
+    "DEFAULT_AUTHENTICATION_CLASSES": ["rest_framework.authentication.SessionAuthentication"],
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 25,
+}
+
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
