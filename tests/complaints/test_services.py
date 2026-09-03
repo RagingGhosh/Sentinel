@@ -93,6 +93,62 @@ def test_triage_rejects_a_category_from_another_domain():
 
 
 @pytest.mark.django_db
+def test_retriage_does_not_move_triaged_at():
+    """triaged_at is the human's first confirmation; correcting the category later
+    must not restart the SLA clock."""
+    category = CategoryFactory(sla_hours=48)
+    other_category = CategoryFactory(domain=category.domain, sla_hours=24)
+    complaint = ComplaintFactory(domain=category.domain)
+    actor = UserFactory()
+
+    services.triage(complaint, category, Priority.LOW, actor)
+    complaint.refresh_from_db()
+    first_triaged_at = complaint.triaged_at
+
+    services.triage(complaint, other_category, Priority.HIGH, actor)
+    complaint.refresh_from_db()
+    assert complaint.triaged_at == first_triaged_at
+
+
+@pytest.mark.django_db
+def test_retriage_into_a_different_sla_category_recomputes_due_at_from_the_original_triaged_at():
+    category = CategoryFactory(sla_hours=48)
+    other_category = CategoryFactory(domain=category.domain, sla_hours=10)
+    complaint = ComplaintFactory(domain=category.domain)
+    actor = UserFactory()
+
+    services.triage(complaint, category, Priority.LOW, actor)
+    complaint.refresh_from_db()
+    original_triaged_at = complaint.triaged_at
+
+    services.triage(complaint, other_category, Priority.HIGH, actor)
+    complaint.refresh_from_db()
+    assert complaint.due_at == original_triaged_at + timedelta(hours=10)
+
+
+@pytest.mark.django_db
+def test_retriage_into_a_shorter_sla_can_leave_the_complaint_already_overdue():
+    """A late correction is not erased: it is the honest reading of a breach."""
+    category = CategoryFactory(sla_hours=72)
+    short_category = CategoryFactory(domain=category.domain, sla_hours=1)
+    complaint = ComplaintFactory(domain=category.domain)
+    actor = UserFactory()
+
+    services.triage(complaint, category, Priority.LOW, actor)
+    complaint.refresh_from_db()
+
+    # Simulate this complaint having been triaged three hours ago.
+    three_hours_ago = complaint.triaged_at - timedelta(hours=3)
+    type(complaint).objects.filter(pk=complaint.pk).update(triaged_at=three_hours_ago)
+    complaint.refresh_from_db()
+
+    services.triage(complaint, short_category, Priority.HIGH, actor)
+    complaint.refresh_from_db()
+    assert complaint.due_at == three_hours_ago + timedelta(hours=1)
+    assert complaint.is_overdue
+
+
+@pytest.mark.django_db
 def test_resolve_stamps_resolved_at():
     category = CategoryFactory(sla_hours=24)
     complaint = ComplaintFactory(domain=category.domain)

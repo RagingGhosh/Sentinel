@@ -63,10 +63,23 @@ def triage(
     actor,
     prediction: Prediction | None = None,
 ) -> ComplaintEvent:
-    """Human confirmation of category and priority. Starts the SLA clock.
+    """Human confirmation of category and priority. Starts the SLA clock once.
 
-    triaged_at is set here and nowhere else. A model predicting instantly does
-    not start the clock; a human confirming does.
+    triaged_at is set on the *first* triage and is immutable after that: the
+    first human confirmation is the moment the clock starts, and it never
+    moves, even across a later re-triage. due_at, by contrast, is recomputed
+    from triaged_at on *every* triage call, as triaged_at + the confirmed
+    category's sla_hours -- so correcting a mis-categorisation adjusts the
+    deadline to the corrected SLA without ever discarding elapsed time.
+
+    This is a deliberate controller ruling, not an oversight. Restarting the
+    clock on re-triage would erase an in-flight breach; freezing due_at too
+    would lock in a wrong deadline after a legitimate category correction.
+    Both were rejected. The consequence, not a bug: a complaint re-triaged
+    into a shorter-SLA category can come out already overdue. That is the
+    honest reading of a late correction, and `due_at` is left in the past
+    rather than bumped to "now" -- resolved_at > due_at must stay a reliable
+    breach signal for the Phase 3 risk model's training labels.
     """
     if category.domain_id != complaint.domain_id:
         raise InvalidTransition(
@@ -78,11 +91,11 @@ def triage(
     previous_category = complaint.category.slug if complaint.category else None
     previous_priority = complaint.priority
 
-    now = timezone.now()
+    triaged_at = complaint.triaged_at or timezone.now()
     complaint.category = category
     complaint.priority = priority
-    complaint.triaged_at = now
-    complaint.due_at = now + timedelta(hours=category.sla_hours)
+    complaint.triaged_at = triaged_at
+    complaint.due_at = triaged_at + timedelta(hours=category.sla_hours)
     complaint.save()
 
     category_event = ComplaintEvent.objects.create(
