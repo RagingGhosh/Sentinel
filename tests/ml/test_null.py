@@ -1,4 +1,4 @@
-from ml.base import RiskFeatures
+from ml.base import Match, RiskFeatures
 from ml.null import NullDedupIndex, NullRiskModel, NullTriageModel
 
 FEATURES = RiskFeatures(
@@ -41,3 +41,9 @@ def test_results_are_immutable():
     prediction = NullTriageModel().predict("text")
     with pytest.raises(dataclasses.FrozenInstanceError):
         prediction.confidence = 0.99  # type: ignore[misc]
+
+
+def test_match_carries_model_version():
+    """Matches feed a Prediction row in Phase 3; the version must travel with them."""
+    match = Match(complaint_id=42, similarity=0.87, model_version="null")
+    assert match.model_version == "null"

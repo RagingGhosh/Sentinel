@@ -19,6 +19,7 @@ class TriagePrediction:
 class Match:
     complaint_id: int
     similarity: float
+    model_version: str
 
 
 @dataclass(frozen=True)
