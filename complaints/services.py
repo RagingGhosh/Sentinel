@@ -124,3 +124,51 @@ def assign(complaint: Complaint, assignee, actor) -> ComplaintEvent:
 
 def resolve(complaint: Complaint, actor, note: str = "") -> ComplaintEvent:
     return transition(complaint, Status.RESOLVED, actor, note=note)
+
+
+@transaction.atomic
+def mark_duplicate(
+    complaint: Complaint,
+    canonical: Complaint,
+    actor,
+    prediction: Prediction | None = None,
+) -> ComplaintEvent:
+    """Mark `complaint` as a duplicate of `canonical`.
+
+    The database enforces "not itself" and "must have a canonical". The chain
+    rule needs a query, so it lives here: a canonical may not itself be a
+    duplicate, which keeps every duplicate exactly one hop from a real
+    complaint and makes cycles impossible.
+    """
+    if complaint.pk == canonical.pk:
+        raise InvalidTransition("A complaint cannot be a duplicate of itself")
+    if canonical.duplicate_of_id is not None or canonical.status == Status.DUPLICATE:
+        raise InvalidTransition(
+            f"Complaint #{canonical.pk} is itself a duplicate; point at its canonical instead"
+        )
+    if complaint.domain_id != canonical.domain_id:
+        raise InvalidTransition("Complaints in different domains cannot be duplicates")
+
+    from_status = complaint.status
+    if Status.DUPLICATE not in ALLOWED_TRANSITIONS[from_status]:
+        raise InvalidTransition(f"Cannot mark a {from_status} complaint as a duplicate")
+
+    complaint.duplicate_of = canonical
+    complaint.status = Status.DUPLICATE
+    complaint.save()
+
+    ComplaintEvent.objects.create(
+        complaint=complaint,
+        kind=EventKind.STATUS,
+        from_value=from_status,
+        to_value=Status.DUPLICATE,
+        actor=actor,
+    )
+    return ComplaintEvent.objects.create(
+        complaint=complaint,
+        kind=EventKind.DUPLICATE,
+        from_value=None,
+        to_value=str(canonical.pk),
+        actor=actor,
+        prediction=prediction,
+    )
