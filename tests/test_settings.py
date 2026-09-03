@@ -1,7 +1,9 @@
 import importlib
 
 import pytest
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.urls import resolve
 
 
 def test_secret_key_has_no_default(monkeypatch):
@@ -28,3 +30,9 @@ def test_oauth_credentials_come_from_environment(monkeypatch):
     app = module.SOCIALACCOUNT_PROVIDERS["google"]["APP"]
     assert app["client_id"] == "id-from-env"
     assert app["secret"] == "secret-from-env"
+
+
+def test_login_redirect_url_actually_resolves():
+    """A future URL rename must break loudly here, not send every login to a 404."""
+    match = resolve(str(settings.LOGIN_REDIRECT_URL))
+    assert match.url_name == "complaint-list"

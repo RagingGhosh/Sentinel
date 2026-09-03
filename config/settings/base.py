@@ -2,6 +2,7 @@ from pathlib import Path
 
 import environ
 from django.core.exceptions import ImproperlyConfigured
+from django.urls import reverse_lazy
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -101,7 +102,7 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-LOGIN_REDIRECT_URL = "/complaints/"
+LOGIN_REDIRECT_URL = reverse_lazy("complaint-list")
 LOGOUT_REDIRECT_URL = "/"
 
 # Model artifact versions pinned per domain/model. Phase 1 ships none.
