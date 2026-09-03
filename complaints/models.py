@@ -107,6 +107,25 @@ class PredictionKind(models.TextChoices):
     RISK = "risk", "SLA risk"
 
 
+class PredictionQuerySet(models.QuerySet):
+    """Closes the bulk-write path that instance save()/delete() overrides can't reach.
+
+    QuerySet.update()/delete() compile straight to SQL without instantiating a model,
+    so they bypass Prediction.save()/delete(). This is not a security boundary — raw
+    SQL still gets around it — it just stops accidental rewrites from application code.
+
+    Django's own cascade delete (e.g. Complaint.delete() removing its Predictions) goes
+    through Collector.delete_batch() rather than this QuerySet.delete(), so it is
+    unaffected by this override.
+    """
+
+    def update(self, **kwargs):
+        raise ImmutableRecordError("Prediction rows are append-only and cannot be updated")
+
+    def delete(self):
+        raise ImmutableRecordError("Prediction rows are append-only and cannot be deleted")
+
+
 class Prediction(models.Model):
     """Append-only model output.
 
@@ -123,6 +142,8 @@ class Prediction(models.Model):
     model_name = models.CharField(max_length=100)
     model_version = models.CharField(max_length=50)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = PredictionQuerySet.as_manager()
 
     class Meta:
         ordering = ["-created_at"]
