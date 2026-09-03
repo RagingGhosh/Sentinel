@@ -11,6 +11,9 @@ data/raw/
 data/interim/
 ml/artifacts/**/*.onnx
 
+# collectstatic output — a build artifact, not source
+staticfiles/
+
 # Python
 __pycache__/
 *.py[cod]

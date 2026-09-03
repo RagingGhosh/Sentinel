@@ -1,0 +1,41 @@
+# Render Blueprint. Deploy by connecting this repo in the Render dashboard
+# ("New +" -> "Blueprint") and pointing it at this file.
+#
+# Secrets are never set here. SECRET_KEY, ALLOWED_HOSTS, GOOGLE_CLIENT_ID and
+# GOOGLE_CLIENT_SECRET are marked `sync: false` below, which tells Render to
+# prompt for them in its dashboard instead of reading a value from this file
+# or from git history.
+#
+# Worker count (2) is provisional. Phase 3 measures RSS under load and fixes
+# it properly; if two workers do not fit in the instance's memory, the
+# answer is one.
+databases:
+  - name: sentinel-db
+    plan: free
+    databaseName: sentinel
+    user: sentinel
+
+services:
+  - type: web
+    name: sentinel
+    runtime: python
+    plan: free
+    buildCommand: "./build.sh"
+    startCommand: "gunicorn config.wsgi:application --preload --workers 2"
+    envVars:
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings.prod
+      - key: PYTHON_VERSION
+        value: 3.13.3
+      - key: SECRET_KEY
+        sync: false
+      - key: ALLOWED_HOSTS
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sentinel-db
+          property: connectionString
