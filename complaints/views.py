@@ -42,10 +42,16 @@ class QueueView(LoginRequiredMixin, PermissionRequiredMixin, ListView):
 @login_required
 def submit(request):
     if request.method == "POST":
+        domain_id = request.POST.get("domain", "").strip()
+        title = request.POST.get("title", "").strip()
+        body = request.POST.get("body", "").strip()
+        if not domain_id or not title or not body:
+            messages.error(request, "Domain, title and body are all required.")
+            return redirect("complaint-submit")
         complaint = Complaint.objects.create(
-            domain=get_object_or_404(Domain, pk=request.POST["domain"]),
-            title=request.POST["title"],
-            body=request.POST["body"],
+            domain=get_object_or_404(Domain, pk=domain_id),
+            title=title,
+            body=body,
             submitted_by=request.user,
         )
         return redirect("complaint-detail", pk=complaint.pk)
@@ -65,8 +71,13 @@ def detail(request, pk):
         action = request.POST.get("action")
         try:
             if action == "triage" and request.user.has_perm("complaints.triage_complaint"):
-                category = get_object_or_404(Category, pk=request.POST["category"])
-                services.triage(complaint, category, request.POST["priority"], request.user)
+                category_id = request.POST.get("category", "").strip()
+                priority = request.POST.get("priority", "").strip()
+                if not category_id or not priority:
+                    messages.error(request, "Category and priority are both required to triage.")
+                else:
+                    category = get_object_or_404(Category, pk=category_id)
+                    services.triage(complaint, category, priority, request.user)
             elif action == "resolve" and request.user.has_perm("complaints.resolve_complaint"):
                 services.resolve(complaint, request.user)
         except services.InvalidTransition as exc:

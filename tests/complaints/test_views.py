@@ -76,3 +76,37 @@ def test_agent_triage_form_moves_the_complaint_to_in_review(client):
     complaint.refresh_from_db()
     assert complaint.status == Status.IN_REVIEW
     assert complaint.due_at is not None
+
+
+@pytest.mark.django_db
+def test_submit_missing_title_does_not_create_a_complaint_or_500(client):
+    bootstrap_groups()
+    user = UserFactory()
+    domain = DomainFactory()
+    client.force_login(user)
+    client.raise_request_exception = False
+    response = client.post(
+        reverse("complaint-submit"),
+        {"domain": domain.pk, "body": "Billed twice in March."},
+    )
+    assert response.status_code in (200, 302)
+    assert Complaint.objects.count() == 0
+
+
+@pytest.mark.django_db
+def test_triage_missing_priority_does_not_change_the_complaint_or_500(client):
+    bootstrap_groups()
+    agent = UserFactory()
+    agent.groups.add(Group.objects.get(name=AGENT))
+    category = CategoryFactory(sla_hours=12)
+    complaint = ComplaintFactory(domain=category.domain)
+    client.force_login(agent)
+    client.raise_request_exception = False
+    response = client.post(
+        reverse("complaint-detail", args=[complaint.pk]),
+        {"action": "triage", "category": category.pk},
+    )
+    assert response.status_code in (200, 302)
+    complaint.refresh_from_db()
+    assert complaint.status == Status.SUBMITTED
+    assert complaint.due_at is None
