@@ -139,3 +139,51 @@ class Prediction(models.Model):
 
     def __str__(self) -> str:
         return f"{self.kind}@{self.model_version} for #{self.complaint_id}"
+
+
+class EventKind(models.TextChoices):
+    STATUS = "status", "Status change"
+    CATEGORY = "category", "Category change"
+    PRIORITY = "priority", "Priority change"
+    ASSIGNMENT = "assignment", "Assignment change"
+    DUPLICATE = "duplicate", "Duplicate decision"
+
+
+class ComplaintEvent(models.Model):
+    """Who changed what, when, from what, to what, and why.
+
+    When a decision responds to a model suggestion, `prediction` is set. A
+    to_value matching the prediction is an acceptance; a differing one is an
+    override. Querying overrides gives the retraining corpus.
+    """
+
+    complaint = models.ForeignKey(Complaint, on_delete=models.CASCADE, related_name="events")
+    kind = models.CharField(max_length=20, choices=EventKind.choices)
+    from_value = models.CharField(max_length=200, null=True, blank=True)
+    to_value = models.CharField(max_length=200, null=True, blank=True)
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="complaint_events",
+    )
+    prediction = models.ForeignKey(
+        "Prediction", on_delete=models.SET_NULL, null=True, blank=True, related_name="decisions"
+    )
+    note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [models.Index(fields=["complaint", "created_at"])]
+
+    @property
+    def was_prediction_accepted(self) -> bool | None:
+        """None when the decision responded to no suggestion."""
+        if self.prediction is None:
+            return None
+        suggested = self.prediction.payload.get("category_slug")
+        return suggested == self.to_value
+
+    def __str__(self) -> str:
+        return f"{self.kind}: {self.from_value} -> {self.to_value}"
