@@ -1,6 +1,7 @@
 import pytest
 from django.contrib.auth.models import Group
 from django.urls import reverse
+from django.utils import timezone
 
 from complaints.models import Complaint, Status
 from complaints.permissions import AGENT, bootstrap_groups
@@ -110,3 +111,162 @@ def test_triage_missing_priority_does_not_change_the_complaint_or_500(client):
     complaint.refresh_from_db()
     assert complaint.status == Status.SUBMITTED
     assert complaint.due_at is None
+
+
+@pytest.mark.django_db
+def test_agent_can_start_work_on_an_in_review_complaint(client):
+    bootstrap_groups()
+    agent = UserFactory()
+    agent.groups.add(Group.objects.get(name=AGENT))
+    complaint = ComplaintFactory(status=Status.IN_REVIEW)
+    client.force_login(agent)
+    response = client.post(
+        reverse("complaint-detail", args=[complaint.pk]),
+        {"action": "start_work"},
+    )
+    assert response.status_code == 302
+    complaint.refresh_from_db()
+    assert complaint.status == Status.IN_PROGRESS
+
+
+@pytest.mark.django_db
+def test_non_agent_cannot_start_work(client):
+    bootstrap_groups()
+    submitter = UserFactory()
+    complaint = ComplaintFactory(status=Status.IN_REVIEW, submitted_by=submitter)
+    client.force_login(submitter)
+    response = client.post(
+        reverse("complaint-detail", args=[complaint.pk]),
+        {"action": "start_work"},
+    )
+    assert response.status_code == 302
+    complaint.refresh_from_db()
+    assert complaint.status == Status.IN_REVIEW
+
+
+@pytest.mark.django_db
+def test_agent_can_assign_a_complaint(client):
+    bootstrap_groups()
+    agent = UserFactory()
+    agent.groups.add(Group.objects.get(name=AGENT))
+    assignee = UserFactory()
+    assignee.groups.add(Group.objects.get(name=AGENT))
+    complaint = ComplaintFactory()
+    client.force_login(agent)
+    response = client.post(
+        reverse("complaint-detail", args=[complaint.pk]),
+        {"action": "assign", "assignee": assignee.pk},
+    )
+    assert response.status_code == 302
+    complaint.refresh_from_db()
+    assert complaint.assignee == assignee
+
+
+@pytest.mark.django_db
+def test_non_agent_cannot_assign(client):
+    bootstrap_groups()
+    submitter = UserFactory()
+    other = UserFactory()
+    complaint = ComplaintFactory(submitted_by=submitter)
+    client.force_login(submitter)
+    response = client.post(
+        reverse("complaint-detail", args=[complaint.pk]),
+        {"action": "assign", "assignee": other.pk},
+    )
+    assert response.status_code == 302
+    complaint.refresh_from_db()
+    assert complaint.assignee is None
+
+
+@pytest.mark.django_db
+def test_agent_can_mark_a_complaint_duplicate(client):
+    bootstrap_groups()
+    agent = UserFactory()
+    agent.groups.add(Group.objects.get(name=AGENT))
+    canonical = ComplaintFactory()
+    duplicate = ComplaintFactory(domain=canonical.domain)
+    client.force_login(agent)
+    response = client.post(
+        reverse("complaint-detail", args=[duplicate.pk]),
+        {"action": "mark_duplicate", "canonical": canonical.pk},
+    )
+    assert response.status_code == 302
+    duplicate.refresh_from_db()
+    assert duplicate.status == Status.DUPLICATE
+    assert duplicate.duplicate_of == canonical
+
+
+@pytest.mark.django_db
+def test_non_agent_cannot_mark_duplicate(client):
+    bootstrap_groups()
+    submitter = UserFactory()
+    canonical = ComplaintFactory()
+    duplicate = ComplaintFactory(domain=canonical.domain, submitted_by=submitter)
+    client.force_login(submitter)
+    response = client.post(
+        reverse("complaint-detail", args=[duplicate.pk]),
+        {"action": "mark_duplicate", "canonical": canonical.pk},
+    )
+    assert response.status_code == 302
+    duplicate.refresh_from_db()
+    assert duplicate.status == Status.SUBMITTED
+
+
+@pytest.mark.django_db
+def test_agent_can_close_a_resolved_complaint(client):
+    bootstrap_groups()
+    agent = UserFactory()
+    agent.groups.add(Group.objects.get(name=AGENT))
+    complaint = ComplaintFactory(status=Status.RESOLVED, resolved_at=timezone.now())
+    client.force_login(agent)
+    response = client.post(
+        reverse("complaint-detail", args=[complaint.pk]),
+        {"action": "close"},
+    )
+    assert response.status_code == 302
+    complaint.refresh_from_db()
+    assert complaint.status == Status.CLOSED
+
+
+@pytest.mark.django_db
+def test_non_agent_cannot_close(client):
+    bootstrap_groups()
+    submitter = UserFactory()
+    complaint = ComplaintFactory(
+        status=Status.RESOLVED, resolved_at=timezone.now(), submitted_by=submitter
+    )
+    client.force_login(submitter)
+    response = client.post(
+        reverse("complaint-detail", args=[complaint.pk]),
+        {"action": "close"},
+    )
+    assert response.status_code == 302
+    complaint.refresh_from_db()
+    assert complaint.status == Status.RESOLVED
+
+
+@pytest.mark.django_db
+def test_full_lifecycle_is_walkable_through_the_views(client):
+    bootstrap_groups()
+    agent = UserFactory()
+    agent.groups.add(Group.objects.get(name=AGENT))
+    category = CategoryFactory(sla_hours=48)
+    complaint = ComplaintFactory(domain=category.domain)
+    client.force_login(agent)
+    detail_url = reverse("complaint-detail", args=[complaint.pk])
+
+    client.post(detail_url, {"action": "triage", "category": category.pk, "priority": "high"})
+    complaint.refresh_from_db()
+    assert complaint.status == Status.IN_REVIEW
+
+    client.post(detail_url, {"action": "start_work"})
+    complaint.refresh_from_db()
+    assert complaint.status == Status.IN_PROGRESS
+
+    client.post(detail_url, {"action": "resolve"})
+    complaint.refresh_from_db()
+    assert complaint.status == Status.RESOLVED
+
+    client.post(detail_url, {"action": "close"})
+    complaint.refresh_from_db()
+    assert complaint.status == Status.CLOSED

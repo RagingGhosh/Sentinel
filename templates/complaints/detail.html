@@ -75,6 +75,78 @@
         </section>
     {% endif %}
 
+    {% if can_start_work %}
+        <section class="start-work-form">
+            <h2>Start work</h2>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="start_work">
+                <button type="submit">Start work</button>
+            </form>
+        </section>
+    {% endif %}
+
+    {% if can_assign %}
+        <section class="assign-form">
+            <h2>Assign</h2>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="assign">
+
+                <div class="form-row">
+                    <label for="id_assignee">Assignee</label>
+                    <select name="assignee" id="id_assignee" required>
+                        <option value="" selected disabled>Choose an agent&hellip;</option>
+                        {% for candidate in assignable_users %}
+                            <option value="{{ candidate.pk }}">{{ candidate.username }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <button type="submit">Assign</button>
+            </form>
+        </section>
+    {% endif %}
+
+    {% if can_mark_duplicate %}
+        <section class="mark-duplicate-form">
+            <h2>Mark as duplicate</h2>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="mark_duplicate">
+
+                <div class="form-row">
+                    <label for="id_canonical">Canonical complaint ID</label>
+                    <input type="number" name="canonical" id="id_canonical" min="1" required>
+                </div>
+
+                <button type="submit">Mark as duplicate</button>
+            </form>
+        </section>
+    {% endif %}
+
+    {% if can_resolve %}
+        <section class="resolve-form">
+            <h2>Resolve</h2>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="resolve">
+                <button type="submit">Resolve</button>
+            </form>
+        </section>
+    {% endif %}
+
+    {% if can_close %}
+        <section class="close-form">
+            <h2>Close</h2>
+            <form method="post">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="close">
+                <button type="submit">Close</button>
+            </form>
+        </section>
+    {% endif %}
+
     <section class="timeline">
         <h2>History</h2>
         {% if events %}

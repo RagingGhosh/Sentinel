@@ -110,3 +110,150 @@ def test_healthz_reports_model_registry_state(api):
     response = api.get("/healthz")
     assert response.status_code == 200
     assert response.data["models"]["cfpb"]["triage"] == "null"
+
+
+@pytest.mark.django_db
+def test_retrieve_a_single_complaint(api, agent):
+    complaint = ComplaintFactory()
+    api.force_authenticate(agent)
+    response = api.get(f"/api/complaints/{complaint.pk}/")
+    assert response.status_code == 200
+    assert response.data["id"] == complaint.pk
+
+
+@pytest.mark.django_db
+def test_agent_can_resolve_via_api(api, agent):
+    complaint = ComplaintFactory(status=Status.IN_PROGRESS)
+    api.force_authenticate(agent)
+    response = api.post(f"/api/complaints/{complaint.pk}/resolve/")
+    assert response.status_code == 200
+    complaint.refresh_from_db()
+    assert complaint.status == Status.RESOLVED
+    assert complaint.resolved_at is not None
+
+
+@pytest.mark.django_db
+def test_submitter_cannot_resolve_via_api(api):
+    bootstrap_groups()
+    submitter = UserFactory()
+    complaint = ComplaintFactory(submitted_by=submitter, status=Status.IN_PROGRESS)
+    api.force_authenticate(submitter)
+    response = api.post(f"/api/complaints/{complaint.pk}/resolve/")
+    assert response.status_code == 403
+    complaint.refresh_from_db()
+    assert complaint.status == Status.IN_PROGRESS
+
+
+@pytest.mark.django_db
+def test_resolve_an_illegal_transition_is_a_400_not_a_500(api, agent):
+    complaint = ComplaintFactory()  # still SUBMITTED; resolve is not legal from here
+    api.force_authenticate(agent)
+    response = api.post(f"/api/complaints/{complaint.pk}/resolve/")
+    assert response.status_code == 400
+    complaint.refresh_from_db()
+    assert complaint.status == Status.SUBMITTED
+
+
+@pytest.mark.django_db
+def test_agent_can_start_work_via_api(api, agent):
+    complaint = ComplaintFactory(status=Status.IN_REVIEW)
+    api.force_authenticate(agent)
+    response = api.post(f"/api/complaints/{complaint.pk}/start_work/")
+    assert response.status_code == 200
+    complaint.refresh_from_db()
+    assert complaint.status == Status.IN_PROGRESS
+
+
+@pytest.mark.django_db
+def test_submitter_cannot_start_work_via_api(api):
+    bootstrap_groups()
+    submitter = UserFactory()
+    complaint = ComplaintFactory(submitted_by=submitter, status=Status.IN_REVIEW)
+    api.force_authenticate(submitter)
+    response = api.post(f"/api/complaints/{complaint.pk}/start_work/")
+    assert response.status_code == 403
+    complaint.refresh_from_db()
+    assert complaint.status == Status.IN_REVIEW
+
+
+@pytest.mark.django_db
+def test_agent_can_assign_via_api(api, agent):
+    assignee = UserFactory()
+    complaint = ComplaintFactory()
+    api.force_authenticate(agent)
+    response = api.post(
+        f"/api/complaints/{complaint.pk}/assign/", {"assignee": assignee.pk}, format="json"
+    )
+    assert response.status_code == 200
+    complaint.refresh_from_db()
+    assert complaint.assignee == assignee
+
+
+@pytest.mark.django_db
+def test_submitter_cannot_assign_via_api(api):
+    bootstrap_groups()
+    submitter = UserFactory()
+    assignee = UserFactory()
+    complaint = ComplaintFactory(submitted_by=submitter)
+    api.force_authenticate(submitter)
+    response = api.post(
+        f"/api/complaints/{complaint.pk}/assign/", {"assignee": assignee.pk}, format="json"
+    )
+    assert response.status_code == 403
+    complaint.refresh_from_db()
+    assert complaint.assignee is None
+
+
+@pytest.mark.django_db
+def test_agent_can_mark_duplicate_via_api(api, agent):
+    canonical = ComplaintFactory()
+    duplicate = ComplaintFactory(domain=canonical.domain)
+    api.force_authenticate(agent)
+    response = api.post(
+        f"/api/complaints/{duplicate.pk}/mark_duplicate/",
+        {"canonical": canonical.pk},
+        format="json",
+    )
+    assert response.status_code == 200
+    duplicate.refresh_from_db()
+    assert duplicate.status == Status.DUPLICATE
+    assert duplicate.duplicate_of == canonical
+
+
+@pytest.mark.django_db
+def test_submitter_cannot_mark_duplicate_via_api(api):
+    bootstrap_groups()
+    submitter = UserFactory()
+    canonical = ComplaintFactory()
+    duplicate = ComplaintFactory(domain=canonical.domain, submitted_by=submitter)
+    api.force_authenticate(submitter)
+    response = api.post(
+        f"/api/complaints/{duplicate.pk}/mark_duplicate/",
+        {"canonical": canonical.pk},
+        format="json",
+    )
+    assert response.status_code == 403
+    duplicate.refresh_from_db()
+    assert duplicate.status == Status.SUBMITTED
+
+
+@pytest.mark.django_db
+def test_agent_can_close_a_resolved_complaint_via_api(api, agent):
+    complaint = ComplaintFactory(status=Status.RESOLVED)
+    api.force_authenticate(agent)
+    response = api.post(f"/api/complaints/{complaint.pk}/close/")
+    assert response.status_code == 200
+    complaint.refresh_from_db()
+    assert complaint.status == Status.CLOSED
+
+
+@pytest.mark.django_db
+def test_submitter_cannot_close_via_api(api):
+    bootstrap_groups()
+    submitter = UserFactory()
+    complaint = ComplaintFactory(submitted_by=submitter, status=Status.RESOLVED)
+    api.force_authenticate(submitter)
+    response = api.post(f"/api/complaints/{complaint.pk}/close/")
+    assert response.status_code == 403
+    complaint.refresh_from_db()
+    assert complaint.status == Status.RESOLVED

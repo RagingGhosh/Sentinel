@@ -1,12 +1,27 @@
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
+from django.contrib.auth.models import User
+from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.generic import ListView
 
 from complaints import services
 from complaints.models import Complaint, Priority, Status
 from domains.models import Category, Domain
+
+
+def _assignable_users():
+    """Users who hold complaints.view_queue: a reasonable pool for assignment."""
+    return (
+        User.objects.filter(
+            Q(groups__permissions__codename="view_queue")
+            | Q(user_permissions__codename="view_queue")
+            | Q(is_superuser=True)
+        )
+        .distinct()
+        .order_by("username")
+    )
 
 
 class ComplaintListView(LoginRequiredMixin, ListView):
@@ -78,12 +93,33 @@ def detail(request, pk):
                 else:
                     category = get_object_or_404(Category, pk=category_id)
                     services.triage(complaint, category, priority, request.user)
+            elif action == "start_work" and request.user.has_perm("complaints.triage_complaint"):
+                services.transition(complaint, Status.IN_PROGRESS, request.user)
+            elif action == "assign" and request.user.has_perm("complaints.assign_complaint"):
+                assignee_id = request.POST.get("assignee", "").strip()
+                if not assignee_id:
+                    messages.error(request, "Choose someone to assign this complaint to.")
+                else:
+                    assignee = get_object_or_404(User, pk=assignee_id)
+                    services.assign(complaint, assignee, request.user)
+            elif action == "mark_duplicate" and request.user.has_perm("complaints.mark_duplicate"):
+                canonical_id = request.POST.get("canonical", "").strip()
+                if not canonical_id:
+                    messages.error(
+                        request, "Enter the canonical complaint's id to mark this as a duplicate."
+                    )
+                else:
+                    canonical = get_object_or_404(Complaint, pk=canonical_id)
+                    services.mark_duplicate(complaint, canonical, request.user)
             elif action == "resolve" and request.user.has_perm("complaints.resolve_complaint"):
                 services.resolve(complaint, request.user)
+            elif action == "close" and request.user.has_perm("complaints.resolve_complaint"):
+                services.transition(complaint, Status.CLOSED, request.user)
         except services.InvalidTransition as exc:
             messages.error(request, str(exc))
         return redirect("complaint-detail", pk=complaint.pk)
 
+    legal_targets = services.ALLOWED_TRANSITIONS[complaint.status]
     return render(
         request,
         "complaints/detail.html",
@@ -92,5 +128,26 @@ def detail(request, pk):
             "events": complaint.events.select_related("actor", "prediction"),
             "categories": Category.objects.filter(domain=complaint.domain),
             "priorities": Priority.choices,
+            "assignable_users": _assignable_users(),
+            "can_start_work": (
+                request.user.has_perm("complaints.triage_complaint")
+                and Status.IN_PROGRESS in legal_targets
+            ),
+            "can_assign": (
+                request.user.has_perm("complaints.assign_complaint")
+                and complaint.status not in (Status.CLOSED, Status.DUPLICATE)
+            ),
+            "can_mark_duplicate": (
+                request.user.has_perm("complaints.mark_duplicate")
+                and Status.DUPLICATE in legal_targets
+            ),
+            "can_resolve": (
+                request.user.has_perm("complaints.resolve_complaint")
+                and Status.RESOLVED in legal_targets
+            ),
+            "can_close": (
+                request.user.has_perm("complaints.resolve_complaint")
+                and Status.CLOSED in legal_targets
+            ),
         },
     )
