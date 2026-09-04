@@ -752,7 +752,8 @@ merely recorded in `feature_spec`.
 and `feature_spec` — with the inference adapter building exactly and only what
 `feature_spec` names.
 *Why:* the first draft left an implementation trap. A serving path required to
-construct ten fields in order to call a six-field model would be asked for
+construct ten fields in order to call a model that accepts only its declared
+subset (six at the time D12 was written, five after D15) would be asked for
 `queue_depth` in an environment that cannot produce it. Making the artifact
 authoritative turns `feature_spec` from documentation into a compatibility
 guard that fails loudly at load time rather than mis-scoring silently. This
