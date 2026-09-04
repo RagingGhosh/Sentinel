@@ -1,0 +1,24 @@
+# Model INFERENCE dependencies.
+#
+# Deliberately separate from train.txt even though Phase 2 installs both:
+# scikit-learn and onnxruntime become runtime dependencies in Phase 3 when
+# artifacts are loaded for serving, while pandas and pyarrow never do. Merging
+# them would force a re-split later and would make the Phase 3 memory
+# measurement include a dataframe library the web process never uses.
+#
+# NOT installed by build.sh in Phase 2 — Phase 2 wires nothing into serving.
+
+-r base.txt
+
+numpy==2.5.2
+scikit-learn==1.9.0
+onnxruntime==1.29.0
+
+# transitive
+scipy==1.18.1
+joblib==1.6.0
+threadpoolctl==3.6.0
+cloudpickle==3.1.2
+narwhals==2.25.0
+flatbuffers==25.12.19
+protobuf==7.36.1

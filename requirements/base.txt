@@ -1,0 +1,25 @@
+# Runtime dependencies for the deployed application.
+# build.sh installs ONLY this file. Nothing here may be test or training
+# tooling: the production instance has a 512MB budget and never imports them.
+
+Django==5.2.17
+asgiref==3.12.1
+sqlparse==0.6.0
+tzdata==2026.3
+typing_extensions==4.16.0
+
+djangorestframework==3.18.0
+django-allauth==65.19.2
+django-environ==0.14.0
+
+gunicorn==26.2.0
+packaging==26.3
+whitenoise==6.12.0
+psycopg2-binary==2.9.12
+
+# allauth's Google provider imports requests directly.
+requests==2.34.2
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.19
+urllib3==2.7.0

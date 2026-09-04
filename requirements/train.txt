@@ -1,0 +1,11 @@
+# Training and benchmark-only dependencies.
+# Never installed in production, in any phase. Corpus I/O only.
+
+-r ml.txt
+
+pandas==3.0.5
+pyarrow==25.0.1
+
+# transitive
+python-dateutil==2.9.0.post0
+six==1.17.0

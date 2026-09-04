@@ -3,7 +3,8 @@ name: CI
 on: [push, pull_request]
 
 jobs:
-  test:
+  app:
+    name: Application suite (runtime + tooling only)
     runs-on: ubuntu-latest
     env:
       SECRET_KEY: ci-only-key
@@ -13,7 +14,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -r requirements.txt
+      # base + dev only. If an application import needs a training package,
+      # this job fails — which is the point.
+      - run: pip install -r requirements/dev.txt
       - name: Lint
         run: ruff check .
       - name: Format check
@@ -23,4 +26,19 @@ jobs:
       - name: Check for missing migrations
         run: python manage.py makemigrations --check --dry-run
       - name: Test
-        run: pytest --cov=complaints --cov=domains --cov=ml --cov-report=term-missing
+        run: pytest -m "not ml" --cov=complaints --cov=domains --cov=ml --cov-report=term-missing
+
+  ml:
+    name: ML suite (adds training dependencies)
+    runs-on: ubuntu-latest
+    env:
+      SECRET_KEY: ci-only-key
+      DEBUG: "False"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements/train.txt -r requirements/dev.txt
+      - name: ML tests
+        run: pytest -m ml
