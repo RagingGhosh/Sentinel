@@ -350,8 +350,8 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 **Objective:** Define the record types and the `(source, external_id)` identity.
 **Files:** Create `ingest/schema.py`, `ingest/identity.py`, `tests/ingest/test_schema.py`, `tests/ingest/test_identity.py`.
 **Prerequisites:** Task 2.
-**Behavior:** Frozen dataclasses `CorpusRecord(source, external_id, text, label, submitted_at)`, `CFPBOutcome(external_id, timely_response)`, `NYC311Outcome(external_id, closed_at, resolution_hours)`, and `SCHEMA_VERSION = 1`. `RecordRef(source, external_id)` frozen and hashable; `make_ref(record) -> RecordRef`; `parse_ref("cfpb:12345") -> RecordRef`; `RecordRef.__str__` produces that form.
-**Tests:** round-trip `parse_ref(str(ref)) == ref`; a ref containing a colon in the external id round-trips correctly (split on the first colon only); `CorpusRecord` rejects mutation; refs from different sources with the same external id are unequal and hash differently.
+**Behavior:** Frozen dataclasses `CorpusRecord(source, external_id, text, label, submitted_at)`, `CFPBOutcome(external_id, timely_response, sent_to_company_at)`, `NYC311Outcome(external_id, closed_at, resolution_hours)`, and `SCHEMA_VERSION = 1`. `RecordRef(source, external_id)` frozen and hashable; `make_ref(record) -> RecordRef`; `parse_ref("cfpb:12345") -> RecordRef`; `RecordRef.__str__` produces that form.
+**Tests:** `CFPBOutcome` carries `sent_to_company_at` and accepts `None` for it; round-trip `parse_ref(str(ref)) == ref`; a ref containing a colon in the external id round-trips correctly (split on the first colon only); `CorpusRecord` rejects mutation; refs from different sources with the same external id are unequal and hash differently.
 **Acceptance:** no integer identifier exists anywhere in `ingest/schema.py`.
 **Commit:** `feat: corpus record schema and (source, external_id) identity`
 **Must not change:** `ml/base.py`.
@@ -372,8 +372,8 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 **Objective:** Define `SourceAdapter` and implement CFPB's pure normalization against fixtures.
 **Files:** Create `ingest/sources/__init__.py`, `ingest/sources/base.py`, `ingest/sources/cfpb.py`, `tests/fixtures/cfpb_page.json`, `tests/ingest/test_cfpb_normalize.py`.
 **Prerequisites:** Task 3.
-**Behavior:** `normalize` maps `complaint_id → external_id`, `complaint_what_happened → text`, `product → label`, `date_received → submitted_at` (ISO-8601 with timezone, parsed to aware UTC), and `timely` (`"Yes"`/`"No"`) → `CFPBOutcome.timely_response`. Records with a null or empty narrative are rejected with a typed error rather than silently skipped, so the caller decides.
-**Tests:** normalization of a fixture row produces exact expected values; a `"Yes"`/`"No"` string maps to `True`/`False` and any other value raises; a missing narrative raises `MissingNarrative`; a naive timestamp is rejected; the fixture is small (≤5 rows) and contains no personal data.
+**Behavior:** `normalize` maps `complaint_id → external_id`, `complaint_what_happened → text`, `product → label`, `date_received → submitted_at` (ISO-8601 with timezone, parsed to aware UTC), `timely` (`"Yes"`/`"No"`) → `CFPBOutcome.timely_response`, and **`date_sent_to_company → CFPBOutcome.sent_to_company_at`** (aware UTC, `None` when absent). That last field exists only so Task 8's field-delta provenance measurement is computable from the corpus rather than only from the raw cache; it is never a feature and never a target — it is downstream of intake and unavailable for a live complaint. Records with a null or empty narrative are rejected with a typed error rather than silently skipped, so the caller decides.
+**Tests:** normalization of a fixture row produces exact expected values; a `"Yes"`/`"No"` string maps to `True`/`False` and any other value raises; a missing narrative raises `MissingNarrative`; a naive timestamp is rejected; **`sent_to_company_at` is parsed when present and `None` when the field is absent, and a fixture row exercises each case**; the fixture is small (≤5 rows) and contains no personal data.
 **Acceptance:** `normalize` is pure — no network, no filesystem, no clock.
 **Commit:** `feat: CFPB source adapter normalization`
 **Must not change:** anything under `complaints/`.
@@ -406,18 +406,27 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 **Files:** Create `ingest/cli.py`, `tests/ingest/test_cli.py`.
 **Prerequisites:** Tasks 4, 6, 7.
 **Behavior:** `python -m ingest.cli --source {cfpb,nyc311} --start YYYY-MM-DD --end YYYY-MM-DD [--limit N]`. Fetch writes gzipped pages under `data/raw/`; a page whose checksum matches an existing file is skipped. Normalize and load are re-run from the raw cache without network access. `--limit` bounds records for development and is recorded in the manifest so a truncated corpus can never be mistaken for a full one.
-**Required output — timestamp plausibility diagnostic (finding I2).** Ingest computes, per source, the distribution of `submitted_at` hour-of-day and weekday, and writes it into the manifest as `timestamp_diagnostic` with:
+**Required output — timestamp provenance diagnostic (finding I2, addendum §2.3).** Ingest writes `timestamp_diagnostic` into every manifest. It has two parts with **different evidential weight**, and the distinction is load-bearing rather than presentational.
 
-- the 24 hour-of-day counts and the 7 weekday counts;
-- `hour_uniformity` — the chi-square statistic against a uniform distribution, with its p-value;
-- `hour_concentration` — the share of records falling in the single busiest hour;
-- `verdict` — `"plausible_diurnal"`, `"suspect_uniform"`, or `"suspect_concentrated"`, from stated thresholds recorded alongside the verdict.
+*Part A — distributional anomaly diagnostic (secondary evidence).* Per source: the 24 hour-of-day counts, the 7 weekday counts, a chi-square against uniform with its p-value, and `hour_concentration` (share in the single busiest hour). **This part is explicitly labelled `evidence_class: "distributional_anomaly"` and may never on its own establish that a timestamp is an artifact.** Complaints aggregated across time zones, batch forwarding, and automated retries all produce flat or spiky hour distributions from genuine event times; a diurnal-looking histogram would prove nothing either.
 
-**Task 19 consumes this**, so it is a required output rather than a diagnostic nicety. The reconnaissance found CFPB `date_received` and `date_sent_to_company` three seconds apart on a sampled record, which suggests load-time stamping; this measures whether that holds across the corpus, and does so at ingest where the raw data is already in hand.
+*Part B — field-delta measurement (primary evidence), CFPB only.* Over records where both `date_received` and `date_sent_to_company` are present: `pair_coverage`; the delta distribution in seconds at p5, p25, p50, p75, p95, p99 with the median stated explicitly; `frac_delta_le_1min`, `frac_delta_le_10min`, `frac_delta_le_1h`; `count_delta_negative`, `count_delta_zero`; and `frac_identical_timestamps`. Labelled `evidence_class: "field_delta"`.
 
-**Tests:** with a stub adapter, an interrupted run resumes without duplicating records; re-running with the raw cache present performs zero fetches; `--limit` is recorded in the manifest; the roster assertion from Task 7 runs before any Parquet file is written (asserted by checking no part file exists after a `RosterMismatch`); **a synthetic corpus with uniformly-distributed hours yields `verdict == "suspect_uniform"`, one with a realistic diurnal curve yields `"plausible_diurnal"`, and one with 90% of records in a single hour yields `"suspect_concentrated"`**; the diagnostic is present in the manifest for both sources.
-**Acceptance:** no test performs a network call; CLI is importable without Django; `timestamp_diagnostic` present in every manifest written.
-**Commit:** `feat: resumable corpus ingestion CLI with timestamp plausibility diagnostic`
+*The verdict, from a rule fixed before any data is seen:*
+
+| Verdict | Rule (delta metrics only) |
+|---|---|
+| `strongly_suspicious_load_timestamp` | `median_delta_seconds <= 60` **or** `frac_delta_le_1min >= 0.50` **or** `frac_identical_timestamps >= 0.20` |
+| `supported_plausible_event_time` | `median_delta_seconds >= 3600` **and** `frac_delta_le_1min < 0.05` **and** `count_delta_negative == 0` |
+| `suspicious_insufficient_evidence` | anything else, **and always** when `pair_coverage < 0.50` |
+
+Part A does not enter this rule. It may downgrade `supported_plausible_event_time` to `suspicious_insufficient_evidence` when extreme — movement toward doubt only. It can never produce `strongly_suspicious_load_timestamp` and can never upgrade a verdict. The rule thresholds are recorded in the manifest beside the verdict, so a reader sees which branch fired.
+
+*NYC 311 has no testable pair.* Its `created_date`→`closed_date` interval **is** the target variable, so using it for provenance would test the label with the label. 311 receives Part A only and is recorded `suspicious_insufficient_evidence` by construction, with `not_directly_testable: true` — never defaulted to supported. Absence of evidence is not recorded as evidence of soundness.
+
+**Tests:** with a stub adapter, an interrupted run resumes without duplicating records; re-running with the raw cache present performs zero fetches; `--limit` is recorded in the manifest; the roster assertion from Task 7 runs before any Parquet file is written (asserted by checking no part file exists after a `RosterMismatch`); **a synthetic CFPB corpus with a 3-second median delta yields `strongly_suspicious_load_timestamp`; one with a multi-hour median and no sub-minute mass yields `supported_plausible_event_time`; one with 40% coverage yields `suspicious_insufficient_evidence` regardless of its deltas**; **a corpus with a uniform hour histogram but healthy multi-hour deltas does NOT yield `strongly_suspicious_load_timestamp`** (distribution alone cannot establish artifact status); a corpus with extreme hour concentration downgrades `supported` to `suspicious_insufficient_evidence` but never further; 311 is recorded `suspicious_insufficient_evidence` with `not_directly_testable: true`; both parts carry their `evidence_class`; the rule thresholds appear in the manifest.
+**Acceptance:** no test performs a network call; CLI is importable without Django; `timestamp_diagnostic` present in every manifest with both evidence classes labelled and the verdict rule recorded.
+**Commit:** `feat: resumable corpus ingestion CLI with timestamp provenance diagnostic`
 **Must not change:** normalization logic.
 
 ### Task 9: Temporal split machinery
@@ -561,6 +570,59 @@ Written to metadata as `feature_distribution_shift` and reproduced in the publis
 
 **The two PR-AUCs are not comparable to each other (finding I7).** Measured base rates differ by roughly 27×: 311 breach runs 26.9–31.1% at the p75 threshold, while CFPB not-timely is 1.12% within narratives. PR-AUC is base-rate dependent, so a lower cross-domain PR-AUC is expected arithmetic, not evidence of anything. The report therefore states, in its own output, that each figure is interpretable **only as lift over its own baseline**, records both baselines beside both figures, and includes `base_rate` per evaluation. A test asserts the report never presents the two PR-AUCs as a single before/after pair.
 
+**Required output — result classification, gated on the §2.3 verdict (escalated I2, addendum D20).** The probe reads Task 8's `timestamp_diagnostic` verdict for CFPB and sets:
+
+| Task 8 verdict | `result_classification` |
+|---|---|
+| `strongly_suspicious_load_timestamp` | `non-informative / diagnostic` — figures must not be interpreted as substantive model evidence |
+| `suspicious_insufficient_evidence` | `substantive_with_stated_caveat` — figures reported with the unresolved provenance question beside them |
+| `supported_plausible_event_time` | `substantive` |
+
+**The downgrade to non-informative fires only on the pre-specified field-delta rule, never on histogram shape.** A non-diurnal hour distribution is secondary evidence and is insufficient on its own — distribution does not identify provenance. The probe copies the verdict, the delta metrics that produced it, and the rule thresholds into its own output, so which branch fired and why is visible without opening the manifest.
+
+Rationale recorded in the output for the non-informative branch: with `submitted_hour` unusable and `text_length` degenerate across domains per C3, the model would rest almost entirely on `submitted_weekday`, and any resulting figure would describe nothing.
+
+**Tests (marked `ml`):** train aggregates differ from val/test construction paths; permuting test outcomes leaves training features unchanged; warm-up `NaN` rows survive into training; thresholds in metadata match those fitted; metrics appear beside baselines.
+**Acceptance:** completes on a fixture corpus; publishes metrics whatever they show.
+**Commit:** `feat: 311 SLA risk experiment with out-of-fold features`
+**Must not change:** aggregate or threshold semantics.
+
+### Task 18: TextEmbedder and both benchmark arms
+
+**Objective:** Add the embedder abstraction and both implementations under one frozen config.
+**Files:** Modify `ml/base.py` (add `TextEmbedder` protocol only). Create `ml/embedders/tfidf.py`, `ml/embedders/minilm.py`, `ml/training/experiments/dedup.py`, `tests/ml/embedders/test_tfidf.py`, `tests/ml/embedders/test_minilm.py`, `tests/ml/training/test_dedup_benchmark.py`.
+**Prerequisites:** Tasks 9, 14.
+**Behavior:** `TextEmbedder` protocol with `embed(texts: Sequence[str]) -> np.ndarray` and `model_version: str`. `BenchmarkConfig` frozen dataclass holding split boundaries, evaluation population refs, perturbation seed and types, `k`, similarity function and tuning budget — consumed identically by both arms.
+**Embedding dimension is observed, recorded and validated — never assumed** (addendum D18). Each embedder exposes `embedding_dimension` read from its actual output, plus `embedding_model_id` and, for MiniLM, the ONNX file's SHA256. The index records the dimension it was built with and validates every subsequent embedding against it. `384` appears nowhere as a literal: it is a property of `all-MiniLM-L6-v2`, not of the MiniLM family or of an arbitrary ONNX export whose pooling layer may differ.
+**Tests:** both arms receive the identical `BenchmarkConfig` instance (asserted by identity, not equality); TF-IDF vocabulary is fitted on train text only; the retrieval index contains no record later than the query period (leakage path 6); recall@k is computed over `RecordRef`, never an integer; MiniLM output vectors are L2-normalised; **`embedding_dimension` matches the model's observed output width and is recorded in metadata**; **an embedding whose width differs from the index's recorded dimension raises `EmbeddingDimensionMismatch` rather than broadcasting or silently comparing**; a grep-style test asserts no `384` literal in `ml/embedders/`; a test asserts the two arms' configs are the same object so divergence is impossible without editing shared config.
+**Acceptance:** benchmark runs both arms on the fixture corpus and reports recall@k per perturbation type with the result labelled synthetic.
+**Commit:** `feat: TextEmbedder abstraction with TF-IDF and MiniLM benchmark arms`
+**Must not change:** `Match`, `DedupIndex`, or any serving code.
+
+### Task 19: Reduced-feature cross-domain cross-target robustness probe
+
+**Objective:** Train a distinct three-feature model on 311 and evaluate it in-domain and cross-domain/cross-target on CFPB, with diagnostics that make the result's interpretability visible.
+**Files:** Create `ml/training/experiments/robustness_probe.py`, `tests/ml/training/test_robustness_probe.py`.
+**Prerequisites:** Tasks 8, 12, 13, 14, 15, 17. (**Task 8 is a hard prerequisite** — the probe reads its `timestamp_diagnostic` to set `result_classification`.)
+**Behavior:** Trains a separate `HistGradientBoostingClassifier` on the 311 corpus using `TRANSFER_FEATURES_V1` only, targeting `nyc311_sla_breach` (thresholds from Task 13, frozen). Evaluates in-domain on held-out 311 and cross-domain/cross-target on CFPB against `cfpb_timely_response`. Writes its own artifact with `model_name="xdomain_xtarget_probe"`, its own `model_version`, `feature_spec` of exactly the three names, and `experiment_label="reduced-feature cross-domain cross-target robustness probe"`.
+
+**Required output — the six framing facts.** The experiment emits, in its own report structure (not only in prose docs): `source_domain`, `source_target` with its threshold rule, `evaluation_domain`, `evaluation_target` with what the field measures, `feature_set` with the reason the five-feature set was unusable, `target_semantics_differ: true` with both construct definitions, `polarity_mapping` (see I7), and `analysis_type: "exploratory robustness, not same-task transfer"`.
+
+**Required output — feature distribution diagnostic (finding C3), strengthened.** For each feature in `TRANSFER_FEATURES_V1`, the report records:
+- source-training quantiles (min, p01, p05, p25, p50, p75, p95, p99, max);
+- evaluation-set quantiles at the same points;
+- **`pct_outside_source_range`** — the percentage of evaluation records whose value falls outside the source training [min, max] interval;
+- **`pct_outside_source_iqr`** — the percentage outside the source training [p25, p75];
+- an `out_of_range` flag where the evaluation median falls outside the source training IQR.
+
+Written to metadata as `feature_distribution_shift` and reproduced in the published table. `text_length` is expected to flag: measured medians are 15 chars (311 descriptor) against 1,202 (CFPB narrative), so `HistGradientBoostingClassifier`'s training-derived bins place essentially every CFPB record in the topmost bin, making the feature effectively constant at inference.
+
+**Split reuse (finding I6).** The probe **reuses Task 17's exact 311 split boundaries** — it does not compute its own. Otherwise the reduced-feature in-domain reference performance and the primary model's in-domain figure would rest on different data, and the obvious reader question ("what did dropping two features cost?") would be answered with an invalid comparison. CFPB evaluation uses the **CFPB test period only**, so no record that tuned the triage model's threshold appears here. Both period identifiers are recorded in metadata.
+
+**Polarity mapping is explicit (finding I7).** The model outputs P(adverse outcome). "Adverse" means `nyc311_sla_breach == True` in the source and `cfpb_timely_response == False` in the evaluation domain. That mapping is an interpretive choice, not a fact about the data, so it is stated as a sixth framing fact — `polarity_mapping` — rather than left implicit in the code.
+
+**The two PR-AUCs are not comparable to each other (finding I7).** Measured base rates differ by roughly 27×: 311 breach runs 26.9–31.1% at the p75 threshold, while CFPB not-timely is 1.12% within narratives. PR-AUC is base-rate dependent, so a lower cross-domain PR-AUC is expected arithmetic, not evidence of anything. The report therefore states, in its own output, that each figure is interpretable **only as lift over its own baseline**, records both baselines beside both figures, and includes `base_rate` per evaluation. A test asserts the report never presents the two PR-AUCs as a single before/after pair.
+
 **Required output — non-informative classification (escalated I2).** The probe reads the ingest-time timestamp diagnostic from Task 8. **If that diagnostic indicates CFPB `date_received` time-of-day is likely an ingestion artifact rather than a genuine event time, the probe sets `result_classification: "non-informative / diagnostic"` and the report states that the figures must not be interpreted as substantive model evidence.** Rationale carried in the output: with `submitted_hour` an artifact and `text_length` degenerate per C3, the model would be trained and scored almost entirely on `submitted_weekday`, and any resulting figure — good or bad — would describe nothing. Otherwise the classification is `"substantive"`, and the criterion that produced it is recorded either way.
 
 **Tests (marked `ml`):**
@@ -570,7 +632,9 @@ Written to metadata as `feature_distribution_shift` and reproduced in the publis
 - the probe's 311 split boundaries are identical to Task 17's, and CFPB evaluation draws only from the CFPB test period;
 - `base_rate` is recorded for each evaluation, and a test asserts the two PR-AUCs are never presented as a single before/after pair;
 - `feature_distribution_shift` includes `pct_outside_source_range` and `pct_outside_source_iqr` for every transfer feature, and flags `text_length`;
-- given a stubbed ingest diagnostic reporting an artifact-like hour distribution, `result_classification` is `"non-informative / diagnostic"`; given a plausible diurnal one, it is `"substantive"`;
+- given a stubbed diagnostic whose verdict is `strongly_suspicious_load_timestamp`, `result_classification` is `"non-informative / diagnostic"`; `suspicious_insufficient_evidence` yields `"substantive_with_stated_caveat"`; `supported_plausible_event_time` yields `"substantive"`;
+- **a stubbed diagnostic with a non-diurnal hour histogram but a `supported_plausible_event_time` verdict does NOT yield `"non-informative / diagnostic"`** — histogram shape alone cannot downgrade the result;
+- the verdict, its delta metrics and the rule thresholds are copied into the probe's own output;
 - both evaluations are reported, and the cross-domain figure is accompanied by the reduced-feature in-domain reference performance;
 - every metric appears beside its majority-class baseline, with absolute minority counts;
 - the report contains none of the strings "transfers to", "generalises to", "generalizes to".
@@ -706,7 +770,7 @@ An ~80× shift. `HistGradientBoostingClassifier` bins continuous features at fit
 I verified `date_received` carries time-of-day (`2024-09-03T22:42:53.000Z`), correcting an assumption I nearly wrote into this plan. But on the same record `date_sent_to_company` is **three seconds later**, which is not plausible as a real business process and suggests both timestamps were stamped at load time.
 
 *Why it matters — escalated by the C1 resolution.* These were two of six risk features when this finding was first written. They are now two of the **three** features in `TransferFeaturesV1`, and finding C3 shows the third is effectively constant at CFPB inference. If the CFPB hour is a load artifact, the probe's model is trained and scored almost entirely on noise, and any result it produces — good or bad — means nothing. The validation step below is no longer a nice-to-have; it determines whether Task 19 is worth running at all.
-*Correction, now applied:* Task 8 emits a required `timestamp_diagnostic` in every manifest — hour-of-day and weekday counts, a uniformity chi-square, single-hour concentration, and a `verdict` from stated thresholds. Task 19 consumes that verdict to set `result_classification`, so an artifact-like distribution downgrades the probe's figures to non-informative rather than letting them be read as substantive evidence.
+*Correction, now applied (revised — see I8):* Task 8 emits a required `timestamp_diagnostic` with two evidence classes. The **primary** evidence is the `date_received` → `date_sent_to_company` delta distribution, against a rule fixed before any data is seen. The hour and weekday distributions are retained as **secondary** evidence that may move a verdict toward doubt but can never establish artifact status. Task 19 consumes the resulting three-level verdict to set `result_classification`.
 
 **I3 — The existing `.gitignore` would permit committing the corpus.**
 
@@ -743,6 +807,22 @@ Measured base rates differ by roughly 27× — 311 breach at 26.9–31.1%, CFPB 
 Separately, the model outputs P(adverse), and "adverse" means breach in 311 but *not-timely* in CFPB. That mapping is an interpretive choice and was implicit in the plan.
 
 *Correction, applied:* each figure is stated as interpretable only as lift over its own baseline; `base_rate` is recorded per evaluation; a test asserts the two PR-AUCs are never presented as a single pair; and `polarity_mapping` becomes a sixth required framing fact.
+
+**I8 — NEW (found in this pass, and it was my error). Distribution shape was treated as proof of timestamp provenance.**
+
+The previous Task 8 diagnostic emitted `plausible_diurnal` / `suspect_uniform` / `suspect_concentrated` from an hour histogram, and Task 19 downgraded the probe's result to non-informative on that basis. That inference does not hold. A flat or spiky hour distribution is entirely consistent with genuine event times — complaints aggregated across time zones, batch-forwarded submissions, and automated retries all produce one — and a diurnal-looking histogram would not have established genuine provenance either. The design would have let an anomaly signal masquerade as an identification of how the data was produced, and would then have used that to discard or accept a result.
+
+*Why it matters:* it is the same class of error as reporting accuracy on an imbalanced split — a number that looks like it answers the question while answering a different one. It also had teeth: the verdict gates whether Task 19's figures count as evidence at all.
+
+*Correction, applied:* the verdict now derives from a **pre-specified rule over the `date_received` → `date_sent_to_company` delta**, which brackets a real administrative process and therefore carries actual information about provenance — a median measured in seconds is not a forwarding process. Thresholds are fixed in the spec before any data is seen, so the verdict cannot become a judgment made after looking at the answer. Hour and weekday diagnostics are relabelled `evidence_class: "distributional_anomaly"`, may move a verdict only toward doubt, and can never produce the strongly-suspicious branch. NYC 311, whose only timestamp pair *is* the target variable, receives the distributional part only and is recorded `suspicious_insufficient_evidence` by construction rather than defaulted to supported.
+
+**I9 — NEW (found in this pass). Task 8's primary evidence had no data source.**
+
+The revised Task 8 computes its verdict from the `date_received` → `date_sent_to_company` delta. Nothing captured `date_sent_to_company`: Task 5's normalization mapped four CFPB fields and `CFPBOutcome` held only `external_id` and `timely_response`. Task 8 would have had nothing to measure, and the failure would have surfaced only once the verdict rule was implemented — two tasks after the schema was frozen.
+
+*Why it matters:* it is the I5 pattern repeating. A requirement introduced in one task's specification silently assumed an input another task was never told to produce. That both instances came from *late amendments* rather than the original plan is the actual lesson: every amendment needs its own upstream trace, not just a downstream one.
+
+*Correction, applied:* `CFPBOutcome` gains `sent_to_company_at: datetime | None`, Task 5 normalizes it with tests for the present and absent cases, and Task 3's schema test asserts the field. The spec records that it is provenance evidence only — never a feature, never a target — since it is downstream of intake and unavailable for a live complaint, so using it as a feature would leak.
 
 ### Minor
 
@@ -829,8 +909,15 @@ Separately, the model outputs P(adverse), and "adverse" means breach in 311 but 
 | Source-vs-target quantiles per feature (C3) | 19 | quantile table asserted for all three features | Covered |
 | % of target records outside source range (C3) | 19 | `pct_outside_source_range` + `pct_outside_source_iqr` | Covered |
 | `text_length` flagged out-of-range | 19 | flag asserted | Covered |
-| Timestamp plausibility diagnostic emitted (I2) | 8 | uniform / diurnal / concentrated verdict tests | Covered |
-| Artifact-like timestamps ⇒ non-informative result (I2) | 8, 19 | stubbed-diagnostic classification tests | Covered |
+| Timestamp provenance diagnostic emitted (I2, D20) | 8 | three-verdict rule tests | Covered |
+| `sent_to_company_at` captured for the delta (I9) | 3, 5 | present/absent normalization tests | Covered |
+| `sent_to_company_at` never a feature or target (I9) | 12 | absent from both feature specs | Covered |
+| Field-delta metrics measured (D20) | 8 | quantiles, sub-minute fractions, identical-timestamp share | Covered |
+| Distribution labelled secondary, cannot prove artifact (D20) | 8 | uniform histogram + healthy deltas ⇒ not strongly-suspicious | Covered |
+| Verdict rule pre-specified and recorded (D20) | 8 | thresholds present in manifest | Covered |
+| 311 recorded not-directly-testable (D20) | 8 | `not_directly_testable` asserted | Covered |
+| Three-level classification gated on verdict (D20) | 8, 19 | all three branches tested | Covered |
+| Histogram shape alone cannot downgrade result (D20) | 19 | non-diurnal + supported verdict ⇒ substantive | Covered |
 | ROC-AUC secondary only | 14, 21 | doc test | Covered |
 | Artifact metadata fields | 15 | schema test | Covered |
 | Reproducibility controls recorded | 15, 21 | metadata + doc tests | Covered |

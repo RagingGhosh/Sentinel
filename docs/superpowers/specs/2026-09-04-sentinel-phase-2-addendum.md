@@ -135,7 +135,8 @@ class CorpusRecord:
 @dataclass(frozen=True)
 class CFPBOutcome:
     external_id: str
-    timely_response: bool        # see §4.1
+    timely_response: bool                  # see §4.1
+    sent_to_company_at: datetime | None    # provenance evidence only — see §2.3
 
 @dataclass(frozen=True)
 class NYC311Outcome:
@@ -143,6 +144,12 @@ class NYC311Outcome:
     closed_at: datetime | None
     resolution_hours: float | None   # see §4.2
 ```
+
+`CFPBOutcome.sent_to_company_at` is **not a model feature and not a target**. It
+exists solely so §2.3's field-delta measurement is computable from the corpus
+rather than only from the raw cache, which keeps the provenance verdict
+reproducible from committed artifacts. Using it as a feature would be a defect:
+it is downstream of intake and unavailable for a live complaint.
 
 A source contributes a `CorpusRecord` stream and, where it has one, an outcome
 stream. Nothing forces a source to have both — CFPB has no resolution time at
@@ -172,6 +179,77 @@ records, which have no such id, so it must not reuse that type.
 
 Evaluation types live in the training package and are never imported by serving
 code. The boundary is enforced by that import direction, not by convention.
+
+### 2.3 Timestamp provenance diagnostic
+
+`submitted_hour` and `submitted_weekday` are features in both `RiskFeaturesV1`
+and `TransferFeaturesV1`. They are worthless if the timestamp they derive from
+was stamped when the dataset was assembled rather than when the complaint was
+filed. The reconnaissance raised that possibility for CFPB: on a sampled record,
+`date_received` and `date_sent_to_company` were **three seconds apart**, which is
+not a plausible interval for forwarding a complaint to a company.
+
+**Distribution shape does not establish provenance.** An hour-of-day histogram
+that looks non-diurnal proves nothing on its own: complaints aggregated across
+time zones, batch-forwarded submissions, and web intake with automated retries
+all produce flat or spiky distributions from genuine event times. A diurnal-
+looking histogram proves nothing either. **The hour/weekday diagnostics are
+therefore classified as distributional anomaly detection, not evidence of
+timestamp provenance**, and they may never on their own establish that a
+timestamp is an artifact.
+
+#### Primary evidence: the field-delta measurement
+
+Where a source exposes two timestamps whose real-world interval is known to be
+non-trivial, the delta between them is direct evidence. For CFPB, `date_received`
+and `date_sent_to_company` bracket a real administrative process; if both were
+stamped at load time, that process would appear to take seconds.
+
+Ingest measures, over records where both fields are present:
+
+- `pair_coverage` — the fraction of records having both timestamps;
+- the delta distribution in seconds, reported at **p5, p25, p50, p75, p95, p99**,
+  plus the median stated explicitly;
+- `frac_delta_le_1min`, `frac_delta_le_10min`, `frac_delta_le_1h`;
+- `count_delta_negative`, `count_delta_zero`;
+- `frac_identical_timestamps` — deltas of exactly zero at full precision.
+
+#### The verdict rule, pre-specified
+
+The verdict is a function of the delta metrics, fixed here **before any data is
+seen**, so it is not a judgment made after looking at results:
+
+| Verdict | Rule |
+|---|---|
+| `strongly_suspicious_load_timestamp` | `median_delta_seconds <= 60` **or** `frac_delta_le_1min >= 0.50` **or** `frac_identical_timestamps >= 0.20` |
+| `supported_plausible_event_time` | `median_delta_seconds >= 3600` **and** `frac_delta_le_1min < 0.05` **and** `count_delta_negative == 0` |
+| `suspicious_insufficient_evidence` | anything else, **and always** when `pair_coverage < 0.50` |
+
+**The distributional diagnostics do not enter this rule.** They are recorded as
+`secondary_evidence` and may downgrade `supported_plausible_event_time` to
+`suspicious_insufficient_evidence` when they are extreme — a conservative move
+toward doubt. They may never produce `strongly_suspicious_load_timestamp`, and
+they may never upgrade a verdict.
+
+#### Sources without a testable pair
+
+NYC 311 exposes `created_date` and `closed_date`, but their interval **is the
+target variable** (`nyc311_resolution_hours`), so using it as a provenance check
+would test the label with the label. 311 therefore receives the distributional
+diagnostic only, and its verdict is `suspicious_insufficient_evidence` by
+construction — recorded honestly as "not directly testable by this method"
+rather than defaulted to `supported`. Absence of evidence is not recorded as
+evidence of soundness.
+
+#### What the verdict is allowed to decide
+
+The verdict gates one downstream decision, stated in §5.4: whether the robustness
+probe's figures are classified as substantive. Nothing else consumes it, and it
+is never described as having proven anything about how the data was produced —
+only as having measured an interval that is or is not consistent with a real
+process.
+
+---
 
 ---
 
@@ -469,6 +547,23 @@ the two are never presented as a single before/after pair.
 
 A report missing any of the six is incomplete, and the experiment's own output
 carries them so they cannot be dropped in transcription.
+
+**Result classification, driven by the §2.3 verdict.** Two of the probe's three
+features derive from a CFPB timestamp whose provenance §2.3 measures. The probe
+therefore reads that verdict and classifies its own result accordingly:
+
+| §2.3 verdict | Probe `result_classification` | Meaning |
+|---|---|---|
+| `strongly_suspicious_load_timestamp` | `non-informative / diagnostic` | Figures must not be interpreted as substantive model evidence. With `submitted_hour` unusable and `text_length` degenerate across domains, the model would rest almost entirely on `submitted_weekday`. |
+| `suspicious_insufficient_evidence` | `substantive_with_stated_caveat` | Figures reported, with the unresolved provenance question carried beside them. |
+| `supported_plausible_event_time` | `substantive` | Figures reported normally. |
+
+**The downgrade to `non-informative` requires the pre-specified §2.3 delta rule
+to fire.** A non-diurnal hour histogram is not sufficient and never has been —
+the distributional diagnostics are secondary evidence that can raise doubt but
+cannot establish artifact status. The verdict, the metrics that produced it, and
+the rule thresholds are all recorded in the probe's output, so a reader can see
+which branch fired and why.
 
 **What it can and cannot tell you.** A reduced-feature model that scores poorly
 here may be failing because of domain shift, because the target means something
@@ -910,3 +1005,27 @@ experiment cannot show and which §4.3 forbids asserting.
 *Also changed:* "in-domain ceiling" became **"reduced-feature in-domain
 reference performance"**. A ceiling implies the cross-domain figure measures the
 same quantity less well. It does not measure the same quantity at all.
+
+**D20 — Timestamp provenance is measured against a field-delta rule; distribution
+shape is demoted to secondary evidence (§2.3, §5.4).**
+*Was:* Task 8 emitted hour/weekday distributions with a verdict of
+`plausible_diurnal` / `suspect_uniform` / `suspect_concentrated`, and the probe
+downgraded its result to non-informative on that basis.
+*Now:* a three-level verdict — `supported_plausible_event_time`,
+`suspicious_insufficient_evidence`, `strongly_suspicious_load_timestamp` —
+determined by a pre-specified rule over the `date_received` →
+`date_sent_to_company` delta distribution. Hour and weekday diagnostics are
+retained as `secondary_evidence`, may move a verdict only toward doubt, and can
+never establish artifact status alone.
+*Why:* distribution shape does not identify provenance. Complaints aggregated
+across time zones, batch forwarding, and automated retries all produce flat or
+spiky hour distributions from genuine event times, and a diurnal-looking
+histogram would prove nothing either. The delta between two timestamps bracketing
+a known administrative process is direct evidence: a median of seconds is not a
+forwarding process. Fixing the thresholds before seeing data prevents the verdict
+from becoming a judgment made after looking at the answer.
+*Also recorded:* NYC 311 has no testable pair — the interval between its two
+timestamps **is** the target variable — so it receives the distributional
+diagnostic only and is classified `suspicious_insufficient_evidence` by
+construction rather than defaulted to supported. Absence of evidence is not
+recorded as evidence of soundness.
