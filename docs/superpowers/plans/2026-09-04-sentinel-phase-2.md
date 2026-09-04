@@ -10,11 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-04-sentinel-phase-2-addendum.md` (authoritative), amending `docs/superpowers/specs/2026-09-03-sentinel-design.md` §6.
 
-> **STATUS: BLOCKED PENDING REVIEW.** The pre-flight review found two Critical
-> contradictions inside the approved addendum (§ *Plan Pre-Flight Findings*,
-> C1 and C2). Tasks 19 and 12 depend on their resolution. Per the standing
-> instruction not to resolve addendum contradictions during planning, they are
-> flagged, not fixed. Tasks 1–11 and 13–18 are unaffected and can proceed.
+> **STATUS: revised 2026-09-04. Both Critical findings resolved in the spec
+> (addendum D15–D18); no task remains blocked.** `RiskFeaturesV1` is **five**
+> features — `sla_hours` was removed as target-derived. The transfer experiment
+> is now a **distinct three-feature model** (`TransferFeaturesV1`), not the
+> primary artifact scored on other data. `precision@k` is removed from the risk
+> metrics. Embedding dimension is recorded and validated rather than assumed.
+> Awaiting final approval before execution.
 
 ## Global Constraints
 
@@ -84,7 +86,7 @@ Wiring artifacts into `ml/registry.py`. Populating `Complaint.embedding`. Writin
 | `ml/training/experiments/triage.py` | CFPB triage experiment | Create |
 | `ml/training/experiments/risk.py` | 311 risk experiment | Create |
 | `ml/training/experiments/dedup.py` | Perturbation benchmark harness | Create |
-| `ml/training/experiments/transfer.py` | Secondary transfer experiment | Create (blocked, C1) |
+| `ml/training/experiments/transfer.py` | Reduced-feature cross-domain robustness experiment | Create |
 | `tests/ingest/`, `tests/ml/training/`, `tests/ml/embedders/` | Mirrored test packages, each with `__init__.py` | Create |
 | `docs/phase-2-reproducibility.md` | Environment, seeds, corpus versions, rerun instructions | Create |
 
@@ -186,14 +188,23 @@ Seven paths, each with an owning module and an explicit test (Task 11 and the pe
 
 ## J. Feature engineering
 
-Six v1 risk features, in this exact order — the order is part of the contract and is recorded in `feature_spec`:
+**`RiskFeaturesV1` — five features**, in this exact order. The order is part of the contract and is recorded in `feature_spec`:
 
 1. `submitted_hour` — from the source timestamp
 2. `submitted_weekday` — from the source timestamp
 3. `text_length` — character count of `CorpusRecord.text`
-4. `sla_hours` — the frozen per-type threshold (**see finding C2 — this feature is target-derived and the addendum does not cover it under the OOF rule**)
-5. `category_mean_resolution_hours` — out-of-fold
-6. `category_breach_rate` — out-of-fold
+4. `category_mean_resolution_hours` — out-of-fold
+5. `category_breach_rate` — out-of-fold
+
+`sla_hours` is **not** a feature (addendum D15). The per-type threshold is the p75 of training resolution hours — the same outcomes that define the target — so a training row's own resolution time would contribute to the p75 becoming that row's own feature. The frozen-label design admits no leakage-safe construction for it, and maintaining a separate out-of-fold feature threshold alongside the frozen label threshold was rejected. The threshold's only role is to produce the label.
+
+**`TransferFeaturesV1` — three features**, versioned independently of `RiskFeaturesV1`, used only by the reduced-feature cross-domain robustness experiment (§O):
+
+1. `submitted_hour`
+2. `submitted_weekday`
+3. `text_length`
+
+These are the only features computable in both corpora.
 
 **Forward-chaining out-of-fold construction, specified concretely.** `sklearn.model_selection.TimeSeriesSplit` is **rejected**: it splits by index position, so with duplicate timestamps a fold boundary can straddle a timestamp — the same defect the temporal split avoids. A date-cut equivalent is implemented instead:
 
@@ -231,7 +242,9 @@ Types with fewer than **100 training records** fall back to the global train-per
 
 ## L. Risk model training
 
-`HistGradientBoostingClassifier` on the six features, target `nyc311_sla_breach`, 311 corpus only. Baselines: majority-class and stratified-random on the same split. Metrics: PR-AUC (headline), precision@k, ROC-AUC (secondary), a calibration curve, and the absolute minority count per period. Decision banding thresholds are tuned on validation and applied unchanged to test.
+`HistGradientBoostingClassifier` on the five `RiskFeaturesV1` features, target `nyc311_sla_breach`, 311 corpus only. Baselines: majority-class and stratified-random on the same split. Metrics: **PR-AUC (headline)**, ROC-AUC (secondary only), a calibration curve, and the absolute minority count per period. Decision banding thresholds are tuned on validation and applied unchanged to test.
+
+`precision@k` is **not** required (addendum D17). It was named in the Phase 1 design because the model ranks a queue, but no `k` was defined, and `k` is an operational quantity Sentinel has no history to ground. The calibration curve carries the "is the top of the ranking trustworthy" question without inventing a constant.
 
 The plan does not assume this model will be good. Task 15's acceptance criterion is that metrics are produced and published honestly, not that they clear a bar.
 
@@ -245,9 +258,20 @@ Both arms implement `TextEmbedder`. The benchmark builds a retrieval index over 
 
 Everything except the representation is held identical and asserted by a test: the same temporal boundaries, the same evaluation population, the same perturbation seed and set, the same similarity function (cosine over L2-normalised vectors), the same `k`, the same index population, the same metric, the same baselines, and an equal tuning budget. Task 18 encodes these as a single frozen `BenchmarkConfig` that both arms consume, so divergence requires editing shared config rather than one arm's code.
 
-## O. Secondary transfer evaluation
+## O. Reduced-feature cross-domain robustness experiment
 
-**Blocked — see finding C1.** The specified experiment cannot be constructed from the specified feature set. Task 19 exists but must not start until the contradiction is resolved.
+A **separate three-feature model**, not the primary risk artifact scored on other data (addendum D16). The primary model cannot be evaluated on CFPB at all: two of its five features — `category_mean_resolution_hours` and `category_breach_rate` — require resolution times CFPB does not publish, and §4.3 forbids substituting `timely` for a breach rate.
+
+A distinct `HistGradientBoostingClassifier` is trained on NYC 311 using only `TransferFeaturesV1`, targeting `nyc311_sla_breach`, then evaluated twice:
+
+1. **In-domain**, on held-out 311 — the reduced-feature ceiling.
+2. **Cross-domain**, on CFPB against `cfpb_timely_response`.
+
+The gap between them is the transfer cost. Measuring against the reduced-feature ceiling rather than the five-feature primary model is what makes that gap interpretable — otherwise missing features and domain shift are confounded.
+
+Metrics: PR-AUC headline, minority precision/recall/F1, absolute minority count, majority-class baseline, on the same split. ROC-AUC secondary only. Every figure appears beside its baseline in the same table.
+
+**Naming is binding.** "Reduced-feature cross-domain robustness experiment" wherever it appears — metadata, README, any published table. Its artifact carries its own `model_name`, `model_version` and a `feature_spec` of exactly the three names, so it cannot be confused with the primary model at load time.
 
 ## P. Artifact / metadata format
 
@@ -257,7 +281,7 @@ ml/artifacts/<domain>/<model>/<version>/
     metadata.json
 ```
 
-`metadata.json` fields: `model_name`, `model_version`, `trained_at`, `git_sha`, `corpus_id`, `corpus_schema_version`, `source_window`, `split` (cut dates, per-period counts, requested vs achieved fractions), `feature_spec` (ordered list of feature names), `label_roster`, `thresholds`, `metrics` (per period, each beside its baseline), `warmup_row_count`, `seeds`, and `dependency_versions`.
+`metadata.json` fields: `model_name`, `model_version`, `trained_at`, `git_sha`, `corpus_id`, `corpus_schema_version`, `source_window`, `split` (cut dates, per-period counts, requested vs achieved fractions), `feature_spec` (ordered list of feature names), `feature_spec_version`, `label_roster`, `thresholds`, `metrics` (per period, each beside its baseline), `warmup_row_count`, `seeds`, `dependency_versions`, and — for embedder artifacts — `embedding_dimension`, `embedding_model_id` and `embedding_model_sha256`. Experiment artifacts additionally carry `experiment_label`, which for the transfer artifact is `"reduced-feature cross-domain robustness"`.
 
 `load_artifact()` reads `feature_spec` and returns a loader that builds exactly those features in exactly that order. Requesting a feature the environment cannot produce raises at load time. This is the compatibility guard from addendum §3.3, and Task 20 tests it against a deliberately mismatched artifact.
 
@@ -418,13 +442,12 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 
 ### Task 12: Risk feature assembly and FeatureSpec
 
-**Objective:** Assemble the six-feature matrix in a fixed, declared order.
+**Objective:** Assemble the five-feature `RiskFeaturesV1` matrix and the three-feature `TransferFeaturesV1` matrix, each in a fixed, declared order.
 **Files:** Create `ml/training/features.py`, `tests/ml/training/test_features.py`.
-**Prerequisites:** Tasks 11, 13.
-**Behavior:** `FeatureSpec(names: tuple[str, ...], version: str)`; `build_risk_features(records, aggregates, thresholds, spec) -> np.ndarray` producing columns in `spec.names` order exactly. Requesting a feature the inputs cannot supply raises `FeatureUnavailable` naming it.
-**Tests:** column order matches `spec.names`; permuting `spec.names` permutes the output columns correspondingly; a spec naming `queue_depth` raises `FeatureUnavailable`; `NaN` aggregates survive assembly rather than being imputed.
-**Acceptance:** the six names and their order are asserted in a test.
-**Blocked by finding C2** — `sla_hours` may need to move to out-of-fold construction or leave the set.
+**Prerequisites:** Task 11. (**No longer depends on Task 13** — with `sla_hours` removed, no threshold enters the feature matrix.)
+**Behavior:** `FeatureSpec(names: tuple[str, ...], version: str)`; module constants `RISK_FEATURES_V1` (five names, ordered per §J) and `TRANSFER_FEATURES_V1` (three names). `build_features(records, aggregates, spec) -> np.ndarray` produces columns in `spec.names` order exactly. Requesting a feature the inputs cannot supply raises `FeatureUnavailable` naming it.
+**Tests:** column order matches `spec.names`; permuting `spec.names` permutes the output columns correspondingly; a spec naming `queue_depth` raises `FeatureUnavailable`; **a spec naming `sla_hours` raises `FeatureUnavailable`** (the removal is enforced, not merely documented); `NaN` aggregates survive assembly rather than being imputed; `TRANSFER_FEATURES_V1` is a strict subset of `RISK_FEATURES_V1` and carries a distinct `version` string.
+**Acceptance:** both specs' names and orders asserted in tests; `RISK_FEATURES_V1` has exactly five entries and `TRANSFER_FEATURES_V1` exactly three.
 **Commit:** `feat: risk feature assembly with declared feature order`
 **Must not change:** aggregate semantics.
 
@@ -489,16 +512,34 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 **Files:** Modify `ml/base.py` (add `TextEmbedder` protocol only). Create `ml/embedders/tfidf.py`, `ml/embedders/minilm.py`, `ml/training/experiments/dedup.py`, `tests/ml/embedders/test_tfidf.py`, `tests/ml/embedders/test_minilm.py`, `tests/ml/training/test_dedup_benchmark.py`.
 **Prerequisites:** Tasks 9, 14.
 **Behavior:** `TextEmbedder` protocol with `embed(texts: Sequence[str]) -> np.ndarray` and `model_version: str`. `BenchmarkConfig` frozen dataclass holding split boundaries, evaluation population refs, perturbation seed and types, `k`, similarity function and tuning budget — consumed identically by both arms.
-**Tests:** both arms receive the identical `BenchmarkConfig` instance (asserted by identity, not equality); TF-IDF vocabulary is fitted on train text only; the retrieval index contains no record later than the query period (leakage path 6); recall@k is computed over `RecordRef`, never an integer; MiniLM output vectors are L2-normalised and 384-dimensional; a test asserts the two arms' configs are the same object so divergence is impossible without editing shared config.
+**Embedding dimension is observed, recorded and validated — never assumed** (addendum D18). Each embedder exposes `embedding_dimension` read from its actual output, plus `embedding_model_id` and, for MiniLM, the ONNX file's SHA256. The index records the dimension it was built with and validates every subsequent embedding against it. `384` appears nowhere as a literal: it is a property of `all-MiniLM-L6-v2`, not of the MiniLM family or of an arbitrary ONNX export whose pooling layer may differ.
+**Tests:** both arms receive the identical `BenchmarkConfig` instance (asserted by identity, not equality); TF-IDF vocabulary is fitted on train text only; the retrieval index contains no record later than the query period (leakage path 6); recall@k is computed over `RecordRef`, never an integer; MiniLM output vectors are L2-normalised; **`embedding_dimension` matches the model's observed output width and is recorded in metadata**; **an embedding whose width differs from the index's recorded dimension raises `EmbeddingDimensionMismatch` rather than broadcasting or silently comparing**; a grep-style test asserts no `384` literal in `ml/embedders/`; a test asserts the two arms' configs are the same object so divergence is impossible without editing shared config.
 **Acceptance:** benchmark runs both arms on the fixture corpus and reports recall@k per perturbation type with the result labelled synthetic.
 **Commit:** `feat: TextEmbedder abstraction with TF-IDF and MiniLM benchmark arms`
 **Must not change:** `Match`, `DedupIndex`, or any serving code.
 
-### Task 19: Secondary transfer evaluation — **BLOCKED**
+### Task 19: Reduced-feature cross-domain robustness experiment
 
-**Objective:** Evaluate the 311-trained risk model against CFPB `cfpb_timely_response`.
-**Status:** **Do not start.** Finding C1 shows the experiment cannot be constructed from the v1 feature set. This task's specification is deferred until the addendum is amended.
-**Prerequisites:** resolution of C1.
+**Objective:** Train a distinct three-feature model on 311 and evaluate it both in-domain and on CFPB.
+**Files:** Create `ml/training/experiments/transfer.py`, `tests/ml/training/test_transfer_experiment.py`.
+**Prerequisites:** Tasks 12, 13, 14, 15, 17.
+**Behavior:** Trains a separate `HistGradientBoostingClassifier` on the 311 corpus using `TRANSFER_FEATURES_V1` only, targeting `nyc311_sla_breach` (thresholds from Task 13, frozen). Evaluates twice: in-domain on held-out 311, and cross-domain on CFPB records against `cfpb_timely_response`. Writes its own artifact with `model_name="transfer_robustness"`, its own `model_version`, and a `feature_spec` of exactly the three names.
+**Tests (marked `ml`):**
+- the artifact's `feature_spec` has exactly three names and its `model_name` differs from the primary risk artifact's (they cannot be confused at load time);
+- loading the primary five-feature artifact and attempting to score CFPB records raises `FeatureUnavailable` — **the impossibility that motivated D16 is asserted, not just described**;
+- both evaluations are reported, and the cross-domain figure is accompanied by the in-domain reduced-feature figure (so the gap is against the right ceiling);
+- every metric appears beside its majority-class baseline;
+- the absolute minority count is reported for each evaluation;
+- the string "reduced-feature cross-domain robustness" appears in the artifact metadata's `experiment_label`;
+- **a feature-distribution comparison is emitted** (see below) and flags at least `text_length` as out-of-range, since the measured medians are 15 chars (311) against 1,202 chars (CFPB).
+
+**Additional required output — feature distribution report (finding C3).** For every feature in `TRANSFER_FEATURES_V1`, the experiment records the train-period distribution (min, p25, median, p75, max) beside the evaluation-period distribution, and sets an `out_of_range` flag where the evaluation median falls outside the training interquartile range. This is written into the artifact metadata as `feature_distribution_shift` and reproduced in the published table.
+
+Without it, a poor transfer result is unattributable between domain shift, a degenerate feature, and two weak calendar features — `HistGradientBoostingClassifier` bins continuous features from the training distribution, so every CFPB `text_length` falls in the topmost 311-derived bin and the feature is effectively constant at inference. The report makes that visible in the output rather than leaving it for a reader to discover.
+
+**Acceptance:** two evaluations published with baselines; the feature-distribution report emitted and `text_length` flagged out-of-range; the primary artifact is never scored on CFPB anywhere in the codebase.
+**Commit:** `feat: reduced-feature cross-domain robustness experiment`
+**Must not change:** the primary risk experiment, `RISK_FEATURES_V1`, or thresholds.
 
 ### Task 20: Resource measurement
 
@@ -536,21 +577,23 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 ## V. Dependencies between tasks
 
 ```
-1 → 2 → 3 → 4 ─┐
-        3 → 5 → 6 → 8
-            5 → 7 → 8
-    2 → 9 → 10 → 11 ─┐
-        9 → 13 ──────┼→ 12 → 15 → 16, 17
-    2 → 14 ──────────┘
-    9,14 → 18 → 20 → 21
+1 → 2 → 3 → 4 ──────────────┐
+        3 → 5 → 6 → 8       │
+            5 → 7 → 8       │
+    2 → 9 → 10 → 11 → 12 ───┼→ 15 → 16
+    2 → 9 → 13 ─────────────┤        17 → 19
+    2 → 14 ─────────────────┘
+    9, 14 → 18 → 20 → 21
     all → 22
 ```
 
-Task 12 depends on 13 (thresholds supply `sla_hours`) as well as 11. Tasks 16 and 17 are independent of each other and may run in either order.
+**Changed by D15:** Task 12 no longer depends on Task 13. With `sla_hours` removed, no threshold enters the feature matrix, so feature assembly and threshold fitting are now independent and may proceed in either order. Task 13 remains a prerequisite of Tasks 17 and 19, which need thresholds to produce the *label*.
+
+Tasks 16 and 17 are independent of each other. Task 19 depends on 17 only for sequencing discipline — it must not be built before the primary risk experiment exists, so that the "primary artifact cannot score CFPB" assertion has a real artifact to test against.
 
 ## W. Acceptance criteria
 
-Stated per task above. Phase 2 as a whole is complete when: both corpora ingest reproducibly with asserted rosters; every leakage path in §I has a passing test that fails when leakage is introduced; the triage and risk experiments produce loadable artifacts with metrics beside baselines; the dedup benchmark reports both arms under one config with a ship-or-cut decision recorded; resource figures come from a measured inference-only environment; and Task 22's integration guarantees pass.
+Stated per task above. Phase 2 as a whole is complete when: both corpora ingest reproducibly with asserted rosters; every leakage path in §I has a passing test that fails when leakage is introduced; the triage and risk experiments produce loadable artifacts with metrics beside baselines; the dedup benchmark reports both arms under one config with a ship-or-cut decision recorded; the reduced-feature transfer experiment publishes both its in-domain and cross-domain figures beside baselines; resource figures come from a measured inference-only environment; and Task 22's integration guarantees pass.
 
 ## X. Failure and rollback strategy
 
@@ -568,7 +611,10 @@ Each task is one commit, so rollback is `git revert` of that commit. The corpus 
 - [ ] `git ls-files` shows no Parquet, no `.joblib`, no `.onnx`, no `data/` content
 - [ ] Every published metric appears beside its baseline
 - [ ] Every leakage path has a test that fails when leakage is deliberately introduced
-- [ ] Findings C1 and C2 resolved or explicitly deferred with the affected tasks marked
+- [ ] `RISK_FEATURES_V1` has five names; a spec naming `sla_hours` raises
+- [ ] The primary risk artifact is never scored on CFPB anywhere in the codebase
+- [ ] No `384` literal in `ml/embedders/`; `embedding_dimension` recorded and validated
+- [ ] No `precision@k` in any risk-model metric output or published table
 
 ---
 
@@ -576,29 +622,36 @@ Each task is one commit, so rollback is `git revert` of that commit. The corpus 
 
 Adversarial review of this plan against the approved addendum and the repository.
 
-### Critical
+### Critical — both RESOLVED in the spec (addendum D15, D16)
 
-**C1 — The secondary transfer evaluation cannot be constructed from the v1 feature set. The addendum requires both and they are incompatible.**
+**C1 — RESOLVED. The transfer evaluation is now a distinct reduced-feature model.**
 
-Addendum §5.4 requires evaluating the 311-trained risk model against CFPB `cfpb_timely_response`. Addendum §3.2 fixes the v1 feature set at six features. Three of those six cannot exist for a CFPB record:
+*Original finding:* addendum §5.4 required evaluating the 311-trained risk model against CFPB `cfpb_timely_response`, while §3.2 fixed the feature set at six features, three of which cannot exist for a CFPB record. A model trained on six features cannot be scored on records that supply three.
 
-- `sla_hours` — the per-type threshold is the p75 of *resolution hours*. CFPB publishes no resolution date at all (measured: only `date_received` and `date_sent_to_company`), so no threshold can be fitted for a CFPB product type.
-- `category_mean_resolution_hours` — requires resolution times CFPB does not have.
-- `category_breach_rate` — requires a breach label. The only CFPB candidate is `timely`, and addendum §4.3 explicitly prohibits deriving one construct from the other.
+*Resolution (addendum D16):* a separate `HistGradientBoostingClassifier` is trained on 311 using `TransferFeaturesV1` — `submitted_hour`, `submitted_weekday`, `text_length` — versioned independently, and evaluated both in-domain on held-out 311 and cross-domain on CFPB. The naming is binding so it can never be read as the primary model's performance. Task 19 is now implementable and asserts the original impossibility as a test: loading the primary artifact and attempting to score CFPB raises `FeatureUnavailable`.
 
-A model trained on six features cannot be scored on records that can supply three. **Why it matters:** Task 19 is unimplementable as specified, and the contradiction is invisible until someone tries to build the feature matrix — after the risk model already exists.
+**C2 — RESOLVED. `sla_hours` removed; `RiskFeaturesV1` is five features.**
 
-**Smallest correction (for review, not applied):** restrict the transfer experiment to the subset of features CFPB can supply (`submitted_hour`, `submitted_weekday`, `text_length`) and train a *separate* three-feature model for the transfer arm only, reporting it explicitly as a reduced-feature transfer rather than the same model. Alternatively, drop the transfer experiment from Phase 2 and record why. Both are spec decisions.
+*Original finding:* `sla_hours` is the per-type p75 of training resolution hours — the same outcomes that define the target — so a training row's own resolution time contributes to the p75 becoming its own feature. Target-derived, in a feature §6.3 did not name.
 
-**C2 — `sla_hours` is a target-derived feature but the addendum's out-of-fold rule does not cover it.**
+*Resolution (addendum D15):* removed. The threshold's sole role is to produce the label. The justification recorded in the spec is leakage, not redundancy; redundancy with `category_mean_resolution_hours` is noted only as a secondary observation, and the feature would be removed even if it carried unique signal. Task 12 now asserts the removal — a `FeatureSpec` naming `sla_hours` raises `FeatureUnavailable`, so the decision is enforced by code rather than documented in prose.
 
-Addendum §6.3 names `category_mean_resolution_hours` and `category_breach_rate` as target-derived and mandates out-of-fold construction. §3.2 lists `sla_hours` as a feature whose value is the per-type threshold from §7 — which is the p75 of training *resolution hours*, i.e. computed from the same outcomes that define the target. For a training row, its own resolution time contributes to the p75 that becomes its own feature. That is precisely the defect §6.3 exists to prevent, in a feature §6.3 does not mention.
+**C3 — NEW. `text_length` is not comparable across the two corpora, which may make the transfer experiment uninterpretable.**
 
-There is a genuine tension underneath, which is why this is flagged rather than fixed: the *label* requires a single frozen threshold per type (a per-row threshold would make the label definition vary by row), while the *feature* would require an out-of-fold one. They cannot be the same number.
+The reduced-feature model trains on 311 and is scored on CFPB. Its only non-calendar feature is `text_length`, and the measured distributions are not merely different — they barely overlap:
 
-**Why it matters:** the leakage is small per row for large types but severe for the long tail of 276 complaint types, and it inflates exactly the metric the model is judged on.
+| Corpus | `text` source | Median length |
+|---|---|---|
+| NYC 311 | `descriptor` | **15 chars** |
+| CFPB | consumer narrative | **1,202 chars** |
 
-**Smallest correction (for review, not applied):** drop `sla_hours` from the v1 feature set. It is near-redundant with `category_mean_resolution_hours` (both are per-type location statistics of the same distribution), so the loss is small and the leak disappears. The alternative — an out-of-fold feature threshold distinct from the frozen label threshold — is defensible but subtle enough to invite future error.
+An ~80× shift. `HistGradientBoostingClassifier` bins continuous features at fit time from the training distribution, so every CFPB record would land in the topmost 311-derived bin. The feature becomes effectively constant at inference, leaving a model that is nominally three features and operationally two calendar features.
+
+*Why it matters:* this is a consequence of the C1 resolution, not a pre-existing defect — it only appears once the transfer model is a real trained object rather than a hypothetical. If the experiment reports a poor transfer result, the cause is unattributable between domain shift, a degenerate feature, and two weak calendar features. That is precisely the confound D16's in-domain ceiling was added to remove, and it defeats it by a different route.
+
+*Smallest correction, and it does not require a spec change:* Task 19 must report, for every feature, the train-period distribution beside the evaluation-period distribution, and flag any feature whose evaluation median falls outside the training interquartile range. The limitation then appears in the published output instead of being discovered by a reader. I have added this to Task 19 rather than leaving it implicit.
+
+*What I did not do:* normalise `text_length` per domain. That is a domain-adaptation step, it would change what the experiment measures, and choosing it is a spec decision rather than a planning one. Flagging instead.
 
 ### Important
 
@@ -613,7 +666,7 @@ There is a genuine tension underneath, which is why this is flagged rather than 
 
 I verified `date_received` carries time-of-day (`2024-09-03T22:42:53.000Z`), correcting an assumption I nearly wrote into this plan. But on the same record `date_sent_to_company` is **three seconds later**, which is not plausible as a real business process and suggests both timestamps were stamped at load time.
 
-*Why it matters:* `submitted_hour` and `submitted_weekday` are two of the six risk features and two of the three available transfer features. If the hour is a load artifact, they are noise, and any signal attributed to them is spurious.
+*Why it matters — escalated by the C1 resolution.* These were two of six risk features when this finding was first written. They are now two of the **three** features in `TransferFeaturesV1`, and finding C3 shows the third is effectively constant at CFPB inference. If the CFPB hour is a load artifact, the reduced-feature transfer model is trained and scored almost entirely on noise, and any result it produces — good or bad — means nothing. The validation step below is no longer a nice-to-have; it determines whether Task 19 is worth running at all.
 *Smallest correction:* add a validation step to Task 8 that reports the hour-of-day and weekday distributions for each source at ingest. A near-uniform or spike-clustered CFPB distribution against a plausibly diurnal 311 distribution settles it empirically. This is a small addition, not a redesign.
 
 **I3 — The existing `.gitignore` would permit committing the corpus.**
@@ -659,7 +712,9 @@ The Phase 1 design's module layout places training under `ml/`, and this plan fo
 | Resumable / partial ingestion | 8 | interrupted-run test | Covered |
 | `TextEmbedder` is the benchmark abstraction | 18 | embedder tests | Covered |
 | `DedupIndex` / `Match` unchanged | 18, 22 | must-not-change + integration | Covered |
-| v1 risk features = 6, ordered | 12 | order asserted; permutation test | **Blocked (C2)** |
+| `RiskFeaturesV1` = 5, ordered | 12 | order asserted; permutation test; five-name count | Covered |
+| `sla_hours` excluded and enforced | 12 | spec naming `sla_hours` raises `FeatureUnavailable` | Covered |
+| `TransferFeaturesV1` = 3, versioned separately | 12 | subset + distinct-version test | Covered |
 | `feature_spec` authoritative at load | 15 | mismatched-artifact fixture | Covered |
 | Fail loudly on unproducible feature | 12, 15 | `FeatureUnavailable`, `FeatureSpecMismatch` | Covered |
 | Phase 3 interface not mutated | 22 | integration assertion | Covered |
@@ -684,15 +739,22 @@ The Phase 1 design's module layout places training under `ml/`, and this plan fo
 | Eval index excludes future records | 18 | index leakage test | Covered |
 | Triage: macro-F1 headline + per-class | 14, 16 | metric tests | Covered |
 | Triage: top-3, confusion matrix | 14, 16 | metric tests | Covered |
+| `precision@k` absent from risk metrics | 14, 17 | no `precision_at_k` in risk output | Covered |
 | Baselines: majority + stratified | 14 | baseline tests | Covered |
 | Accuracy never headline | 14, 21 | README baseline-column doc test | Covered |
 | Dedup: recall@k over `RecordRef` | 18 | ref-typed assertion | Covered |
 | Dedup labelled synthetic | 18, 21 | report wording test | Covered |
+| Embedding dimension recorded, not assumed | 18 | dimension read from output; recorded in metadata | Covered |
+| Embedding dimension validated on mismatch | 18 | `EmbeddingDimensionMismatch` test; no `384` literal | Covered |
 | Benchmark arms identical but representation | 18 | shared-config identity test | Covered |
 | Equal tuning budget | 18 | config identity test | Covered |
-| Transfer: PR-AUC headline | 14, 19 | `pr_auc` test | **Blocked (C1)** |
-| Transfer: minority P/R/F1 + count | 14, 19 | `minority_report` test | **Blocked (C1)** |
-| Transfer beside trivial baseline | 14, 19, 21 | baseline-column doc test | **Blocked (C1)** |
+| Transfer: PR-AUC headline | 14, 19 | `pr_auc` test | Covered |
+| Transfer: minority P/R/F1 + count | 14, 19 | `minority_report` test | Covered |
+| Transfer beside trivial baseline | 14, 19, 21 | baseline-column doc test | Covered |
+| Transfer is a distinct model, not the primary artifact | 19 | distinct `model_name`; primary artifact raises on CFPB | Covered |
+| Transfer evaluated in-domain as its own ceiling | 19 | both evaluations asserted present | Covered |
+| Transfer naming binding in metadata and README | 19, 21 | `experiment_label` test; doc test | Covered |
+| Feature distribution shift reported (C3) | 19 | `text_length` flagged out-of-range | Covered |
 | ROC-AUC secondary only | 14, 21 | doc test | Covered |
 | Artifact metadata fields | 15 | schema test | Covered |
 | Reproducibility controls recorded | 15, 21 | metadata + doc tests | Covered |
@@ -702,4 +764,6 @@ The Phase 1 design's module layout places training under `ml/`, and this plan fo
 
 **Orphan check.** Every task traces to at least one requirement. Tasks 2 (package skeletons) and 22 (integration) exist to enforce the boundary requirements rather than implement a feature; both are justified by the "no serving wiring" and "corpus never enters `Complaint`" rows.
 
-**Gaps.** Three requirement rows are blocked by C1 and one by C2. No requirement is uncovered for any reason other than those two findings.
+**Gaps.** None. Every requirement row has an owning task and a proving test. The four rows previously blocked by C1 and C2 are now covered following addendum D15 and D16.
+
+**Open question, not a gap.** Finding C3 (`text_length` incomparability) and the escalated I2 (CFPB timestamps possibly load artifacts) both concern whether Task 19's *result* will be interpretable, not whether the task is implementable. Both are surfaced in the experiment's own output rather than resolved in the plan.

@@ -1,7 +1,7 @@
 # Sentinel — Phase 2 Specification Addendum
 
 **Date:** 2026-09-04
-**Status:** Proposed, awaiting review
+**Status:** Approved with amendments (C1/C2 resolved 2026-09-04; see D15–D18)
 **Amends:** `docs/superpowers/specs/2026-09-03-sentinel-design.md` §6 (ML pipeline)
 **Basis:** measured data reconnaissance, 2026-09-04. Every quantity below was
 measured, not assumed; each headline figure was verified by a second method.
@@ -223,9 +223,20 @@ What remains computable from a 311 corpus record:
 | `submitted_hour` | `created_date` | domain-free |
 | `submitted_weekday` | `created_date` | domain-free |
 | `text_length` | `descriptor` | weak — 311 descriptors have a median of 15 characters |
-| `sla_hours` | the §7 threshold for the record's type | informative only if thresholds vary by type |
 | `category_mean_resolution_hours` | training fold only | target-derived — see §6.3 |
 | `category_breach_rate` | training fold only | target-derived — see §6.3 |
+
+**`sla_hours` was removed from this set (see D15).** An earlier draft listed it as
+a sixth feature, sourced from the §7 per-type threshold. That threshold is the
+p75 of training *resolution hours* — the same outcomes that define the target —
+so a training row's own resolution time contributes to the p75 that would become
+that row's own feature. It is target-derived in exactly the sense §6.3 exists to
+prevent, and the frozen-label design offers no leakage-safe construction for it:
+the label requires one frozen threshold per type, while a leakage-safe feature
+would require an out-of-fold one, and those cannot be the same number.
+Maintaining two distinct thresholds — one for the label, one for the feature —
+was rejected as a source of future error without a compelling reason to accept
+it. **RiskFeaturesV1 is therefore five features.**
 
 **This is a thin feature set, and the resulting model may be weak.** That is a
 finding, not a failure. The spec's commitment is to measure and publish
@@ -236,16 +247,17 @@ than a strong-looking one built on leakage.
 
 ### 3.3 The artifact is authoritative about its own features
 
-Retaining a ten-field conceptual contract while training on six creates an
+Retaining a ten-field conceptual contract while training on five creates an
 implementation trap: a serving path that must construct a ten-field
-`RiskFeatures` in order to call a model that needs six will be asked for
+`RiskFeatures` in order to call a model that needs five will be asked for
 `queue_depth` in an environment that cannot produce it. Three concepts are
 therefore named separately:
 
 | Concept | Meaning |
 |---|---|
 | **`RiskFeatures`** (the contract) | The complete conceptual interface. Every feature Sentinel may ever compute about a complaint. Stable across model versions. |
-| **`RiskFeaturesV1`** (the trained subset) | The six features model v1 actually accepts, per §3.2. |
+| **`RiskFeaturesV1`** (the trained subset) | The five features model v1 actually accepts, per §3.2. |
+| **`TransferFeaturesV1`** (a separate, smaller subset) | The three features the reduced-feature cross-domain experiment accepts, per §5.4. Versioned independently of `RiskFeaturesV1`. |
 | **`feature_spec`** (in `metadata.json`) | The exact, ordered, versioned feature list the artifact was trained on. |
 
 **The rule: at inference, the artifact's `feature_spec` — not the breadth of the
@@ -355,6 +367,23 @@ Tuning budget is held equal rather than optimal: if one arm receives a
 hyperparameter search, so does the other, over a comparable space. An
 unequal-effort comparison measures effort, not representation.
 
+**Embedding dimension is recorded and validated, never assumed.** The MiniLM
+family does not share one output width — `all-MiniLM-L6-v2` and
+`all-MiniLM-L12-v2` emit 384 dimensions, but other MiniLM checkpoints and
+distillations do not, and an ONNX export can be produced with a pooling layer
+that changes the width. Both arms therefore:
+
+- record `embedding_dimension` in the artifact and benchmark metadata, read from
+  the model's actual output rather than from a constant;
+- record `embedding_model_id` and the ONNX file's SHA256, so the exact
+  checkpoint behind a published number is recoverable;
+- **validate** the observed dimension against the value recorded when the index
+  was built, and fail loudly on mismatch rather than silently comparing vectors
+  of different widths or relying on broadcasting to hide it.
+
+A hardcoded `384` anywhere in the benchmark is a defect. The number is an
+observation about a specific checkpoint, not a property of the approach.
+
 ### 5.4 Cross-domain transfer — demoted to a secondary robustness experiment
 
 Phase 1 §6.4 made cross-domain transfer a headline claim. **The measurement
@@ -364,6 +393,42 @@ and 88:1 respectively.
 
 Transfer is therefore **retained only as a secondary robustness experiment**,
 reported after the in-domain results and never as the project's ML headline.
+
+**It is a separate model, not the primary risk artifact scored on other data.**
+The primary `RiskFeaturesV1` model cannot be evaluated on CFPB at all: two of
+its five features — `category_mean_resolution_hours` and `category_breach_rate` —
+require resolution times, and CFPB publishes no resolution date. Substituting
+`timely` for a breach rate is prohibited by §4.3. Scoring the primary artifact on
+CFPB is therefore impossible, not merely unwise. (Before D15 removed it,
+`sla_hours` was a third such feature; its removal narrows the count but not the
+conclusion.)
+
+**`TransferFeaturesV1` — three features, versioned independently:**
+
+1. `submitted_hour`
+2. `submitted_weekday`
+3. `text_length`
+
+These are the only features computable in both corpora. A **distinct model** is
+trained on NYC 311 using only these, targeting `nyc311_sla_breach`, and then
+evaluated on CFPB records against `cfpb_timely_response`.
+
+**Naming and reporting are binding.** The experiment is called the
+**reduced-feature cross-domain robustness experiment** wherever it appears — in
+artifact metadata, the README, and any published table. It must never be
+described, labelled, or tabulated as the performance of the primary risk model.
+Its artifact carries its own `model_name`, its own `model_version`, and a
+`feature_spec` of exactly the three names above, so the two models cannot be
+confused at load time.
+
+**What it can and cannot tell you.** A reduced-feature model that transfers
+poorly may be failing because of domain shift, because three weak features are
+insufficient, or both — the design cannot separate those. To make the comparison
+interpretable, the same three-feature model is **also evaluated in-domain on
+held-out 311**, so the transfer gap is measured against that reduced-feature
+ceiling rather than against the five-feature primary model. Comparing a
+three-feature cross-domain score to a five-feature in-domain score would
+attribute to domain shift what may simply be missing features.
 
 Required metrics when it is run:
 
@@ -385,6 +450,29 @@ is good, and at a 1.12% base rate that intuition will be wrong. The baseline is
 part of the result, not a footnote to it.
 
 A poor transfer result is published as a legitimate finding about domain shift.
+
+### 5.5 Risk model (311 → `nyc311_sla_breach`)
+
+The Phase 1 design named these metrics in its §6.4; they are restated here
+because §5.4 no longer carries them and they would otherwise be homeless.
+
+Headline: **PR-AUC**. Reported alongside: ROC-AUC (secondary only), a
+calibration curve, the absolute minority count per period, and the
+majority-class and stratified-random baselines on the same split.
+
+**`precision@k` is removed from the required set.** The Phase 1 design named it
+on the reasoning that the model ranks an agent queue, so the top of the list
+matters more than the global curve. That reasoning is sound but incomplete: it
+never defined a `k`, and `k` is not a modelling choice — it is an operational
+one, meaning "how many complaints an agent reviews in a sitting", which Sentinel
+has no data to ground and no operational history to derive. A `precision@k`
+reported against an invented `k` would look like an operational guarantee while
+being an arbitrary slice.
+
+It may return once Phase 3 has real queue-throughput data, at which point `k`
+can be set from observed agent behaviour and given a stated operational meaning.
+Until then the calibration curve carries the "is the top of the ranking
+trustworthy" question, and does so without inventing a constant.
 
 ---
 
@@ -503,10 +591,11 @@ acceptable if it is derived from the measured distribution and published with
 its resulting class balance; what is prohibited is picking a round number
 because it appeared in an earlier document.
 
-Where this threshold feeds `sla_hours` as a model feature (§3.2), it is the
-per-type value, so the feature varies across records and carries information
-about how a category *behaves* — consistent with core principle §3.1, which
-forbids category identity but permits category behaviour.
+**This threshold defines the label only. It is never used as a training
+feature.** An earlier draft fed it in as `sla_hours`; that was removed because
+the threshold is computed from the very outcomes the label encodes, making it
+target-derived without a leakage-safe construction (§3.2, D15). The threshold's
+sole role is to turn `nyc311_resolution_hours` into `nyc311_sla_breach`.
 
 ---
 
@@ -693,3 +782,57 @@ its result to the representation, which is the only question it exists to
 answer. Unequal tuning effort in particular measures effort, not representation
 — and the decision to ship or cut MiniLM rests entirely on this comparison being
 clean.
+
+**D15 — `sla_hours` removed from `RiskFeaturesV1`; the set is five features
+(§3.2, §7).**
+*Was:* six features, with `sla_hours` sourced from the §7 per-type threshold.
+*Now:* five features. The threshold defines the label and is never a feature.
+*Why:* **the threshold is target-derived.** It is the p75 of training resolution
+hours — the same outcomes that define `nyc311_sla_breach` — so a training row's
+own resolution time contributes to the p75 that would become that row's own
+feature. That is the exact defect §6.3 exists to prevent, in a feature §6.3 did
+not name. The frozen-label design offers no leakage-safe construction for it: the
+label needs one frozen threshold per type or its definition varies by row, while
+a leakage-safe feature needs an out-of-fold one, and those cannot be the same
+number. Maintaining two distinct thresholds — one for the label, one for the
+feature — was rejected as a standing invitation to future error absent a
+compelling reason. Redundancy with `category_mean_resolution_hours` is a
+secondary observation, not the justification; the feature would be removed for
+leakage even if it carried unique signal.
+
+**D16 — The transfer experiment becomes a distinct reduced-feature model
+(§5.4).**
+*Was:* evaluate the primary 311 risk artifact against CFPB
+`cfpb_timely_response`.
+*Now:* train a separate three-feature model (`TransferFeaturesV1`:
+`submitted_hour`, `submitted_weekday`, `text_length`), versioned independently,
+and evaluate it both in-domain on held-out 311 and cross-domain on CFPB.
+*Why:* the original was impossible, not merely awkward. Three of the primary
+model's five features require resolution times that CFPB does not publish, and
+§4.3 prohibits substituting `timely` for a breach rate. Adding the in-domain
+reduced-feature evaluation makes the transfer gap interpretable: comparing a
+three-feature cross-domain score against a five-feature in-domain score would
+attribute to domain shift what may simply be missing features. Naming is binding
+so that a reduced-feature robustness probe is never read as the primary model's
+performance.
+
+**D17 — `precision@k` removed from the risk model's required metrics (§5.5).**
+*Was:* named in the Phase 1 design as a primary risk metric.
+*Now:* removed until a `k` with a stated operational meaning exists.
+*Why:* the reasoning behind it — that the model ranks a queue, so the top
+matters most — is sound, but no `k` was ever defined, and `k` is an operational
+quantity ("how many complaints an agent reviews in a sitting") that Sentinel has
+no history to ground. A `precision@k` against an invented `k` reads as an
+operational guarantee while being an arbitrary slice. The calibration curve
+carries the same question without inventing a constant. It may return in Phase 3
+from observed throughput.
+
+**D18 — Embedding dimension is recorded and validated, not assumed (§5.3).**
+*Was:* an implicit assumption that MiniLM emits 384 dimensions.
+*Now:* `embedding_dimension`, `embedding_model_id` and the ONNX SHA256 are
+recorded from the model's actual output, and the observed dimension is validated
+against the index's recorded value.
+*Why:* 384 is a property of specific checkpoints (`all-MiniLM-L6-v2`,
+`all-MiniLM-L12-v2`), not of the MiniLM family or of an arbitrary ONNX export
+whose pooling layer may differ. A hardcoded width would either crash obscurely or,
+worse, silently compare vectors of different widths.
