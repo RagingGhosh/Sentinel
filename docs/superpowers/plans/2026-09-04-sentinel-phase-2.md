@@ -11,12 +11,14 @@
 **Spec:** `docs/superpowers/specs/2026-09-04-sentinel-phase-2-addendum.md` (authoritative), amending `docs/superpowers/specs/2026-09-03-sentinel-design.md` §6.
 
 > **STATUS: revised 2026-09-04. Both Critical findings resolved in the spec
-> (addendum D15–D18); no task remains blocked.** `RiskFeaturesV1` is **five**
-> features — `sla_hours` was removed as target-derived. The transfer experiment
-> is now a **distinct three-feature model** (`TransferFeaturesV1`), not the
-> primary artifact scored on other data. `precision@k` is removed from the risk
-> metrics. Embedding dimension is recorded and validated rather than assumed.
-> Awaiting final approval before execution.
+> (addendum D15–D19); no task remains blocked.** `RiskFeaturesV1` is **five**
+> features — `sla_hours` was removed as target-derived. What Phase 1 called
+> transfer is now the **reduced-feature cross-domain cross-target robustness
+> probe** (`TransferFeaturesV1`): a distinct three-feature model, and explicitly
+> not evidence that the 311 SLA-risk model transfers to the CFPB task, because
+> the two targets are non-equivalent constructs. `precision@k` is removed from
+> the risk metrics. Embedding dimension is recorded and validated rather than
+> assumed. Awaiting final approval before execution.
 
 ## Global Constraints
 
@@ -86,7 +88,7 @@ Wiring artifacts into `ml/registry.py`. Populating `Complaint.embedding`. Writin
 | `ml/training/experiments/triage.py` | CFPB triage experiment | Create |
 | `ml/training/experiments/risk.py` | 311 risk experiment | Create |
 | `ml/training/experiments/dedup.py` | Perturbation benchmark harness | Create |
-| `ml/training/experiments/transfer.py` | Reduced-feature cross-domain robustness experiment | Create |
+| `ml/training/experiments/robustness_probe.py` | Reduced-feature cross-domain cross-target robustness probe | Create |
 | `tests/ingest/`, `tests/ml/training/`, `tests/ml/embedders/` | Mirrored test packages, each with `__init__.py` | Create |
 | `docs/phase-2-reproducibility.md` | Environment, seeds, corpus versions, rerun instructions | Create |
 
@@ -198,7 +200,7 @@ Seven paths, each with an owning module and an explicit test (Task 11 and the pe
 
 `sla_hours` is **not** a feature (addendum D15). The per-type threshold is the p75 of training resolution hours — the same outcomes that define the target — so a training row's own resolution time would contribute to the p75 becoming that row's own feature. The frozen-label design admits no leakage-safe construction for it, and maintaining a separate out-of-fold feature threshold alongside the frozen label threshold was rejected. The threshold's only role is to produce the label.
 
-**`TransferFeaturesV1` — three features**, versioned independently of `RiskFeaturesV1`, used only by the reduced-feature cross-domain robustness experiment (§O):
+**`TransferFeaturesV1` — three features**, versioned independently of `RiskFeaturesV1`, used only by the reduced-feature cross-domain cross-target robustness probe (§O):
 
 1. `submitted_hour`
 2. `submitted_weekday`
@@ -258,20 +260,28 @@ Both arms implement `TextEmbedder`. The benchmark builds a retrieval index over 
 
 Everything except the representation is held identical and asserted by a test: the same temporal boundaries, the same evaluation population, the same perturbation seed and set, the same similarity function (cosine over L2-normalised vectors), the same `k`, the same index population, the same metric, the same baselines, and an equal tuning budget. Task 18 encodes these as a single frozen `BenchmarkConfig` that both arms consume, so divergence requires editing shared config rather than one arm's code.
 
-## O. Reduced-feature cross-domain robustness experiment
+## O. Reduced-feature cross-domain cross-target robustness probe
 
-A **separate three-feature model**, not the primary risk artifact scored on other data (addendum D16). The primary model cannot be evaluated on CFPB at all: two of its five features — `category_mean_resolution_hours` and `category_breach_rate` — require resolution times CFPB does not publish, and §4.3 forbids substituting `timely` for a breach rate.
+**Not transfer.** A transfer experiment holds the task fixed and varies the data. This varies both (addendum D19):
 
-A distinct `HistGradientBoostingClassifier` is trained on NYC 311 using only `TransferFeaturesV1`, targeting `nyc311_sla_breach`, then evaluated twice:
+| | Source | Evaluation |
+|---|---|---|
+| Domain | NYC 311 civic service requests | CFPB consumer financial complaints |
+| Target | `nyc311_sla_breach` | `cfpb_timely_response` |
+| Target means | resolution slower than the type's training p75 | company replied inside CFPB's 15-day window |
 
-1. **In-domain**, on held-out 311 — the reduced-feature ceiling.
-2. **Cross-domain**, on CFPB against `cfpb_timely_response`.
+Addendum §4 defines those targets as deliberately non-equivalent and §4.3 prohibits unifying them, so a model trained on one and scored against the other is being asked a **different question** in a new domain.
 
-The gap between them is the transfer cost. Measuring against the reduced-feature ceiling rather than the five-feature primary model is what makes that gap interpretable — otherwise missing features and domain shift are confounded.
+A distinct `HistGradientBoostingClassifier` is trained on 311 using only `TransferFeaturesV1`, targeting `nyc311_sla_breach`, then evaluated twice:
 
-Metrics: PR-AUC headline, minority precision/recall/F1, absolute minority count, majority-class baseline, on the same split. ROC-AUC secondary only. Every figure appears beside its baseline in the same table.
+1. **In-domain on held-out 311** against its own target — the **reduced-feature in-domain reference performance**. Not a "ceiling": a ceiling implies the cross-domain figure measures the same quantity less well, and it does not measure the same quantity at all.
+2. **Cross-domain, cross-target on CFPB** against `cfpb_timely_response`.
 
-**Naming is binding.** "Reduced-feature cross-domain robustness experiment" wherever it appears — metadata, README, any published table. Its artifact carries its own `model_name`, `model_version` and a `feature_spec` of exactly the three names, so it cannot be confused with the primary model at load time.
+Metrics: PR-AUC headline, minority precision/recall/F1, absolute minority count, majority-class baseline, on the same split. ROC-AUC secondary only. Every figure beside its baseline in the same table.
+
+**Binding prohibition.** This probe must never be described, labelled, summarised or tabulated as evidence that the 311 SLA-risk model transfers to the CFPB task. Wording such as "transfers to", "generalises to" or "works on CFPB" is a defect in the report. Task 21's doc test enforces it.
+
+**Six facts the output must carry itself**, so they cannot be lost in transcription: source domain and source target (with the threshold rule defining it); evaluation domain and evaluation target (with what that field measures); the reduced feature set and why the five-feature set was unusable; that the target semantics differ and §4 defines them as non-equivalent; the polarity mapping (which class counts as adverse in each domain); and that this is exploratory robustness analysis rather than same-task transfer.
 
 ## P. Artifact / metadata format
 
@@ -396,9 +406,18 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 **Files:** Create `ingest/cli.py`, `tests/ingest/test_cli.py`.
 **Prerequisites:** Tasks 4, 6, 7.
 **Behavior:** `python -m ingest.cli --source {cfpb,nyc311} --start YYYY-MM-DD --end YYYY-MM-DD [--limit N]`. Fetch writes gzipped pages under `data/raw/`; a page whose checksum matches an existing file is skipped. Normalize and load are re-run from the raw cache without network access. `--limit` bounds records for development and is recorded in the manifest so a truncated corpus can never be mistaken for a full one.
-**Tests:** with a stub adapter, an interrupted run resumes without duplicating records; re-running with the raw cache present performs zero fetches; `--limit` is recorded in the manifest; the roster assertion from Task 7 runs before any Parquet file is written (asserted by checking no part file exists after a `RosterMismatch`).
-**Acceptance:** no test performs a network call; CLI is importable without Django.
-**Commit:** `feat: resumable corpus ingestion CLI`
+**Required output — timestamp plausibility diagnostic (finding I2).** Ingest computes, per source, the distribution of `submitted_at` hour-of-day and weekday, and writes it into the manifest as `timestamp_diagnostic` with:
+
+- the 24 hour-of-day counts and the 7 weekday counts;
+- `hour_uniformity` — the chi-square statistic against a uniform distribution, with its p-value;
+- `hour_concentration` — the share of records falling in the single busiest hour;
+- `verdict` — `"plausible_diurnal"`, `"suspect_uniform"`, or `"suspect_concentrated"`, from stated thresholds recorded alongside the verdict.
+
+**Task 19 consumes this**, so it is a required output rather than a diagnostic nicety. The reconnaissance found CFPB `date_received` and `date_sent_to_company` three seconds apart on a sampled record, which suggests load-time stamping; this measures whether that holds across the corpus, and does so at ingest where the raw data is already in hand.
+
+**Tests:** with a stub adapter, an interrupted run resumes without duplicating records; re-running with the raw cache present performs zero fetches; `--limit` is recorded in the manifest; the roster assertion from Task 7 runs before any Parquet file is written (asserted by checking no part file exists after a `RosterMismatch`); **a synthetic corpus with uniformly-distributed hours yields `verdict == "suspect_uniform"`, one with a realistic diurnal curve yields `"plausible_diurnal"`, and one with 90% of records in a single hour yields `"suspect_concentrated"`**; the diagnostic is present in the manifest for both sources.
+**Acceptance:** no test performs a network call; CLI is importable without Django; `timestamp_diagnostic` present in every manifest written.
+**Commit:** `feat: resumable corpus ingestion CLI with timestamp plausibility diagnostic`
 **Must not change:** normalization logic.
 
 ### Task 9: Temporal split machinery
@@ -518,27 +537,46 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 **Commit:** `feat: TextEmbedder abstraction with TF-IDF and MiniLM benchmark arms`
 **Must not change:** `Match`, `DedupIndex`, or any serving code.
 
-### Task 19: Reduced-feature cross-domain robustness experiment
+### Task 19: Reduced-feature cross-domain cross-target robustness probe
 
-**Objective:** Train a distinct three-feature model on 311 and evaluate it both in-domain and on CFPB.
-**Files:** Create `ml/training/experiments/transfer.py`, `tests/ml/training/test_transfer_experiment.py`.
-**Prerequisites:** Tasks 12, 13, 14, 15, 17.
-**Behavior:** Trains a separate `HistGradientBoostingClassifier` on the 311 corpus using `TRANSFER_FEATURES_V1` only, targeting `nyc311_sla_breach` (thresholds from Task 13, frozen). Evaluates twice: in-domain on held-out 311, and cross-domain on CFPB records against `cfpb_timely_response`. Writes its own artifact with `model_name="transfer_robustness"`, its own `model_version`, and a `feature_spec` of exactly the three names.
+**Objective:** Train a distinct three-feature model on 311 and evaluate it in-domain and cross-domain/cross-target on CFPB, with diagnostics that make the result's interpretability visible.
+**Files:** Create `ml/training/experiments/robustness_probe.py`, `tests/ml/training/test_robustness_probe.py`.
+**Prerequisites:** Tasks 8, 12, 13, 14, 15, 17. (**Task 8 is a hard prerequisite** — the probe reads its `timestamp_diagnostic` to set `result_classification`.)
+**Behavior:** Trains a separate `HistGradientBoostingClassifier` on the 311 corpus using `TRANSFER_FEATURES_V1` only, targeting `nyc311_sla_breach` (thresholds from Task 13, frozen). Evaluates in-domain on held-out 311 and cross-domain/cross-target on CFPB against `cfpb_timely_response`. Writes its own artifact with `model_name="xdomain_xtarget_probe"`, its own `model_version`, `feature_spec` of exactly the three names, and `experiment_label="reduced-feature cross-domain cross-target robustness probe"`.
+
+**Required output — the six framing facts.** The experiment emits, in its own report structure (not only in prose docs): `source_domain`, `source_target` with its threshold rule, `evaluation_domain`, `evaluation_target` with what the field measures, `feature_set` with the reason the five-feature set was unusable, `target_semantics_differ: true` with both construct definitions, `polarity_mapping` (see I7), and `analysis_type: "exploratory robustness, not same-task transfer"`.
+
+**Required output — feature distribution diagnostic (finding C3), strengthened.** For each feature in `TRANSFER_FEATURES_V1`, the report records:
+- source-training quantiles (min, p01, p05, p25, p50, p75, p95, p99, max);
+- evaluation-set quantiles at the same points;
+- **`pct_outside_source_range`** — the percentage of evaluation records whose value falls outside the source training [min, max] interval;
+- **`pct_outside_source_iqr`** — the percentage outside the source training [p25, p75];
+- an `out_of_range` flag where the evaluation median falls outside the source training IQR.
+
+Written to metadata as `feature_distribution_shift` and reproduced in the published table. `text_length` is expected to flag: measured medians are 15 chars (311 descriptor) against 1,202 (CFPB narrative), so `HistGradientBoostingClassifier`'s training-derived bins place essentially every CFPB record in the topmost bin, making the feature effectively constant at inference.
+
+**Split reuse (finding I6).** The probe **reuses Task 17's exact 311 split boundaries** — it does not compute its own. Otherwise the reduced-feature in-domain reference performance and the primary model's in-domain figure would rest on different data, and the obvious reader question ("what did dropping two features cost?") would be answered with an invalid comparison. CFPB evaluation uses the **CFPB test period only**, so no record that tuned the triage model's threshold appears here. Both period identifiers are recorded in metadata.
+
+**Polarity mapping is explicit (finding I7).** The model outputs P(adverse outcome). "Adverse" means `nyc311_sla_breach == True` in the source and `cfpb_timely_response == False` in the evaluation domain. That mapping is an interpretive choice, not a fact about the data, so it is stated as a sixth framing fact — `polarity_mapping` — rather than left implicit in the code.
+
+**The two PR-AUCs are not comparable to each other (finding I7).** Measured base rates differ by roughly 27×: 311 breach runs 26.9–31.1% at the p75 threshold, while CFPB not-timely is 1.12% within narratives. PR-AUC is base-rate dependent, so a lower cross-domain PR-AUC is expected arithmetic, not evidence of anything. The report therefore states, in its own output, that each figure is interpretable **only as lift over its own baseline**, records both baselines beside both figures, and includes `base_rate` per evaluation. A test asserts the report never presents the two PR-AUCs as a single before/after pair.
+
+**Required output — non-informative classification (escalated I2).** The probe reads the ingest-time timestamp diagnostic from Task 8. **If that diagnostic indicates CFPB `date_received` time-of-day is likely an ingestion artifact rather than a genuine event time, the probe sets `result_classification: "non-informative / diagnostic"` and the report states that the figures must not be interpreted as substantive model evidence.** Rationale carried in the output: with `submitted_hour` an artifact and `text_length` degenerate per C3, the model would be trained and scored almost entirely on `submitted_weekday`, and any resulting figure — good or bad — would describe nothing. Otherwise the classification is `"substantive"`, and the criterion that produced it is recorded either way.
+
 **Tests (marked `ml`):**
-- the artifact's `feature_spec` has exactly three names and its `model_name` differs from the primary risk artifact's (they cannot be confused at load time);
-- loading the primary five-feature artifact and attempting to score CFPB records raises `FeatureUnavailable` — **the impossibility that motivated D16 is asserted, not just described**;
-- both evaluations are reported, and the cross-domain figure is accompanied by the in-domain reduced-feature figure (so the gap is against the right ceiling);
-- every metric appears beside its majority-class baseline;
-- the absolute minority count is reported for each evaluation;
-- the string "reduced-feature cross-domain robustness" appears in the artifact metadata's `experiment_label`;
-- **a feature-distribution comparison is emitted** (see below) and flags at least `text_length` as out-of-range, since the measured medians are 15 chars (311) against 1,202 chars (CFPB).
+- the artifact's `feature_spec` has exactly three names and its `model_name` differs from the primary risk artifact's;
+- loading the primary five-feature artifact and attempting to score CFPB records raises `FeatureUnavailable` — the impossibility motivating D16 is asserted, not merely described;
+- all six framing facts are present in the emitted report structure, each non-empty;
+- the probe's 311 split boundaries are identical to Task 17's, and CFPB evaluation draws only from the CFPB test period;
+- `base_rate` is recorded for each evaluation, and a test asserts the two PR-AUCs are never presented as a single before/after pair;
+- `feature_distribution_shift` includes `pct_outside_source_range` and `pct_outside_source_iqr` for every transfer feature, and flags `text_length`;
+- given a stubbed ingest diagnostic reporting an artifact-like hour distribution, `result_classification` is `"non-informative / diagnostic"`; given a plausible diurnal one, it is `"substantive"`;
+- both evaluations are reported, and the cross-domain figure is accompanied by the reduced-feature in-domain reference performance;
+- every metric appears beside its majority-class baseline, with absolute minority counts;
+- the report contains none of the strings "transfers to", "generalises to", "generalizes to".
 
-**Additional required output — feature distribution report (finding C3).** For every feature in `TRANSFER_FEATURES_V1`, the experiment records the train-period distribution (min, p25, median, p75, max) beside the evaluation-period distribution, and sets an `out_of_range` flag where the evaluation median falls outside the training interquartile range. This is written into the artifact metadata as `feature_distribution_shift` and reproduced in the published table.
-
-Without it, a poor transfer result is unattributable between domain shift, a degenerate feature, and two weak calendar features — `HistGradientBoostingClassifier` bins continuous features from the training distribution, so every CFPB `text_length` falls in the topmost 311-derived bin and the feature is effectively constant at inference. The report makes that visible in the output rather than leaving it for a reader to discover.
-
-**Acceptance:** two evaluations published with baselines; the feature-distribution report emitted and `text_length` flagged out-of-range; the primary artifact is never scored on CFPB anywhere in the codebase.
-**Commit:** `feat: reduced-feature cross-domain robustness experiment`
+**Acceptance:** two evaluations published with baselines; the strengthened distribution diagnostic emitted with `text_length` flagged; the classification set from a recorded criterion; the primary artifact never scored on CFPB anywhere in the codebase.
+**Commit:** `feat: reduced-feature cross-domain cross-target robustness probe`
 **Must not change:** the primary risk experiment, `RISK_FEATURES_V1`, or thresholds.
 
 ### Task 20: Resource measurement
@@ -558,7 +596,7 @@ Without it, a poor transfer result is unattributable between domain shift, a deg
 **Files:** Create `docs/phase-2-reproducibility.md`. Modify `README.md`.
 **Prerequisites:** Tasks 16, 17, 18, 20.
 **Behavior:** Per §T. The cross-platform metric tolerance is *measured* on at least two environments and stated, not asserted.
-**Tests:** a doc test asserts every metric table in `README.md` has a baseline column.
+**Tests:** a doc test asserts every metric table in `README.md` has a baseline column; **a doc test asserts neither `README.md` nor the reproducibility guide contains the strings "transfers to", "generalises to" or "generalizes to" in any sentence naming the robustness probe** (addendum D19's binding prohibition, enforced in docs as Task 19 enforces it in the report); a doc test asserts the probe's published table carries its `result_classification`.
 **Acceptance:** no unmeasured figure appears in either document.
 **Commit:** `docs: Phase 2 reproducibility guide and measured metrics`
 **Must not change:** experiment results to make them look better.
@@ -584,6 +622,7 @@ Without it, a poor transfer result is unattributable between domain shift, a deg
     2 → 9 → 13 ─────────────┤        17 → 19
     2 → 14 ─────────────────┘
     9, 14 → 18 → 20 → 21
+    8 ─────────────────────────────→ 19   (timestamp_diagnostic)
     all → 22
 ```
 
@@ -593,7 +632,7 @@ Tasks 16 and 17 are independent of each other. Task 19 depends on 17 only for se
 
 ## W. Acceptance criteria
 
-Stated per task above. Phase 2 as a whole is complete when: both corpora ingest reproducibly with asserted rosters; every leakage path in §I has a passing test that fails when leakage is introduced; the triage and risk experiments produce loadable artifacts with metrics beside baselines; the dedup benchmark reports both arms under one config with a ship-or-cut decision recorded; the reduced-feature transfer experiment publishes both its in-domain and cross-domain figures beside baselines; resource figures come from a measured inference-only environment; and Task 22's integration guarantees pass.
+Stated per task above. Phase 2 as a whole is complete when: both corpora ingest reproducibly with asserted rosters; every leakage path in §I has a passing test that fails when leakage is introduced; the triage and risk experiments produce loadable artifacts with metrics beside baselines; the dedup benchmark reports both arms under one config with a ship-or-cut decision recorded; the robustness probe publishes its cross-domain cross-target figures beside both its baselines and its reduced-feature in-domain reference performance, carries all six framing facts, and records a result classification; resource figures come from a measured inference-only environment; and Task 22's integration guarantees pass.
 
 ## X. Failure and rollback strategy
 
@@ -636,7 +675,7 @@ Adversarial review of this plan against the approved addendum and the repository
 
 *Resolution (addendum D15):* removed. The threshold's sole role is to produce the label. The justification recorded in the spec is leakage, not redundancy; redundancy with `category_mean_resolution_hours` is noted only as a secondary observation, and the feature would be removed even if it carried unique signal. Task 12 now asserts the removal — a `FeatureSpec` naming `sla_hours` raises `FeatureUnavailable`, so the decision is enforced by code rather than documented in prose.
 
-**C3 — NEW. `text_length` is not comparable across the two corpora, which may make the transfer experiment uninterpretable.**
+**C3 — NEW. `text_length` is not comparable across the two corpora, which may make the robustness probe uninterpretable.**
 
 The reduced-feature model trains on 311 and is scored on CFPB. Its only non-calendar feature is `text_length`, and the measured distributions are not merely different — they barely overlap:
 
@@ -647,7 +686,7 @@ The reduced-feature model trains on 311 and is scored on CFPB. Its only non-cale
 
 An ~80× shift. `HistGradientBoostingClassifier` bins continuous features at fit time from the training distribution, so every CFPB record would land in the topmost 311-derived bin. The feature becomes effectively constant at inference, leaving a model that is nominally three features and operationally two calendar features.
 
-*Why it matters:* this is a consequence of the C1 resolution, not a pre-existing defect — it only appears once the transfer model is a real trained object rather than a hypothetical. If the experiment reports a poor transfer result, the cause is unattributable between domain shift, a degenerate feature, and two weak calendar features. That is precisely the confound D16's in-domain ceiling was added to remove, and it defeats it by a different route.
+*Why it matters:* this is a consequence of the C1 resolution, not a pre-existing defect — it only appears once the probe's model is a real trained object rather than a hypothetical. If the probe scores poorly, the cause is unattributable between domain shift, differing target semantics, a degenerate feature, and two weak calendar features. That is precisely the confound the reduced-feature in-domain reference performance was added to remove, and it defeats it by a different route.
 
 *Smallest correction, and it does not require a spec change:* Task 19 must report, for every feature, the train-period distribution beside the evaluation-period distribution, and flag any feature whose evaluation median falls outside the training interquartile range. The limitation then appears in the published output instead of being discovered by a reader. I have added this to Task 19 rather than leaving it implicit.
 
@@ -666,8 +705,8 @@ An ~80× shift. `HistGradientBoostingClassifier` bins continuous features at fit
 
 I verified `date_received` carries time-of-day (`2024-09-03T22:42:53.000Z`), correcting an assumption I nearly wrote into this plan. But on the same record `date_sent_to_company` is **three seconds later**, which is not plausible as a real business process and suggests both timestamps were stamped at load time.
 
-*Why it matters — escalated by the C1 resolution.* These were two of six risk features when this finding was first written. They are now two of the **three** features in `TransferFeaturesV1`, and finding C3 shows the third is effectively constant at CFPB inference. If the CFPB hour is a load artifact, the reduced-feature transfer model is trained and scored almost entirely on noise, and any result it produces — good or bad — means nothing. The validation step below is no longer a nice-to-have; it determines whether Task 19 is worth running at all.
-*Smallest correction:* add a validation step to Task 8 that reports the hour-of-day and weekday distributions for each source at ingest. A near-uniform or spike-clustered CFPB distribution against a plausibly diurnal 311 distribution settles it empirically. This is a small addition, not a redesign.
+*Why it matters — escalated by the C1 resolution.* These were two of six risk features when this finding was first written. They are now two of the **three** features in `TransferFeaturesV1`, and finding C3 shows the third is effectively constant at CFPB inference. If the CFPB hour is a load artifact, the probe's model is trained and scored almost entirely on noise, and any result it produces — good or bad — means nothing. The validation step below is no longer a nice-to-have; it determines whether Task 19 is worth running at all.
+*Correction, now applied:* Task 8 emits a required `timestamp_diagnostic` in every manifest — hour-of-day and weekday counts, a uniformity chi-square, single-hour concentration, and a `verdict` from stated thresholds. Task 19 consumes that verdict to set `result_classification`, so an artifact-like distribution downgrades the probe's figures to non-informative rather than letting them be read as substantive evidence.
 
 **I3 — The existing `.gitignore` would permit committing the corpus.**
 
@@ -682,6 +721,28 @@ The Phase 1 design's module layout places training under `ml/`, and this plan fo
 
 *Why it matters:* it silently breaks the dependency split and the Phase 3 memory budget.
 *Smallest correction:* already planned — Task 2's AST-based import-direction test. Recorded here so the reason survives.
+
+**I5 — NEW (found in this pass). Task 19 read an output Task 8 did not produce.**
+
+The revised Task 19 sets `result_classification` from "the ingest-time timestamp diagnostic from Task 8". Task 8 emitted no such thing — the diagnostic existed only as a suggested correction inside finding I2, which is prose about the plan rather than a specification of behaviour. Task 19 would have been implemented against a field that does not exist, and the failure would have surfaced at the very end of the plan, in its last experiment.
+
+*Why it matters:* this is the "assumption that only becomes visible after several tasks have already been implemented" class. It arose because a finding's proposed remedy was never promoted into the owning task's specification — a gap that recurs whenever review prose and task specs drift.
+
+*Correction, applied:* `timestamp_diagnostic` is now a required output of Task 8 with a defined structure, stated verdict thresholds, and three tests covering the uniform, diurnal and concentrated cases. Task 8 is added to Task 19's prerequisites and to the dependency graph.
+
+**I6 — NEW. The probe would have computed its own splits, invalidating the comparison a reader will inevitably make.**
+
+Task 19 evaluates its three-feature model in-domain on 311 and Task 17 evaluates the five-feature primary model on the same corpus. Nothing said the two must share split boundaries. A reader seeing both in-domain PR-AUCs will read the difference as the cost of dropping two features — valid only if both rest on identical data. Nothing also said which CFPB period the cross-domain evaluation draws from, leaving it free to reuse records that tuned the triage model's threshold.
+
+*Correction, applied:* Task 19 reuses Task 17's exact 311 boundaries and evaluates on the CFPB test period only; both identifiers go into metadata, and a test asserts the boundaries match.
+
+**I7 — NEW. The probe's two PR-AUCs are not comparable to each other, and the polarity mapping was implicit.**
+
+Measured base rates differ by roughly 27× — 311 breach at 26.9–31.1%, CFPB not-timely at 1.12% within narratives. PR-AUC is base-rate dependent, so the cross-domain figure will be lower than the in-domain one as arithmetic, before any question of domain or target shift. Presenting them as a before/after pair would manufacture an apparent degradation out of the base rate alone — the same category of error as reporting accuracy on a 99:1 split.
+
+Separately, the model outputs P(adverse), and "adverse" means breach in 311 but *not-timely* in CFPB. That mapping is an interpretive choice and was implicit in the plan.
+
+*Correction, applied:* each figure is stated as interpretable only as lift over its own baseline; `base_rate` is recorded per evaluation; a test asserts the two PR-AUCs are never presented as a single pair; and `polarity_mapping` becomes a sixth required framing fact.
 
 ### Minor
 
@@ -748,13 +809,28 @@ The Phase 1 design's module layout places training under `ml/`, and this plan fo
 | Embedding dimension validated on mismatch | 18 | `EmbeddingDimensionMismatch` test; no `384` literal | Covered |
 | Benchmark arms identical but representation | 18 | shared-config identity test | Covered |
 | Equal tuning budget | 18 | config identity test | Covered |
-| Transfer: PR-AUC headline | 14, 19 | `pr_auc` test | Covered |
-| Transfer: minority P/R/F1 + count | 14, 19 | `minority_report` test | Covered |
-| Transfer beside trivial baseline | 14, 19, 21 | baseline-column doc test | Covered |
-| Transfer is a distinct model, not the primary artifact | 19 | distinct `model_name`; primary artifact raises on CFPB | Covered |
-| Transfer evaluated in-domain as its own ceiling | 19 | both evaluations asserted present | Covered |
-| Transfer naming binding in metadata and README | 19, 21 | `experiment_label` test; doc test | Covered |
-| Feature distribution shift reported (C3) | 19 | `text_length` flagged out-of-range | Covered |
+| Probe: PR-AUC headline | 14, 19 | `pr_auc` test | Covered |
+| Probe: minority P/R/F1 + count | 14, 19 | `minority_report` test | Covered |
+| Probe reported beside trivial baseline | 14, 19, 21 | baseline-column doc test | Covered |
+| Probe is a distinct model, not the primary artifact | 19 | distinct `model_name`; primary artifact raises on CFPB | Covered |
+| Probe evaluated in-domain as reference performance | 19 | both evaluations asserted present | Covered |
+| Named cross-domain **and** cross-target (D19) | 19, 21 | `experiment_label` test; naming doc test | Covered |
+| Never presented as same-task transfer | 19, 21 | forbidden-wording tests in report and docs | Covered |
+| Six framing facts carried in the output | 19 | all six present and non-empty | Covered |
+| Polarity mapping stated explicitly (I7) | 19 | `polarity_mapping` fact asserted | Covered |
+| Probe reuses Task 17's 311 split (I6) | 19 | boundary-equality test | Covered |
+| CFPB evaluation on test period only (I6) | 19 | period identifier asserted | Covered |
+| Base rate recorded per evaluation (I7) | 19 | `base_rate` present both sides | Covered |
+| Two PR-AUCs never paired as before/after (I7) | 19 | report-structure test | Covered |
+| Source/evaluation domain + target stated | 19 | framing-facts test | Covered |
+| Target semantics differ, stated explicitly | 19 | framing-facts test | Covered |
+| Labelled exploratory robustness analysis | 19 | `analysis_type` test | Covered |
+| Probe naming binding in metadata and README | 19, 21 | `experiment_label` test; doc test | Covered |
+| Source-vs-target quantiles per feature (C3) | 19 | quantile table asserted for all three features | Covered |
+| % of target records outside source range (C3) | 19 | `pct_outside_source_range` + `pct_outside_source_iqr` | Covered |
+| `text_length` flagged out-of-range | 19 | flag asserted | Covered |
+| Timestamp plausibility diagnostic emitted (I2) | 8 | uniform / diurnal / concentrated verdict tests | Covered |
+| Artifact-like timestamps ⇒ non-informative result (I2) | 8, 19 | stubbed-diagnostic classification tests | Covered |
 | ROC-AUC secondary only | 14, 21 | doc test | Covered |
 | Artifact metadata fields | 15 | schema test | Covered |
 | Reproducibility controls recorded | 15, 21 | metadata + doc tests | Covered |
@@ -766,4 +842,4 @@ The Phase 1 design's module layout places training under `ml/`, and this plan fo
 
 **Gaps.** None. Every requirement row has an owning task and a proving test. The four rows previously blocked by C1 and C2 are now covered following addendum D15 and D16.
 
-**Open question, not a gap.** Finding C3 (`text_length` incomparability) and the escalated I2 (CFPB timestamps possibly load artifacts) both concern whether Task 19's *result* will be interpretable, not whether the task is implementable. Both are surfaced in the experiment's own output rather than resolved in the plan.
+**Open question, not a gap.** Finding C3 (`text_length` incomparability) and the escalated I2 (CFPB timestamps possibly load artifacts) both concern whether Task 19's *result* will be interpretable, not whether the task is implementable. Both are now surfaced in the experiment's own output — C3 through the source-vs-target quantile diagnostic with out-of-range percentages, I2 through a `result_classification` that downgrades the figures to non-informative when the ingest verdict says the timestamps are artifacts. Neither is resolved in the plan, because neither can be resolved without the data in hand.

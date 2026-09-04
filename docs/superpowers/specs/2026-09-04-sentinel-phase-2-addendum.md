@@ -1,7 +1,7 @@
 # Sentinel — Phase 2 Specification Addendum
 
 **Date:** 2026-09-04
-**Status:** Approved with amendments (C1/C2 resolved 2026-09-04; see D15–D18)
+**Status:** Approved with amendments (C1/C2 resolved 2026-09-04; see D15–D19)
 **Amends:** `docs/superpowers/specs/2026-09-03-sentinel-design.md` §6 (ML pipeline)
 **Basis:** measured data reconnaissance, 2026-09-04. Every quantity below was
 measured, not assumed; each headline figure was verified by a second method.
@@ -257,7 +257,7 @@ therefore named separately:
 |---|---|
 | **`RiskFeatures`** (the contract) | The complete conceptual interface. Every feature Sentinel may ever compute about a complaint. Stable across model versions. |
 | **`RiskFeaturesV1`** (the trained subset) | The five features model v1 actually accepts, per §3.2. |
-| **`TransferFeaturesV1`** (a separate, smaller subset) | The three features the reduced-feature cross-domain experiment accepts, per §5.4. Versioned independently of `RiskFeaturesV1`. |
+| **`TransferFeaturesV1`** (a separate, smaller subset) | The three features the reduced-feature cross-domain cross-target robustness probe accepts, per §5.4. Versioned independently of `RiskFeaturesV1`. |
 | **`feature_spec`** (in `metadata.json`) | The exact, ordered, versioned feature list the artifact was trained on. |
 
 **The rule: at inference, the artifact's `feature_spec` — not the breadth of the
@@ -297,7 +297,8 @@ It is a **regulatory responsiveness flag about a company**, not a measure of
 whether a complaint was resolved before a service deadline. It says nothing
 about how long resolution took — CFPB publishes no resolution date at all.
 
-Permitted use: the secondary transfer experiment of §5.4, with imbalance-aware
+Permitted use: the reduced-feature cross-domain cross-target robustness probe
+of §5.4, with imbalance-aware
 metrics. **Not** permitted: use as a primary training target, or as a component
 of any unified SLA label.
 
@@ -314,7 +315,9 @@ training target for the risk model.
 
 No field, column, dataclass or variable in Phase 2 may combine these two under a
 single name. A model trained on one is never evaluated on the other except
-through the explicitly-labelled transfer experiment in §5.4.
+through the explicitly-labelled cross-domain cross-target robustness probe in
+§5.4, which is exploratory analysis rather than a claim that either target
+substitutes for the other.
 
 ---
 
@@ -384,15 +387,35 @@ that changes the width. Both arms therefore:
 A hardcoded `384` anywhere in the benchmark is a defect. The number is an
 observation about a specific checkpoint, not a property of the approach.
 
-### 5.4 Cross-domain transfer — demoted to a secondary robustness experiment
+### 5.4 Reduced-feature cross-domain cross-target robustness probe
 
-Phase 1 §6.4 made cross-domain transfer a headline claim. **The measurement
-does not support that weight.** The transfer target — CFPB `timely` — is
-0.61% minority overall and 1.12% within narratives, a ratio of roughly 163:1
-and 88:1 respectively.
+Phase 1 §6.4 made cross-domain transfer a headline claim. **The measurement does
+not support that weight**, and closer reading shows the experiment is not what
+Phase 1 called it.
 
-Transfer is therefore **retained only as a secondary robustness experiment**,
-reported after the in-domain results and never as the project's ML headline.
+**It is not transfer. It crosses both the domain and the target.** A transfer
+experiment holds the task fixed and changes the data. This one changes both:
+
+| | Source | Target of evaluation |
+|---|---|---|
+| Domain | NYC 311 civic service requests | CFPB consumer financial complaints |
+| Target variable | `nyc311_sla_breach` | `cfpb_timely_response` |
+| Target means | resolution took longer than the type's training p75 | the company replied within CFPB's 15-day window |
+
+Those two target variables are defined by §4 as **deliberately non-equivalent
+constructs**, and §4.3 prohibits unifying them. A model trained to predict one
+and scored against the other is therefore not being asked the same question in a
+new domain — it is being asked a **different question** in a new domain.
+
+**The experiment is renamed accordingly: the reduced-feature cross-domain
+cross-target robustness probe.** It is exploratory robustness analysis, not
+same-task transfer.
+
+**Binding prohibition.** This probe must **never** be described, labelled,
+summarised or tabulated as evidence that the 311 SLA-risk model transfers to the
+CFPB task. It cannot support that claim, because the CFPB task is a different
+task. Any wording implying otherwise — "transfers to", "generalises to", "works
+on CFPB" — is a defect in the report, not a stylistic preference.
 
 **It is a separate model, not the primary risk artifact scored on other data.**
 The primary `RiskFeaturesV1` model cannot be evaluated on CFPB at all: two of
@@ -411,24 +434,50 @@ conclusion.)
 
 These are the only features computable in both corpora. A **distinct model** is
 trained on NYC 311 using only these, targeting `nyc311_sla_breach`, and then
-evaluated on CFPB records against `cfpb_timely_response`.
+scored on CFPB records against `cfpb_timely_response`.
 
-**Naming and reporting are binding.** The experiment is called the
-**reduced-feature cross-domain robustness experiment** wherever it appears — in
-artifact metadata, the README, and any published table. It must never be
-described, labelled, or tabulated as the performance of the primary risk model.
-Its artifact carries its own `model_name`, its own `model_version`, and a
-`feature_spec` of exactly the three names above, so the two models cannot be
-confused at load time.
+**Naming and reporting are binding.** The probe is called the **reduced-feature
+cross-domain cross-target robustness probe** wherever it appears — artifact
+metadata, README, and any published table. Its artifact carries its own
+`model_name`, its own `model_version`, and a `feature_spec` of exactly the three
+names above, so it cannot be confused with the primary model at load time.
 
-**What it can and cannot tell you.** A reduced-feature model that transfers
-poorly may be failing because of domain shift, because three weak features are
-insufficient, or both — the design cannot separate those. To make the comparison
-interpretable, the same three-feature model is **also evaluated in-domain on
-held-out 311**, so the transfer gap is measured against that reduced-feature
-ceiling rather than against the five-feature primary model. Comparing a
-three-feature cross-domain score to a five-feature in-domain score would
-attribute to domain shift what may simply be missing features.
+**Every report of this probe must state, explicitly and in the output itself:**
+
+1. **Source domain and source target** — NYC 311, `nyc311_sla_breach`, with the
+   threshold rule that defines it.
+2. **Evaluation domain and evaluation target** — CFPB, `cfpb_timely_response`,
+   with what that field actually measures.
+3. **The reduced feature set** — the three names, and that the primary model's
+   five-feature set was not usable here.
+4. **That the target semantics differ**, naming both constructs and stating that
+   §4 defines them as non-equivalent.
+5. **The polarity mapping** — the model outputs P(adverse), and "adverse" means
+   `nyc311_sla_breach == True` in the source but `cfpb_timely_response == False`
+   in the evaluation domain. That correspondence is an interpretive choice, not
+   a fact about the data, so it is stated rather than left implicit.
+6. **That this is exploratory robustness analysis, not same-task transfer**, and
+   therefore cannot establish that the 311 model works on the CFPB task.
+
+**The two evaluations' headline figures are not comparable to each other.**
+Measured base rates differ by roughly 27× — 311 breach at 26.9–31.1% against
+CFPB not-timely at 1.12% within narratives — and PR-AUC is base-rate dependent.
+A lower cross-domain figure is therefore expected arithmetic before any question
+of domain or target shift. Each figure is interpretable **only as lift over its
+own baseline**; both baselines and both base rates are reported beside them, and
+the two are never presented as a single before/after pair.
+
+A report missing any of the six is incomplete, and the experiment's own output
+carries them so they cannot be dropped in transcription.
+
+**What it can and cannot tell you.** A reduced-feature model that scores poorly
+here may be failing because of domain shift, because the target means something
+different, because three weak features are insufficient, or any combination — the
+design cannot separate them. To give the number something honest to sit beside,
+the same three-feature model is **also evaluated in-domain on held-out 311**
+against its own target. That figure is the **reduced-feature in-domain reference
+performance** — not a "ceiling", since a ceiling implies the cross-domain number
+is measuring the same quantity less well, and it is not.
 
 Required metrics when it is run:
 
@@ -442,14 +491,18 @@ Required metrics when it is run:
   No` records within narratives in total — a large absolute number, which is why
   the experiment is worth running at all rather than abandoning.)
 
-**The transfer result is never reported as a standalone number.** Every figure
+**The probe's result is never reported as a standalone number.** Every figure
 appears beside the trivial baseline computed on the same split, in the same
 table, so a reader sees the model and the do-nothing comparison together. A
 PR-AUC quoted alone invites the reader to supply their own intuition about what
 is good, and at a 1.12% base rate that intuition will be wrong. The baseline is
 part of the result, not a footnote to it.
 
-A poor transfer result is published as a legitimate finding about domain shift.
+A poor result here is published rather than buried — but the design cannot say
+what it is a finding *about*. Domain shift, the differing target semantics of
+§4, feature degeneracy, or any combination could produce it, and the probe
+cannot separate them. It is reported as an observation with its causes
+enumerated and unresolved, never as a measurement of domain shift alone.
 
 ### 5.5 Risk model (311 → `nyc311_sla_breach`)
 
@@ -802,7 +855,7 @@ secondary observation, not the justification; the feature would be removed for
 leakage even if it carried unique signal.
 
 **D16 — The transfer experiment becomes a distinct reduced-feature model
-(§5.4).**
+(§5.4).** *(Further reframed by D19 — read both.)*
 *Was:* evaluate the primary 311 risk artifact against CFPB
 `cfpb_timely_response`.
 *Now:* train a separate three-feature model (`TransferFeaturesV1`:
@@ -837,3 +890,23 @@ against the index's recorded value.
 `all-MiniLM-L12-v2`), not of the MiniLM family or of an arbitrary ONNX export
 whose pooling layer may differ. A hardcoded width would either crash obscurely or,
 worse, silently compare vectors of different widths.
+
+**D19 — The experiment is cross-domain AND cross-target, and is renamed to say
+so (§5.4).**
+*Was (D16):* "reduced-feature cross-domain robustness experiment", framed as
+transfer with a reduced feature set.
+*Now:* the **reduced-feature cross-domain cross-target robustness probe**, with
+a binding prohibition on describing it as evidence that the 311 SLA-risk model
+transfers to the CFPB task, and six facts its report must state in its own
+output.
+*Why:* D16 fixed the feature mismatch but left the framing wrong. The model is
+trained to predict `nyc311_sla_breach` — resolution slower than a type's
+training p75 — and scored against `cfpb_timely_response` — whether a company
+replied inside a 15-day regulatory window. §4 defines those as deliberately
+non-equivalent constructs and §4.3 prohibits unifying them. Transfer, properly
+used, holds the task fixed and varies the data; this varies both. Calling it
+transfer would let a reader conclude the risk model "works on CFPB", which the
+experiment cannot show and which §4.3 forbids asserting.
+*Also changed:* "in-domain ceiling" became **"reduced-feature in-domain
+reference performance"**. A ceiling implies the cross-domain figure measures the
+same quantity less well. It does not measure the same quantity at all.
