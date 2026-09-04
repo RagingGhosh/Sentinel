@@ -64,11 +64,35 @@ Restricting the window makes the taxonomy coherent, and 2.0M narratives is far
 more than the models need.
 
 **The label roster is derived, not hardcoded.** Ingest computes the label set as
-the intersection of the `product` values present in each year of the window, and
-**asserts the resulting count matches the measured expectation (11), failing
-loudly if the vocabulary has drifted since this addendum was written.** The
-assumption is executable rather than documentary. No label list is transcribed
-into code from this document.
+the intersection of the `product` values present in each year of the window. No
+label list is transcribed into code from this document; the assumption is
+executable rather than documentary.
+
+### 1.1 Roster failure policy
+
+Deriving the roster is not enough on its own — a roster can stay eleven labels
+wide while one label is replaced by another. The rule is therefore about
+membership, not count.
+
+**Ingest reports the observed roster before processing any records, then fails
+loudly if it differs from the locked roster in either direction:**
+
+| Condition | Behaviour |
+|---|---|
+| A `product` value appears that is not in the locked roster | **Fail.** Report the unexpected label and its record count. |
+| A locked roster label is absent from the window | **Fail.** Report which label vanished. |
+| Roster matches exactly | Proceed, having printed the roster and per-label counts. |
+
+**Silently dropping the record, mapping it to a neighbouring label, mapping it
+to `other`, or auto-expanding the taxonomy are all prohibited.** Each would
+change the experimental population underneath a published benchmark without
+anyone deciding to, which is precisely the failure this window exists to
+prevent — CFPB has renamed this taxonomy at least twice already, and will again.
+
+A taxonomy change is a **spec decision with a version bump**, not an ingest-time
+inference. When ingest fails this way, the correct response is to amend this
+document, restate the window and roster, and note in `metadata.json` that
+artifacts before and after are not comparable.
 
 **Residual imbalance is accepted and reported, not engineered away.** The
 largest class is ~77% of the 2024 window. Metrics are chosen accordingly (§5),
@@ -177,8 +201,18 @@ trained on.
 
 `age_hours` is defined as "age at prediction time". For a corpus record the
 prediction point is intake, so `age_hours` is identically zero for every
-training row — a constant, carrying no information. It is therefore **also
-excluded from v1 training** and retained only in the serving contract.
+training row. It is therefore **also excluded from v1 training** and retained
+only in the serving contract.
+
+**This is a zero-variance problem, not a missing-data problem, and the
+distinction matters.** The value is not absent, unknown, or imputable — it is
+known exactly, and it is the same for every row. No imputation strategy, default
+value, or richer extraction recovers signal from it, because there is none to
+recover: a feature with no variance cannot carry information about a target.
+Treating it as missing would invite someone to "fix" it later by filling it in.
+It becomes informative only under a prediction point where complaints have
+genuinely differing ages — which is Sentinel's own operational history in
+Phase 3+, not a historical corpus.
 
 ### 3.2 The v1 training feature set, and an honest warning
 
@@ -199,6 +233,40 @@ honestly; if a v1 risk model does not beat its majority-class baseline by a
 meaningful margin, the README says so and the model does not ship behind a
 serving path. A weak, honestly-reported model is a better portfolio artifact
 than a strong-looking one built on leakage.
+
+### 3.3 The artifact is authoritative about its own features
+
+Retaining a ten-field conceptual contract while training on six creates an
+implementation trap: a serving path that must construct a ten-field
+`RiskFeatures` in order to call a model that needs six will be asked for
+`queue_depth` in an environment that cannot produce it. Three concepts are
+therefore named separately:
+
+| Concept | Meaning |
+|---|---|
+| **`RiskFeatures`** (the contract) | The complete conceptual interface. Every feature Sentinel may ever compute about a complaint. Stable across model versions. |
+| **`RiskFeaturesV1`** (the trained subset) | The six features model v1 actually accepts, per §3.2. |
+| **`feature_spec`** (in `metadata.json`) | The exact, ordered, versioned feature list the artifact was trained on. |
+
+**The rule: at inference, the artifact's `feature_spec` — not the breadth of the
+serving interface — determines which features are built.** The inference adapter
+reads `feature_spec`, constructs exactly those features in exactly that order,
+and raises if a named feature is unavailable. Features outside the spec are
+never computed, so an environment that cannot produce `queue_depth` is never
+asked for it.
+
+This makes `feature_spec` a **compatibility guard rather than documentation**: a
+model can never be served a vector it was not trained on, and swapping in a v2
+artifact that needs more features fails loudly at load time instead of silently
+mis-scoring.
+
+**Consequence for the Phase 1 interface, stated plainly:** the four excluded
+fields become optional (`| None`) on `RiskFeatures`, because they genuinely are
+unavailable in some contexts and a required field that cannot be supplied is a
+lie in the type. That is a real change to a Phase 1 interface. It lands in
+**Phase 3**, with the inference adapter that consumes it — Phase 2 does no
+serving and needs no such change. §8's architecture table is corrected
+accordingly.
 
 ---
 
@@ -263,6 +331,30 @@ accuracy**. Metric: recall@k over perturbed held-out records, measured over
 `(source, external_id)` pairs per §2.2. The MiniLM candidate ships only if it
 beats the TF-IDF candidate; the result is published either way.
 
+**The comparison methodology is locked before either candidate is built.** A
+benchmark where the two arms differ in more than one respect cannot attribute
+its result to the representation — which is the only question it exists to
+answer. Both candidates must therefore share, identically:
+
+| Held constant | |
+|---|---|
+| Temporal train / validation / test boundaries | the same cut dates, per §6.1 |
+| Evaluation population | the same held-out records and the same perturbations applied to them |
+| Target definition | the same notion of a correct retrieval |
+| Preprocessing leakage rules | §6.2 applies to both; in particular a TF-IDF vocabulary is built from training text only |
+| Retrieval procedure | the same similarity function, the same k, the same index population |
+| Downstream classifier family | where an embedder feeds a classifier, the same family and the same tuning budget |
+| Primary metric and baselines | the same recall@k definition and the same baselines |
+
+**The representation is the only permitted difference between the arms.** Any
+other divergence — a different k, a differently-tuned classifier, a
+differently-built index — invalidates the comparison, and the benchmark is
+re-run rather than reported with a caveat.
+
+Tuning budget is held equal rather than optimal: if one arm receives a
+hyperparameter search, so does the other, over a comparable space. An
+unequal-effort comparison measures effort, not representation.
+
 ### 5.4 Cross-domain transfer — demoted to a secondary robustness experiment
 
 Phase 1 §6.4 made cross-domain transfer a headline claim. **The measurement
@@ -284,6 +376,13 @@ Required metrics when it is run:
   a reader can judge whether the estimate is stable. (There are 43,115 `timely =
   No` records within narratives in total — a large absolute number, which is why
   the experiment is worth running at all rather than abandoning.)
+
+**The transfer result is never reported as a standalone number.** Every figure
+appears beside the trivial baseline computed on the same split, in the same
+table, so a reader sees the model and the do-nothing comparison together. A
+PR-AUC quoted alone invites the reader to supply their own intuition about what
+is good, and at a 1.12% base rate that intuition will be wrong. The baseline is
+part of the result, not a footnote to it.
 
 A poor transfer result is published as a legitimate finding about domain shift.
 
@@ -329,10 +428,34 @@ the label*. Computing them over the full dataset injects test-period outcomes
 into training features — leakage that is invisible in the code and produces
 excellent, meaningless metrics.
 
-**Rule:** both are computed from the training period only, then applied as
-constants to validation and test. Categories unseen in training receive the
-training-period global mean, not a value computed from the period they appear
-in.
+Training-fold-only computation is **necessary but not sufficient**. If a
+training row's own outcome contributes to the aggregate assigned to that row —
+row A's 12 hours feeding the category mean that becomes A's feature — then A's
+target has influenced A's feature. That is still target leakage, and it is
+severe for small categories, where a single row can move the aggregate by a
+large fraction.
+
+**Rule, by row class:**
+
+| Row class | How the aggregate is produced |
+|---|---|
+| **Training** | Out-of-fold: the value assigned to a row is computed **excluding that row's own outcome**. |
+| **Validation / test** | Computed **exclusively from the training period**, applied unchanged. |
+| **Unseen category** | The training-period global mean. Never a value derived from the period the category appears in. |
+
+**Use K-fold out-of-fold, not leave-one-out.** Leave-one-out target encoding has
+a well-known pathology: with the row's own target removed, the encoded value
+becomes systematically anti-correlated with that target, and gradient-boosted
+trees can recover the original label from it — producing a model that scores
+superbly and generalises not at all. K-fold OOF does not have this failure mode.
+
+**The folds are time-ordered, not random.** Within the training period, folds
+are built by forward chaining (each fold's aggregate is computed from strictly
+earlier training data) rather than random K-fold. Random folds inside the
+training period would let later training records inform earlier ones — a weaker
+version of the same leak this section exists to prevent, and inconsistent with
+§6.1's decision that time ordering is what makes the evaluation interpretable.
+This is stricter than common practice, deliberately.
 
 ### 6.4 Enforcement
 
@@ -394,7 +517,8 @@ architecture that Phase 1 established and its review validated:
 
 | Property | Status |
 |---|---|
-| ML protocols in `ml/base.py` as the serving contract | **Unchanged.** `TriageModel`, `DedupIndex`, `RiskModel` keep their signatures. `TextEmbedder` is added for the benchmark (§2.2); it does not alter the existing three. |
+| ML protocols in `ml/base.py` as the serving contract | **Unchanged in Phase 2.** `TriageModel`, `DedupIndex`, `RiskModel` keep their signatures. `TextEmbedder` is added for the benchmark (§2.2); it does not alter the existing three. |
+| `RiskFeatures` field requirements | **Changes in Phase 3, not Phase 2** — see the correction below. |
 | `model_version` provenance on every result object | **Unchanged and extended.** Artifacts additionally record `feature_spec` naming the exact trained subset (§3), split cut dates (§6.1), and thresholds (§7). |
 | `Prediction` append-only, on both instance and bulk ORM paths | **Unchanged.** Phase 2 writes no `Prediction` rows at all — it produces artifacts, not predictions. |
 | All lifecycle mutation through `complaints/services.py` | **Unchanged.** Phase 2 adds no mutation path. |
@@ -402,6 +526,15 @@ architecture that Phase 1 established and its review validated:
 | ML degrades to absent, never to broken | **Unchanged.** The registry still resolves to null implementations; Phase 2 does not wire artifacts into serving. That is Phase 3. |
 | Domain packs: the system knows the concept of a domain, never the meaning of one | **Unchanged, and extended.** Dataset adapters attach to pack classes in `domains/packs.py`. No source-specific literal enters `complaints/`. |
 | Separation of training/evaluation data from live operational data | **Newly explicit** (§2), where Phase 1 left it unstated. |
+
+**Correction to an earlier draft of this addendum.** A previous version claimed
+the Phase 1 ML interfaces were untouched, without qualification. That was wrong.
+§3.3's compatibility guard requires the four unavailable `RiskFeatures` fields to
+become optional, because a required field that cannot be supplied is a lie in the
+type. The change is small and lands in **Phase 3** alongside the inference
+adapter that consumes it — Phase 2 performs no serving and needs no such change —
+but it is a change to a Phase 1 interface and is recorded as one rather than
+absorbed silently.
 
 **Phase 2 produces no schema migration.** It adds no model and alters no table.
 
@@ -507,3 +640,56 @@ earlier document would be fitting the data to the spec rather than the reverse.
 - Retraining the risk model on Sentinel's own operational history — that becomes
   possible only once Phase 3 has accumulated resolved complaints, and it is what
   restores the four excluded features.
+
+**D11 — Target-derived aggregates require out-of-fold construction, not merely
+training-fold construction (§6.3).**
+*Was (first draft of this addendum):* computed from the training period, applied
+as constants to validation and test.
+*Now:* out-of-fold for training rows, training-period-only for validation and
+test, via time-ordered forward-chaining folds; K-fold rather than leave-one-out.
+*Why:* training-fold-only is necessary but not sufficient. A row whose own
+outcome feeds the aggregate assigned to that row has leaked its target into its
+feature, severely so for small categories. Leave-one-out was rejected in favour
+of K-fold because LOO target encoding becomes systematically anti-correlated
+with the target and boosted trees can invert it. Forward-chaining folds were
+chosen over random ones so that the within-train construction obeys the same
+time ordering §6.1 relies on.
+
+**D12 — The artifact, not the serving interface, is authoritative about features
+(§3.3).**
+*Was (first draft):* the ten-field contract retained, with the trained subset
+merely recorded in `feature_spec`.
+*Now:* three named concepts — the conceptual contract, the v1 trained subset,
+and `feature_spec` — with the inference adapter building exactly and only what
+`feature_spec` names.
+*Why:* the first draft left an implementation trap. A serving path required to
+construct ten fields in order to call a six-field model would be asked for
+`queue_depth` in an environment that cannot produce it. Making the artifact
+authoritative turns `feature_spec` from documentation into a compatibility
+guard that fails loudly at load time rather than mis-scoring silently. This
+change requires the four unavailable fields to become optional on
+`RiskFeatures` in Phase 3, which §8 now records as a real interface change
+rather than claiming none occurred.
+
+**D13 — Out-of-roster labels fail ingest loudly (§1.1).**
+*Was (first draft):* the roster derived at ingest with an assertion on its
+*count*.
+*Now:* membership checked in both directions, the observed roster reported
+before processing, and any difference failing the run.
+*Why:* a count assertion passes when one label is swapped for another, which is
+exactly how this taxonomy has changed before. Dropping, remapping or
+auto-expanding would alter the experimental population underneath a published
+benchmark with nobody deciding to. A taxonomy change is a spec decision with a
+version bump.
+
+**D14 — The dedup benchmark methodology is locked before either arm is built
+(§5.3).**
+*Was:* unspecified. Phase 1 named the comparison but not its conditions.
+*Now:* splits, evaluation population, target definition, preprocessing rules,
+retrieval procedure, downstream classifier family, metrics, baselines and tuning
+budget all held identical; representation is the only permitted difference.
+*Why:* a benchmark whose arms differ in more than one respect cannot attribute
+its result to the representation, which is the only question it exists to
+answer. Unequal tuning effort in particular measures effort, not representation
+— and the decision to ship or cut MiniLM rests entirely on this comparison being
+clean.
