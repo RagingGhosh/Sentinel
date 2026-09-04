@@ -7,9 +7,13 @@
 *.sqlite3-journal
 
 # Data and large artifacts
-data/raw/
-data/interim/
+# The whole data/ tree: the corpus is Parquet under data/corpus/, which the
+# earlier raw/ and interim/ entries did not cover.
+data/
+# Model binaries. metadata.json alongside them stays committable, so an
+# artifact can report its own measured metrics without shipping the weights.
 ml/artifacts/**/*.onnx
+ml/artifacts/**/*.joblib
 
 # collectstatic output — a build artifact, not source
 staticfiles/
