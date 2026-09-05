@@ -329,6 +329,8 @@ Each task: objective, files, prerequisites, behavior, tests, acceptance criteria
 **Files:** Create `requirements/{base,ml,train,dev}.txt`. Modify `requirements.txt`, `build.sh`, `.github/workflows/ci.yml`.
 **Prerequisites:** none.
 **Behavior:** Partition the current 36 pinned packages by tier per §E, preserving exact versions. `requirements.txt` becomes `-r requirements/base.txt`. `build.sh` installs `requirements/base.txt`. CI gains two jobs: `app` (base+dev, runs the existing suite and static checks) and `ml` (base+dev+train, runs `pytest -m ml`).
+
+**The `ml` job tolerates pytest exit code 5 (`NO_TESTS_COLLECTED`) while the `ml` marker has no users.** No test carries the marker until Task 16, so `pytest -m ml` collects nothing and exits 5, which GitHub Actions reads as failure. The step checks the return code explicitly and accepts 5 alone; 1, 2, 3 and 4 all still fail the job. The job is kept rather than deferred because installing `requirements/train.txt` on a clean Linux runner is itself useful coverage — those pins were resolved locally and are otherwise never exercised. Task 16 removes the tolerance.
 **Tests:** `tests/test_requirements.py` — asserts every package in the original freeze appears in exactly one tier; asserts `base.txt` contains no test or training package (explicit deny-list: pytest, ruff, mypy, factory_boy, Faker, coverage, pandas, pyarrow, scikit-learn, onnxruntime, numpy); asserts `ml.txt` and `train.txt` both start with a `-r` line.
 **Acceptance:** existing 125 tests pass under base+dev alone; `pip install -r requirements/base.txt` in a clean venv can run `manage.py check`.
 **Commit:** `chore: split requirements into base/ml/train/dev tiers`
@@ -520,7 +522,8 @@ Part A does not enter this rule. It may downgrade `supported_plausible_event_tim
 **Prerequisites:** Tasks 9, 14, 15, 8.
 **Behavior:** Loads the CFPB corpus, applies `temporal_split`, fits TF-IDF on train text only, trains a calibrated linear classifier, tunes the abstention threshold on validation, evaluates on test, and writes an artifact per §P.
 **Tests (marked `ml`, on a small fixture corpus):** a token appearing only in test text is absent from the fitted vocabulary (leakage path 2); the abstention threshold is chosen from validation and unchanged by test labels (leakage path 4); metrics appear beside baselines; the artifact's `feature_spec` and `label_roster` match what was trained.
-**Acceptance:** experiment runs to completion on the fixture corpus and produces a loadable artifact.
+**Also required in this task:** **remove the exit-code-5 tolerance from the `ml` CI job** (`.github/workflows/ci.yml`), restoring the step to a plain `pytest -m ml`. This task introduces the marker's first users, so from here an empty selection means a mis-typed marker rather than an expected state, and the job must fail on it. Leaving the tolerance in place would let a typo silently pass as success — see the Task 1 note that created it.
+**Acceptance:** experiment runs to completion on the fixture corpus and produces a loadable artifact; `pytest -m ml` selects a non-zero number of tests; the CI step no longer special-cases any exit code.
 **Commit:** `feat: CFPB triage experiment with leakage-tested pipeline`
 **Must not change:** metrics or artifact modules.
 
