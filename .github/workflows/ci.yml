@@ -62,3 +62,22 @@ jobs:
           fi
 
           exit "$rc"
+
+      # The corpus storage and manifest tests need pyarrow, which lives in
+      # requirements/train.txt. They are deliberately NOT marked 'ml': that
+      # marker means "exercises an ML model artifact", and Parquet IO does not.
+      # Without this step they would run in neither job -- skipped in the app
+      # job for want of pyarrow, and unselected by 'pytest -m ml' here.
+      #
+      # Selected by path rather than by a marker, so the selection stays narrow
+      # and 'ml' keeps its meaning. No exit-code tolerance: these tests exist
+      # today, so an empty selection (a renamed or deleted module) is a real
+      # failure and pytest's exit 5 must fail the job.
+      #
+      # The import check first turns a missing pyarrow into a hard failure.
+      # Otherwise importorskip would skip the whole module and the job would go
+      # green having tested nothing -- the exact false pass this step fixes.
+      - name: Corpus storage tests (require the training tier)
+        run: |
+          python -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
+          pytest tests/ingest/test_storage.py tests/ingest/test_manifest.py
