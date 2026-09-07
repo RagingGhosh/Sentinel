@@ -36,10 +36,9 @@ Django-independent, and pure: no network, no filesystem, no clock.
 
 from collections.abc import Iterator, Mapping
 from datetime import UTC, datetime
-from typing import Any
 
 from ingest.schema import CFPBOutcome, CorpusRecord
-from ingest.sources.base import SourceRow
+from ingest.sources.base import SourcePage, SourceRow
 
 SOURCE_SLUG = "cfpb"
 
@@ -83,8 +82,17 @@ class InvalidTimelyValue(CFPBNormalizationError):
     """`timely` is absent or is neither "Yes" nor "No"."""
 
 
-def rows_from_page(page: Mapping[str, Any]) -> Iterator[SourceRow]:
-    """Unwrap a CFPB API page into its `_source` rows, in published order."""
+def rows_from_page(page: SourcePage) -> Iterator[SourceRow]:
+    """Unwrap a CFPB API page into its `_source` rows, in published order.
+
+    `SourcePage` is a union because Socrata publishes a bare array; CFPB's
+    branch is the mapping one, so this narrows to it. The check is a type
+    guard, not normalization: a page of the wrong shape is a caller error, and
+    it raises `TypeError` rather than any `CFPBNormalizationError`, which stay
+    reserved for a row the source published that we refuse.
+    """
+    if not isinstance(page, Mapping):
+        raise TypeError(f"a CFPB page is a mapping with a 'hits' key, not {type(page).__name__}")
     for hit in page.get("hits", {}).get("hits", []):
         yield hit["_source"]
 
@@ -204,7 +212,7 @@ class CFPBAdapter:
     def source_api_version(self) -> str:
         return SOURCE_API_VERSION
 
-    def rows_from_page(self, page: Mapping[str, Any]) -> Iterator[SourceRow]:
+    def rows_from_page(self, page: SourcePage) -> Iterator[SourceRow]:
         return rows_from_page(page)
 
     def normalize(self, row: SourceRow) -> tuple[CorpusRecord, CFPBOutcome]:

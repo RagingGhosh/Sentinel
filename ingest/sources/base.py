@@ -13,7 +13,7 @@ window, NYC 311 reports how long resolution took. `ingest.schema` explains at
 length why those must not be unified under a shared name.
 """
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Protocol, TypeVar
 
 from ingest.schema import CorpusRecord
@@ -22,6 +22,21 @@ OutcomeT = TypeVar("OutcomeT", covariant=True)
 
 SourceRow = Mapping[str, Any]
 """One raw record exactly as the source published it, before any mapping."""
+
+SourcePage = Mapping[str, Any] | Sequence[SourceRow]
+"""One fetched page, in whichever envelope its source publishes.
+
+Both branches are real. CFPB's search API wraps its rows in an
+Elasticsearch-shaped object (`hits.hits[]._source`); Socrata returns a bare
+top-level array of row objects. An adapter narrows to its own branch.
+
+This union replaced a bare `Mapping[str, Any]`, which was fitted to the only
+source that existed when the protocol was written. Parameters are
+contravariant, so a sequence-shaped adapter could not satisfy the narrower
+type -- the second source was unrepresentable. `Any` would also have silenced
+that error, but it would have stopped saying anything about what a page is; the
+union keeps the two admissible shapes checkable and documents why there are two.
+"""
 
 
 class SourceAdapter(Protocol[OutcomeT]):
@@ -37,8 +52,12 @@ class SourceAdapter(Protocol[OutcomeT]):
         value here rather than silently producing different records."""
         ...
 
-    def rows_from_page(self, page: Mapping[str, Any]) -> Iterator[SourceRow]:
-        """Unwrap one fetched page into its raw rows, in the order published."""
+    def rows_from_page(self, page: SourcePage) -> Iterator[SourceRow]:
+        """Unwrap one fetched page into its raw rows, in the order published.
+
+        Takes the union rather than one branch: an implementation may not
+        narrow a parameter and still satisfy the protocol.
+        """
         ...
 
     def normalize(self, row: SourceRow) -> tuple[CorpusRecord, OutcomeT]:
