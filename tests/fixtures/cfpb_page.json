@@ -1,0 +1,127 @@
+{
+  "_comment": "Synthetic CFPB API page. Structurally faithful to the real Elasticsearch-shaped response (hits.hits[]._source) but every value is invented. No personal data: narratives are generic, no names, no account numbers, no addresses. Five rows, each exercising one normalization case.",
+  "hits": {
+    "total": {"value": 5},
+    "hits": [
+      {
+        "_id": "9000001",
+        "_source": {
+          "complaint_id": "9000001",
+          "date_received": "2024-03-15T00:00:00-05:00",
+          "date_sent_to_company": "2024-03-18T00:00:00-05:00",
+          "product": "Credit reporting or other personal consumer reports",
+          "sub_product": "Credit reporting",
+          "issue": "Incorrect information on your report",
+          "sub_issue": "Information belongs to someone else",
+          "complaint_what_happened": "An account I do not recognise appears on my report and the dispute was closed without explanation.",
+          "company": "EXAMPLE FINANCIAL GROUP",
+          "state": "CA",
+          "zip_code": "900XX",
+          "tags": null,
+          "consumer_consent_provided": "Consent provided",
+          "submitted_via": "Web",
+          "company_response": "Closed with explanation",
+          "company_public_response": null,
+          "consumer_disputed": null,
+          "timely": "Yes",
+          "has_narrative": true
+        }
+      },
+      {
+        "_id": "9000002",
+        "_source": {
+          "complaint_id": "9000002",
+          "date_received": "2025-01-07T00:00:00-05:00",
+          "product": "Debt collection",
+          "sub_product": "Other debt",
+          "issue": "Attempts to collect debt not owed",
+          "sub_issue": "Debt is not yours",
+          "complaint_what_happened": "A collector contacted me about a balance that is not mine and continued after I disputed it in writing.",
+          "company": "EXAMPLE RECOVERY SERVICES",
+          "state": "NY",
+          "zip_code": "100XX",
+          "tags": null,
+          "consumer_consent_provided": "Consent provided",
+          "submitted_via": "Web",
+          "company_response": "Closed with non-monetary relief",
+          "company_public_response": null,
+          "consumer_disputed": null,
+          "timely": "No",
+          "has_narrative": true
+        }
+      },
+      {
+        "_id": "9000003",
+        "_source": {
+          "complaint_id": "9000003",
+          "date_received": "2024-07-22T00:00:00-04:00",
+          "date_sent_to_company": null,
+          "product": "Checking or savings account",
+          "sub_product": "Checking account",
+          "issue": "Managing an account",
+          "sub_issue": "Problem using a debit or ATM card",
+          "complaint_what_happened": "A hold was placed on my account and the branch could not tell me when it would be released.",
+          "company": "EXAMPLE SAVINGS BANK",
+          "state": "TX",
+          "zip_code": "770XX",
+          "tags": null,
+          "consumer_consent_provided": "Consent provided",
+          "submitted_via": "Web",
+          "company_response": "Closed with explanation",
+          "company_public_response": null,
+          "consumer_disputed": null,
+          "timely": "Yes",
+          "has_narrative": true
+        }
+      },
+      {
+        "_id": "9000004",
+        "_source": {
+          "complaint_id": "9000004",
+          "date_received": "2024-11-02T00:00:00-04:00",
+          "date_sent_to_company": "2024-11-02T00:00:03-04:00",
+          "product": "Mortgage",
+          "sub_product": "Conventional home mortgage",
+          "issue": "Trouble during payment process",
+          "sub_issue": null,
+          "complaint_what_happened": null,
+          "company": "EXAMPLE HOME LOANS",
+          "state": "FL",
+          "zip_code": "331XX",
+          "tags": null,
+          "consumer_consent_provided": "Consent not provided",
+          "submitted_via": "Web",
+          "company_response": "Closed with explanation",
+          "company_public_response": null,
+          "consumer_disputed": null,
+          "timely": "Yes",
+          "has_narrative": false
+        }
+      },
+      {
+        "_id": "9000005",
+        "_source": {
+          "complaint_id": "9000005",
+          "date_received": "2024-05-09T00:00:00",
+          "date_sent_to_company": "2024-05-12T00:00:00-04:00",
+          "product": "Credit card",
+          "sub_product": "General-purpose credit card or charge card",
+          "issue": "Problem with a purchase shown on your statement",
+          "sub_issue": null,
+          "complaint_what_happened": "A disputed charge was reinstated without the documentation I asked for.",
+          "company": "EXAMPLE CARD SERVICES",
+          "state": "IL",
+          "zip_code": "606XX",
+          "tags": null,
+          "consumer_consent_provided": "Consent provided",
+          "submitted_via": "Web",
+          "company_response": "Closed with explanation",
+          "company_public_response": null,
+          "consumer_disputed": null,
+          "timely": "Yes",
+          "has_narrative": true
+        }
+      }
+    ]
+  }
+}
