@@ -79,5 +79,5 @@ jobs:
       # green having tested nothing -- the exact false pass this step fixes.
       - name: Corpus storage tests (require the training tier)
         run: |
-          python -c "import pyarrow; print('pyarrow', pyarrow.__version__)"
+          python -c "import pyarrow.parquet; print('pyarrow', pyarrow.__version__)"
           pytest tests/ingest/test_storage.py tests/ingest/test_manifest.py
