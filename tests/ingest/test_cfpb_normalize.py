@@ -292,14 +292,25 @@ def test_the_adapter_never_remaps_a_label_to_other():
         assert record.label == unexpected
 
 
-def test_a_non_string_product_raises_rather_than_being_stringified():
+@pytest.mark.parametrize("value", [None, 0, 1, True, False, 3.5, [], {}, ("Mortgage",)])
+def test_a_non_string_product_raises_rather_than_being_stringified(value):
+    """`CorpusRecord.label` is typed `str`; there is no record to build. This is
+    a schema constraint from Task 3, not a decision about the value's meaning."""
     with pytest.raises(MissingField, match="product"):
-        normalize(dict(row("9000001"), product=None))
+        normalize(dict(row("9000001"), product=value))
 
 
-def test_an_empty_product_raises():
-    with pytest.raises(MissingField, match="product"):
-        normalize(dict(row("9000001"), product="   "))
+@pytest.mark.parametrize("value", ["", " ", "   ", "\t", "\n", "  \t\n "])
+def test_an_empty_or_whitespace_product_is_preserved_exactly(value):
+    """Addendum §1.1 gives every product-value decision to the roster gate --
+    "Fail. Report the unexpected label and its record count." An empty product
+    is a value outside the locked roster, so Task 7 must be able to see it and
+    count it. Refusing it here would delete that record before it could be
+    reported, and the plan's Task 5 specifies no product rejection at all."""
+    record, _ = normalize(dict(row("9000001"), product=value))
+    assert record.label == value
+    assert record.label is not None
+    assert record.label != "Other", "no remapping"
 
 
 def test_the_adapter_does_not_filter_by_window():

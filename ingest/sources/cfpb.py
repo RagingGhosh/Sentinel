@@ -105,10 +105,22 @@ def _external_id(row: SourceRow) -> str:
     return text
 
 
-def _required_text(row: SourceRow, field: str, external_id: str) -> str:
-    value = row.get(field)
-    if not isinstance(value, str) or not value.strip():
-        raise MissingField(f"{field} is missing or empty on complaint_id {external_id}: {value!r}")
+def _product(row: SourceRow, external_id: str) -> str:
+    """`product`, preserved exactly — including an empty or whitespace-only one.
+
+    The type check is the only check, and it is inherited rather than chosen:
+    `CorpusRecord.label` is typed `str`, so a non-string leaves no record to
+    build. Emptiness is deliberately *not* checked. Addendum §1.1 gives every
+    product-value decision to the roster gate — "Fail. Report the unexpected
+    label and its record count" — and an empty product is a value outside the
+    locked roster. Refusing it here would delete the record before Task 7 could
+    count it, and the plan's Task 5 specifies no product rejection at all.
+    """
+    value = row.get("product")
+    if not isinstance(value, str):
+        raise MissingField(
+            f"product is missing or not text on complaint_id {external_id}: {value!r}"
+        )
     return value
 
 
@@ -155,7 +167,7 @@ def normalize(row: SourceRow) -> tuple[CorpusRecord, CFPBOutcome]:
     validated before either object is built, so a refused row leaves nothing."""
     external_id = _external_id(row)
     text = _narrative(row, external_id)
-    label = _required_text(row, "product", external_id)
+    label = _product(row, external_id)
     submitted_at = _timestamp(row, "date_received", external_id)
 
     timely_response = _timely(row, external_id)
