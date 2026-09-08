@@ -249,6 +249,65 @@ is never described as having proven anything about how the data was produced —
 only as having measured an interval that is or is not consistent with a real
 process.
 
+### 2.4 NYC 311 timestamp interpretation
+
+**Source fact.** The NYC Open Data schema types `created_date` and `closed_date`
+as **Floating Timestamp**. That type carries no UTC offset, and the source
+documentation does not state a timezone as part of the field type. A row arrives
+spelled `2024-06-01T09:30:00.000` and parses to a naive datetime.
+
+**Project decision.** Phase 2 interprets both fields as **`America/New_York`
+civil (local) time**, and converts them to UTC-aware datetimes for storage. This
+is Sentinel's interpretation of an unlabelled field, not a claim that the source
+publishes an offset. It is recorded here so a reader can disagree with it
+explicitly rather than discover it in code.
+
+The decision is forced to be *some* decision: `ingest.storage.write_partition`
+refuses a naive `submitted_at`, so a floating timestamp cannot reach the corpus
+uninterpreted. The choice is therefore which interpretation, not whether to make
+one. Assuming UTC directly is rejected — it would assert that New Yorkers
+contact 311 on UTC wall-clock time.
+
+| Rule | Behaviour |
+|---|---|
+| Both fields | Interpreted as `America/New_York` civil time, then converted to UTC |
+| `CorpusRecord.submitted_at` | Stored as the UTC-aware instant |
+| `submitted_hour`, `submitted_weekday` | Derived from the **local** representation, never from the UTC one |
+| `nyc311_resolution_hours` | Computed from the UTC-aware **instants** |
+| Ambiguous local time (autumn fold) | **Reject.** Never silently choose a fold |
+| Nonexistent local time (spring gap) | **Reject.** Never heuristically shift |
+
+**Why the features come from the local representation.** `submitted_hour` exists
+to capture when a human contacted the service. A New Yorker calling at 09:00
+EDT is 13:00 UTC, so a UTC-derived hour shifts the whole diurnal pattern — and
+shifts it by a *different* amount either side of a DST boundary, smearing the
+daily signal the feature exists to carry. CFPB's timestamps arrive with real
+offsets, so its `submitted_hour` is already anchored to the filer's own clock;
+deriving 311's from UTC would make one feature name mean two different things
+across the two domains that §5.4's cross-domain probe compares directly.
+
+**Why resolution hours come from the instants.** Elapsed time must be measured
+between instants, not between wall-clock readings. A request opened before a DST
+transition and closed after it spans a local clock that jumped an hour;
+subtracting the two floating timestamps would report that hour as real work
+done, or as an hour of work never done. Converting both to UTC first makes the
+interval correct by construction.
+
+**Why the two DST cases are rejected rather than resolved.** In the autumn
+transition the hour 01:00–02:00 local occurs twice, and nothing in a floating
+timestamp says which. Choosing a fold would assign a wrong instant to roughly
+half the affected records, invisibly. In the spring transition 02:00–03:00 local
+never occurs at all, so a value there means either the source's clock handling
+is broken or this section's interpretation is wrong — both worth stopping for.
+The affected volume is about one hour of records per year in each direction,
+which is a negligible loss and a loud signal. This follows §1.1's standing
+principle: a normalizer that silently repairs a record changes the experimental
+population underneath a published benchmark without anyone deciding to.
+
+**If this interpretation is wrong**, it is wrong in one place and by a fixed
+offset, and every affected number is recomputable from the corpus. That is the
+reason for naming it here rather than leaving it implicit.
+
 ---
 
 ---
@@ -1029,3 +1088,25 @@ timestamps **is** the target variable — so it receives the distributional
 diagnostic only and is classified `suspicious_insufficient_evidence` by
 construction rather than defaulted to supported. Absence of evidence is not
 recorded as evidence of soundness.
+
+**D21 — NYC 311 floating timestamps are interpreted as `America/New_York` civil
+time, with both DST edge cases rejected (§2.4).**
+*Was:* unspecified. The plan mapped `created_date → submitted_at` without saying
+how a field carrying no offset becomes an aware datetime.
+*Now:* both 311 timestamps are read as `America/New_York` civil time and
+converted to UTC for storage; `submitted_hour` and `submitted_weekday` derive
+from the local representation while `nyc311_resolution_hours` derives from the
+UTC instants; ambiguous and nonexistent local times are rejected rather than
+folded or shifted.
+*Why:* the gap was not optional to leave open — `write_partition` refuses a naive
+`submitted_at`, so the floating timestamp had to be interpreted somehow, and the
+only question was whether the interpretation would be written down or improvised
+in an adapter. Assuming UTC would have shifted `submitted_hour` by four or five
+hours and made that feature mean something different for 311 than for CFPB,
+whose timestamps carry genuine offsets — the two domains §5.4's probe compares
+directly. Deriving the hour locally and the elapsed time from instants keeps each
+quantity measured in the frame it is actually about.
+*Recorded as interpretation, not as source fact:* NYC Open Data types these
+fields Floating Timestamp and does not state a zone for that type.
+`America/New_York` is this project's reading of an unlabelled field, written
+down so it can be disagreed with.
