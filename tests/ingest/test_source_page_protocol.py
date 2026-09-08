@@ -112,3 +112,28 @@ def test_the_protocol_module_stays_django_free():
     for module in imported:
         assert module.split(".")[0] != "django", f"protocol must not import Django ({module})"
         assert not module.startswith("ml."), f"protocol must not import ml ({module})"
+
+
+# --- the sequence branch, exercised by a real adapter (Task 6) ----------------
+
+
+@pytest.fixture(scope="module")
+def nyc311_typing() -> tuple[int, str]:
+    return run_mypy("nyc311_sequence_adapter.py")
+
+
+def test_a_sequence_shaped_nyc311_adapter_satisfies_the_protocol(nyc311_typing):
+    """The real `NYC311Adapter` assigned to `SourceAdapter[NYC311Outcome]`, with
+    a bare Socrata array passed to `rows_from_page`. This is the case that was
+    impossible before `SourcePage` became a union."""
+    code, output = nyc311_typing
+    assert code == 0, f"a sequence-shaped adapter must type-check:\n{output}"
+
+
+def test_both_real_adapters_satisfy_one_protocol(nyc311_typing):
+    """CFPB's object page and 311's array page, checked in the same module."""
+    code, output = nyc311_typing
+    assert code == 0, output
+    source = (TYPING_FIXTURES / "nyc311_sequence_adapter.py").read_text(encoding="utf-8")
+    assert "adapter: SourceAdapter[NYC311Outcome] = NYC311Adapter()" in source
+    assert "cfpb_adapter: SourceAdapter[CFPBOutcome] = CFPBAdapter()" in source
