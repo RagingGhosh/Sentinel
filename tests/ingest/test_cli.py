@@ -13,7 +13,7 @@ neither is re-derived here.
 
 import gzip
 import json
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -27,12 +27,16 @@ from ingest.cli import (  # noqa: E402
     STRONGLY_SUSPICIOUS,
     SUPPORTED,
     VERDICT_RULE,
+    EmptyWindow,
+    IngestError,
     InvalidDateRange,
+    authoritative_roster,
     build_diagnostic,
     decide_verdict,
     ingest,
     main,
     page_checksum,
+    resolve_window,
 )
 from ingest.manifest import read_manifest  # noqa: E402
 from ingest.roster import RosterMismatch  # noqa: E402
@@ -862,10 +866,9 @@ def test_the_window_comes_from_the_arguments_not_a_constant(tmp_path):
         raw_root=tmp_path / "raw",
     )
     assert manifest.record_count == 1
+    # D25: CFPB resolves in UTC, and --end includes its whole day.
     assert manifest.window_start == datetime(2024, 1, 1, tzinfo=UTC)
-    assert manifest.window_end == datetime(2024, 12, 31, tzinfo=UTC) + timedelta(
-        hours=23, minutes=59, seconds=59
-    )
+    assert manifest.window_end == datetime(2024, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
 
 
 # --- each threshold isolated at the rule's own seam ---------------------------
@@ -944,3 +947,373 @@ def test_the_branch_is_recorded_so_a_reader_sees_which_fired():
     assert decide_verdict(metrics())[1] == SUPPORTED
     assert decide_verdict(metrics(median_delta_seconds=600.0))[1] == "no_branch_matched"
     assert decide_verdict({"available": False})[1] == "no_testable_pair"
+
+
+# =============================================================================
+# D23, D24, D25 -- the three contract corrections
+# =============================================================================
+
+
+# --- D23: an empty window is a typed failure ---------------------------------
+
+
+def test_an_empty_cache_raises_empty_window(tmp_path):
+    with pytest.raises(EmptyWindow) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=None,
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+    message = str(exc.value)
+    assert "cfpb" in message
+    assert "0 cached pages" in message or "0 page" in message
+    assert "zero records" in message
+
+
+def test_a_cache_whose_records_all_fall_outside_the_window_raises(tmp_path):
+    """Distinguishable from an empty cache: pages were read, none qualified."""
+    with pytest.raises(EmptyWindow) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2024, 12, 31),
+            limit=None,
+            fetcher=StubFetcher([cfpb_page([cfpb_row("1", received="2019-06-01T09:00:00-04:00")])]),
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+    message = str(exc.value)
+    assert "1 cached page" in message, f"the page count separates the two cases: {message}"
+    assert "2024-01-01" in message and "2024-12-31" in message
+
+
+def test_empty_window_names_the_resolved_bounds_not_the_supplied_dates(tmp_path):
+    with pytest.raises(EmptyWindow) as exc:
+        ingest(
+            source="nyc311",
+            start=date(2024, 6, 1),
+            end=date(2024, 6, 1),
+            limit=None,
+            fetcher=None,
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+    # June is EDT, so a New York day resolves to 04:00Z .. 03:59:59Z.
+    assert "04:00" in str(exc.value)
+
+
+def test_empty_window_writes_neither_partition_nor_manifest(tmp_path):
+    corpus = tmp_path / "corpus"
+    outside = cfpb_page([cfpb_row("1", received="2019-06-01T09:00:00-04:00")])
+    for fetcher in (None, StubFetcher([outside])):
+        with pytest.raises(EmptyWindow):
+            ingest(
+                source="cfpb",
+                start=date(2024, 1, 1),
+                end=date(2024, 12, 31),
+                limit=None,
+                fetcher=fetcher,
+                corpus_root=corpus,
+                raw_root=tmp_path / "raw",
+            )
+        assert iter_part_files("cfpb", root=corpus) == []
+        assert not (corpus / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").exists()
+
+
+def test_empty_window_is_an_ingest_error_not_a_bare_value_error(tmp_path):
+    """D23: Task 7's undefined-intersection guard must not be the operator's
+    error. `derive_roster` is never reached with no years."""
+    assert issubclass(EmptyWindow, IngestError)
+    with pytest.raises(IngestError):
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2024, 12, 31),
+            limit=None,
+            fetcher=None,
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+
+
+# --- D24: --limit bounds persistence only ------------------------------------
+
+
+def test_a_limited_run_does_not_report_a_truncated_label_as_missing(tmp_path):
+    """The exact failure that motivated D24.
+
+    Authoritative roster holds Alpha and Beta. A limited rerun persists only
+    Alpha, and must not read that truncation as Beta having vanished.
+    """
+    corpus = tmp_path / "corpus"
+    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]])
+    assert set(read_manifest("cfpb", root=corpus).label_roster) == {"Alpha", "Beta"}
+
+    manifest = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=1,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.limit == 1
+    assert manifest.record_count == 1
+    assert len(list(read_corpus("cfpb", root=corpus))) == 1
+
+
+def test_roster_validation_sees_the_whole_window_not_the_limited_subset(tmp_path):
+    """A label outside the locked roster still fails, even when --limit would
+    have truncated it away. Validation is over the window, so the flag cannot
+    hide a real taxonomy change either."""
+    corpus = tmp_path / "corpus"
+    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha")]])
+
+    with pytest.raises(RosterMismatch) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=1,
+            fetcher=StubFetcher([cfpb_page([cfpb_row("9", product="Intruder")])]),
+            corpus_root=corpus,
+            raw_root=tmp_path / "raw",
+        )
+    assert "Intruder" in str(exc.value)
+
+
+def test_a_limited_manifest_never_becomes_the_authoritative_roster(tmp_path):
+    """D24: the lock comes only from an unbounded corpus."""
+    corpus = tmp_path / "corpus"
+    pages = [cfpb_page([cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")])]
+
+    limited = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=1,
+        fetcher=StubFetcher(pages),
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    assert limited.limit == 1
+    assert set(limited.label_roster) == {"Alpha"}, "the persisted subset, as §G says"
+
+    # A later unbounded run must not be judged against that truncated view.
+    full = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    assert full.limit is None
+    assert set(full.label_roster) == {"Alpha", "Beta"}
+
+
+def test_an_unbounded_corpus_stays_authoritative_when_a_limited_run_is_separate(tmp_path):
+    """A limited run against its own corpus root leaves the authoritative one
+    untouched and still authoritative.
+
+    Scoped to separate roots deliberately. A limited run sharing a corpus root
+    with an authoritative one overwrites both its partitions and its manifest,
+    so the authoritative corpus stops existing — and no approved document says
+    what a limited run should do to an existing corpus. That gap is reported
+    rather than resolved here by an invented rule.
+    """
+    authoritative = tmp_path / "corpus"
+    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]])
+    assert authoritative_roster("cfpb", authoritative) == frozenset({"Alpha", "Beta"})
+
+    ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=1,
+        fetcher=None,
+        corpus_root=tmp_path / "dev-corpus",
+        raw_root=tmp_path / "raw",
+    )
+
+    assert authoritative_roster("cfpb", authoritative) == frozenset({"Alpha", "Beta"})
+    with pytest.raises(RosterMismatch) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=StubFetcher([cfpb_page([cfpb_row("9", product="Intruder")])]),
+            corpus_root=authoritative,
+            raw_root=tmp_path / "later-raw",
+        )
+    assert exc.value.unexpected == {"Intruder": 1}
+
+
+def test_authoritative_roster_selection_ignores_a_limited_manifest(tmp_path):
+    corpus = tmp_path / "corpus"
+    ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=1,
+        fetcher=StubFetcher([cfpb_page([cfpb_row("1", product="Alpha")])]),
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    assert read_manifest("cfpb", root=corpus).limit == 1
+    assert authoritative_roster("cfpb", corpus) is None, "a truncated manifest is not a lock"
+
+
+def test_an_unbounded_manifest_is_the_authoritative_source(tmp_path):
+    corpus = tmp_path / "corpus"
+    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]])
+    assert authoritative_roster("cfpb", corpus) == frozenset({"Alpha", "Beta"})
+
+
+def test_the_limit_still_reaches_the_manifest_after_the_reordering(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row(str(i)) for i in range(1, 6)]], limit=2)
+    assert manifest.limit == 2
+    assert manifest.record_count == 2
+    assert read_manifest("cfpb", root=tmp_path / "corpus").limit == 2
+
+
+# --- D25: per-source civil-time window resolution ----------------------------
+
+
+def test_cfpb_bounds_resolve_in_utc():
+    start, end = resolve_window("cfpb", date(2024, 6, 1), date(2024, 6, 30))
+    assert start == datetime(2024, 6, 1, 0, 0, 0, tzinfo=UTC)
+    assert end == datetime(2024, 6, 30, 23, 59, 59, 999999, tzinfo=UTC)
+
+
+def test_nyc311_bounds_resolve_in_new_york_civil_time():
+    start, end = resolve_window("nyc311", date(2024, 6, 1), date(2024, 6, 30))
+    # June is EDT (UTC-4): local midnight is 04:00Z.
+    assert start == datetime(2024, 6, 1, 4, 0, 0, tzinfo=UTC)
+    assert end == datetime(2024, 7, 1, 3, 59, 59, 999999, tzinfo=UTC)
+
+
+def test_nyc311_bounds_follow_the_standard_time_offset_in_winter():
+    start, _ = resolve_window("nyc311", date(2024, 1, 15), date(2024, 1, 15))
+    # January is EST (UTC-5): local midnight is 05:00Z.
+    assert start == datetime(2024, 1, 15, 5, 0, 0, tzinfo=UTC)
+
+
+def test_a_dst_sensitive_window_uses_each_days_own_offset():
+    """10 March 2024 is the spring transition: the day starts EST and ends EDT,
+    so a UTC-sliced day would be an hour wrong at one end."""
+    start, end = resolve_window("nyc311", date(2024, 3, 10), date(2024, 3, 10))
+    assert start == datetime(2024, 3, 10, 5, 0, 0, tzinfo=UTC)
+    assert end == datetime(2024, 3, 11, 3, 59, 59, 999999, tzinfo=UTC)
+    assert (end - start).total_seconds() < 24 * 3600, "the day is 23 hours long"
+
+
+def test_the_autumn_transition_day_is_twenty_five_hours():
+    start, end = resolve_window("nyc311", date(2024, 11, 3), date(2024, 11, 3))
+    assert (end - start).total_seconds() > 24 * 3600
+
+
+def test_both_bounds_are_inclusive_whole_days():
+    start, end = resolve_window("cfpb", date(2024, 6, 1), date(2024, 6, 1))
+    assert start.hour == 0 and start.minute == 0 and start.second == 0
+    assert (end.hour, end.minute, end.second) == (23, 59, 59)
+
+
+def test_a_nyc311_record_at_local_midnight_is_inside_its_own_day(tmp_path):
+    manifest = ingest(
+        source="nyc311",
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 1),
+        limit=None,
+        fetcher=StubFetcher([[nyc311_row("1", created="2024-06-01T00:00:00.000")]]),
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.record_count == 1
+
+
+def test_a_nyc311_record_late_on_the_last_local_day_is_inside_the_window(tmp_path):
+    """20:00 New York on 30 June is 00:00Z on 1 July. Under UTC bounds it would
+    fall outside; under §2.5 it is inside its own civil day."""
+    manifest = ingest(
+        source="nyc311",
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 30),
+        limit=None,
+        fetcher=StubFetcher([[nyc311_row("1", created="2024-06-30T20:00:00.000")]]),
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.record_count == 1
+    assert manifest.window_end == datetime(2024, 7, 1, 3, 59, 59, 999999, tzinfo=UTC)
+
+
+def test_a_nyc311_record_just_past_the_local_day_is_outside(tmp_path):
+    with pytest.raises(EmptyWindow):
+        ingest(
+            source="nyc311",
+            start=date(2024, 6, 1),
+            end=date(2024, 6, 30),
+            limit=None,
+            fetcher=StubFetcher([[nyc311_row("1", created="2024-07-01T00:00:01.000")]]),
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+
+
+def test_a_cfpb_record_at_the_utc_boundary_is_inside(tmp_path):
+    manifest = ingest(
+        source="cfpb",
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 30),
+        limit=None,
+        fetcher=StubFetcher([cfpb_page([cfpb_row("1", received="2024-06-30T23:59:59+00:00")])]),
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.record_count == 1
+
+
+def test_a_cfpb_record_just_past_the_utc_boundary_is_outside(tmp_path):
+    with pytest.raises(EmptyWindow):
+        ingest(
+            source="cfpb",
+            start=date(2024, 6, 1),
+            end=date(2024, 6, 30),
+            limit=None,
+            fetcher=StubFetcher([cfpb_page([cfpb_row("1", received="2024-07-01T00:00:01+00:00")])]),
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+
+
+def test_the_manifest_records_the_resolved_instants(tmp_path):
+    manifest = ingest(
+        source="nyc311",
+        start=date(2024, 6, 1),
+        end=date(2024, 6, 30),
+        limit=None,
+        fetcher=StubFetcher([[nyc311_row("1", created="2024-06-15T09:00:00.000")]]),
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.window_start == datetime(2024, 6, 1, 4, 0, 0, tzinfo=UTC)
+    assert manifest.window_end == datetime(2024, 7, 1, 3, 59, 59, 999999, tzinfo=UTC)
+
+
+def test_the_311_day_is_not_a_utc_slice(tmp_path):
+    """The decisive comparison: a UTC-sliced 30 June would exclude this record,
+    and a New York 30 June includes it."""
+    utc_start, utc_end = resolve_window("cfpb", date(2024, 6, 30), date(2024, 6, 30))
+    ny_start, ny_end = resolve_window("nyc311", date(2024, 6, 30), date(2024, 6, 30))
+    late = datetime(2024, 7, 1, 0, 30, tzinfo=UTC)  # 20:30 New York on 30 June
+
+    assert not (utc_start <= late <= utc_end)
+    assert ny_start <= late <= ny_end

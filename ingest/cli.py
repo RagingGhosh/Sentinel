@@ -51,7 +51,7 @@ import hashlib
 import json
 import sys
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +104,16 @@ class IngestError(Exception):
 
 class InvalidDateRange(IngestError):
     """`--end` precedes `--start`. Never silently swapped."""
+
+
+class EmptyWindow(IngestError):
+    """The requested window normalized to zero records (D23, §2.5).
+
+    Raised before roster derivation, so nothing is written. An empty run would
+    otherwise derive an empty roster and lock it into the first manifest, after
+    which every later ingest fails with every label unexpected — the taxonomy
+    corruption §1.1 exists to prevent, self-inflicted.
+    """
 
 
 # --- the raw cache -----------------------------------------------------------
@@ -166,11 +176,31 @@ def fetch_into_cache(
 # --- normalization -----------------------------------------------------------
 
 
-def _window_bounds(start: date, end: date) -> tuple[datetime, datetime]:
-    """The window as instants. `end` is inclusive of its whole day."""
+WINDOW_FRAMES: dict[str, tzinfo] = {
+    "cfpb": UTC,
+    "nyc311": nyc311.SOURCE_TIMEZONE,
+}
+"""§2.5: each source's dates resolve in its own civil frame.
+
+311 is `America/New_York`, matching §2.4's reading of its floating timestamps —
+a UTC window would cut its days four or five hours off. CFPB is UTC because it
+publishes a per-record offset that normalization discards, so there is no single
+civil frame a bare date could resolve against without inventing one.
+"""
+
+
+def resolve_window(source: str, start: date, end: date) -> tuple[datetime, datetime]:
+    """Inclusive civil days in the source's frame, as UTC-aware instants (§2.5).
+
+    Both endpoints are whole days: `--start` from its local midnight, `--end`
+    through its local `23:59:59.999999`. Resolving each endpoint separately in
+    the source frame is what makes a daylight-saving day come out 23 or 25 hours
+    long rather than a fixed 24 — a UTC slice would be an hour wrong at one end.
+    """
+    frame = WINDOW_FRAMES[source]
     return (
-        datetime(start.year, start.month, start.day, tzinfo=UTC),
-        datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=UTC),
+        datetime(start.year, start.month, start.day, 0, 0, 0, 0, tzinfo=frame).astimezone(UTC),
+        datetime(end.year, end.month, end.day, 23, 59, 59, 999999, tzinfo=frame).astimezone(UTC),
     )
 
 
@@ -367,16 +397,35 @@ def build_diagnostic(
 # --- ingestion ---------------------------------------------------------------
 
 
+def authoritative_roster(source: str, corpus_root: Path) -> frozenset[str] | None:
+    """The locked roster, or `None` when no authoritative corpus exists (D24).
+
+    Only an **unbounded** manifest is authoritative. One written with a
+    non-null `limit` describes a deliberately partial corpus, and its
+    `label_roster` is the persisted subset rather than the window's taxonomy —
+    adopting it would let a development run define the vocabulary a production
+    run is judged against. That is the field earning §G's justification for it
+    rather than merely stating it.
+    """
+    if not manifest_path(source, corpus_root).is_file():
+        return None
+    manifest = read_manifest(source, root=corpus_root)
+    if manifest.limit is not None:
+        return None
+    return frozenset(manifest.label_roster)
+
+
 def _locked_roster(source: str, corpus_root: Path, observed_by_year: dict[int, set[str]]):
     """The roster to assert against.
 
-    On a later run it is the one the manifest locked. On the first, it is
-    derived from the data as the intersection across years (§1) — and the
-    assertion still runs, so a label present in only part of the window fails
-    the first ingest rather than quietly becoming part of the vocabulary.
+    An unbounded manifest's roster when one exists; otherwise derived from the
+    data as the intersection across years (§1). The assertion runs either way,
+    so a label present in only part of the window fails rather than quietly
+    becoming part of the vocabulary.
     """
-    if manifest_path(source, corpus_root).is_file():
-        return frozenset(read_manifest(source, root=corpus_root).label_roster)
+    locked = authoritative_roster(source, corpus_root)
+    if locked is not None:
+        return locked
     return derive_roster(observed_by_year)
 
 
@@ -396,31 +445,46 @@ def ingest(
 
     corpus_root = Path(corpus_root)
     raw_root = Path(raw_root)
-    window_start, window_end = _window_bounds(start, end)
+    window_start, window_end = resolve_window(source, start, end)
 
     fetch_into_cache(source, start, end, fetcher, raw_root)
 
-    records: list[CorpusRecord] = []
-    deltas: list[float] = []
-    paired = 0
-    for record, outcome in _normalize_source(source, iter_cached_pages(source, raw_root)):
-        if not (window_start <= record.submitted_at <= window_end):
-            continue
-        records.append(record)
-        if isinstance(outcome, CFPBOutcome) and outcome.sent_to_company_at is not None:
-            paired += 1
-            deltas.append((outcome.sent_to_company_at - record.submitted_at).total_seconds())
-        if limit is not None and len(records) >= limit:
-            break
+    # The complete window, before any truncation. --limit bounds persistence
+    # only (D24), so the roster below is derived from every candidate record.
+    pages_read = 0
+    window: list[tuple[CorpusRecord, CFPBOutcome | NYC311Outcome]] = []
+    for page in iter_cached_pages(source, raw_root):
+        pages_read += 1
+        for record, outcome in _normalize_source(source, [page]):
+            if window_start <= record.submitted_at <= window_end:
+                window.append((record, outcome))
 
-    # Roster first. Nothing below this line may run before it.
+    if not window:
+        raise EmptyWindow(
+            f"{source}: zero records fell inside "
+            f"{window_start.isoformat()} .. {window_end.isoformat()} "
+            f"({pages_read} cached page{'' if pages_read == 1 else 's'} read). "
+            "Nothing was written."
+        )
+
+    # Roster next, over the whole window. Nothing below may run before it.
     by_year: dict[int, set[str]] = {}
     counts: dict[str, int] = {}
-    for record in records:
+    for record, _ in window:
         by_year.setdefault(record.submitted_at.year, set()).add(record.label)
         counts[record.label] = counts.get(record.label, 0) + 1
     if source == "cfpb":
         assert_roster(counts, _locked_roster(source, corpus_root, by_year))
+
+    # Only now does --limit decide what is persisted.
+    kept = window if limit is None else window[:limit]
+    records = [record for record, _ in kept]
+    deltas = [
+        (outcome.sent_to_company_at - record.submitted_at).total_seconds()
+        for record, outcome in kept
+        if isinstance(outcome, CFPBOutcome) and outcome.sent_to_company_at is not None
+    ]
+    paired = len(deltas)
 
     by_partition: dict[int, list[CorpusRecord]] = {}
     for record in records:
