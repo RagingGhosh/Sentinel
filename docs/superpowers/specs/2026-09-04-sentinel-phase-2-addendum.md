@@ -231,6 +231,42 @@ seen**, so it is not a judgment made after looking at results:
 toward doubt. They may never produce `strongly_suspicious_load_timestamp`, and
 they may never upgrade a verdict.
 
+#### What "extreme" means: the `hour_concentration` threshold
+
+"Extreme" was left undefined above, which is a gap in a rule whose whole purpose
+is to be fixed before the data is seen. It is now pinned.
+
+**`hour_concentration` is the proportion of records belonging to the most
+frequent submitted hour among the applicable records** — the largest of the 24
+hour-of-day counts divided by their total. A perfectly uniform distribution
+gives 1/24 ≈ 0.042; a source that stamped every record in one hour gives 1.0.
+
+**Threshold: `hour_concentration >= 0.50` is extreme.** That is roughly twelve
+times uniform, and means half of everything landed in a single hour of the day.
+
+This threshold is a **Sentinel project decision, not a source-derived fact**.
+Nothing in either source's documentation suggests it; it is a line this project
+draws, fixed here before any corpus is evaluated, and recorded in the manifest
+beside the verdict so a reader sees the number that was applied rather than
+inferring it.
+
+Its effect is bounded in one direction only:
+
+| Condition | Effect |
+|---|---|
+| `hour_concentration >= 0.50` and verdict is `supported_plausible_event_time` | Downgrade to `suspicious_insufficient_evidence` |
+| `hour_concentration >= 0.50` and verdict is anything else | **No effect** |
+| `hour_concentration < 0.50` | No effect |
+
+It can never produce `strongly_suspicious_load_timestamp` and can never upgrade
+a verdict. The primary evidence remains the `date_received` →
+`date_sent_to_company` delta distribution, and distribution shape still does not
+prove timestamp provenance — a concentrated histogram is a reason to withhold
+confidence, never a reason to assert an artifact.
+
+No other distributional threshold exists. The chi-square statistic and its
+p-value are recorded for a reader, and do not gate the verdict.
+
 #### Sources without a testable pair
 
 NYC 311 exposes `created_date` and `closed_date`, but their interval **is the
@@ -1110,3 +1146,32 @@ quantity measured in the frame it is actually about.
 fields Floating Timestamp and does not state a zone for that type.
 `America/New_York` is this project's reading of an unlabelled field, written
 down so it can be disagreed with.
+
+**D22 — The `hour_concentration` downgrade threshold is fixed at 0.50, and the
+manifest carries the diagnostic and the record limit (§2.3, plan §G).**
+*Was:* §2.3 allowed the distributional diagnostics to downgrade a `supported`
+verdict "when they are extreme" without ever defining extreme, and the manifest
+contract in plan §G listed neither `timestamp_diagnostic` nor `limit` — the two
+things Task 8 is required to record in it.
+*Now:* `hour_concentration` is defined as the share of records in the most
+frequent submitted hour, and `>= 0.50` is extreme. The manifest gains
+`timestamp_diagnostic` and `limit`, both required, plus a `manifest_version`
+distinct from `schema_version`.
+*Why the threshold:* a rule advertised as pre-specified cannot leave one of its
+branches to be filled in later by whoever runs the ingest; that is the judgment-
+after-looking §2.3 exists to prevent. 0.50 is about twelve times uniform. It is
+a project decision rather than a source-derived fact, and is recorded in the
+manifest beside the verdict so the applied number is visible rather than
+inferred. Its effect stays one-directional — it may move `supported` toward
+doubt and nothing else, because distribution shape does not establish
+provenance.
+*Why two version numbers:* `schema_version` versions `CorpusRecord` and is the
+`v<N>` segment of the storage path. Incrementing it for a manifest change would
+leave the records identical while every written partition became unreachable
+under a new tree. `manifest_version` versions the manifest document alone. This
+amendment is itself the demonstration that the two evolve independently.
+*Compatibility:* both new fields are required rather than optional, and no
+migration is defined, because no manifest exists — `data/` is gitignored and no
+ingest has run, so Task 8 writes the first one. From Task 8 onward manifests
+exist on disk, and any later change must increment `manifest_version` and say
+how the previous version is read.

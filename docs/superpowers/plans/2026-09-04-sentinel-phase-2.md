@@ -153,7 +153,33 @@ data/
 
 Partitioned by source, then schema version, then year. Year partitioning matters because every consumer filters by time; schema version in the path means an incompatible `CorpusRecord` change produces a new tree rather than silently mixing shapes.
 
-`manifest.json` per source records: `schema_version`, `source_slug`, `window_start`/`window_end`, `ingested_at`, `record_count`, `per_year_counts`, the observed label roster with per-label counts, `part_files` with a SHA256 per file, the adapter's `source_api_version` string, and `corpus_id` — a stable hash over the part-file checksums that artifacts cite to name exactly which corpus they trained on.
+`manifest.json` per source records: `manifest_version`, `schema_version`, `source_slug`, `window_start`/`window_end`, `ingested_at`, `record_count`, `per_year_counts`, the observed label roster with per-label counts, `part_files` with a SHA256 per file, the adapter's `source_api_version` string, `corpus_id` — a stable hash over the part-file checksums that artifacts cite to name exactly which corpus they trained on — plus `limit` and `timestamp_diagnostic`.
+
+**The manifest carries two version numbers, and they version different things.**
+
+| Field | Type | Versions |
+|---|---|---|
+| `schema_version` | `int` | The **`CorpusRecord` schema**, and nothing else. It is the `v<N>` segment of the storage path, so changing it produces a new tree rather than mixing record shapes. It must not be incremented for a manifest-format change: the records would be unchanged while every existing partition became unreachable. |
+| `manifest_version` | `int` | The **manifest document's own shape**. Adding, removing or retyping a manifest field increments this and leaves the corpus tree exactly where it is. |
+
+Separating them is what this amendment demonstrated the need for: `timestamp_diagnostic` and `limit` change the manifest and leave `CorpusRecord` untouched, and with a single version number there was no way to say so.
+
+**`limit`** — `int | None`. The `--limit` passed to the ingestion CLI, or `null` for an unbounded run. Recorded so a truncated development corpus can never be mistaken for a full one; every artifact citing a `corpus_id` can see whether the corpus behind it was complete.
+
+**`timestamp_diagnostic`** — object, required, present in **every** manifest (§2.3). It carries both evidence classes with their labels, the verdict, and the thresholds the verdict rule used:
+
+| Key | Type | Meaning |
+|---|---|---|
+| `verdict` | `str` | One of the three verdicts in §2.3. No other value is permitted. |
+| `verdict_rule` | object | The thresholds as applied, recorded beside the verdict so a reader sees which branch fired without consulting this document. |
+| `verdict_branch` | `str` | Which rule branch produced the verdict. |
+| `not_directly_testable` | `bool` | `true` for a source with no testable timestamp pair (§2.3, NYC 311). |
+| `primary_evidence` | object | `evidence_class: "field_delta"`. The §2.3 delta metrics, or `available: false` with a stated reason for a source that has no pair. |
+| `secondary_evidence` | object | `evidence_class: "distributional_anomaly"`. Hour and weekday counts, the chi-square against uniform with its p-value, and `hour_concentration`. |
+
+The two evidence classes are labelled in the document itself rather than inferred from position, because their evidential weight differs and §2.3 makes that distinction load-bearing.
+
+**Compatibility.** Both new fields are **required, not optional**, and no migration path is defined for manifests written without them — because none exist. `data/` is gitignored and no ingest has ever run, so Task 8 writes the first manifest this project has ever produced. `manifest_version` therefore starts at `1` describing the shape above. A future manifest change must increment `manifest_version` and state how manifests at the previous version are read, since from Task 8 onward they will exist on disk.
 
 Records carry `(source, external_id)` and never an integer id. `RecordRef` is a frozen dataclass with `source: str` and `external_id: str`; `make_ref`/`parse_ref` round-trip it as `"<source>:<external_id>"` for use as a dictionary key and in evaluation output.
 
