@@ -37,6 +37,8 @@ It changes nothing in §§1–5 or §§7–13: the Phase 1 architecture stands.
 ## 1. CFPB window and taxonomy
 
 **Decision: train and evaluate on `date_received` in 2024-01-01 … 2025-12-31 only.**
+Both endpoints are inclusive, and each source's dates resolve in its own
+civil frame — see §2.5, which pins what a bare `YYYY-MM-DD` means.
 That window holds 2,036,434 narratives under a label vocabulary measured stable
 across 2023, 2024 and 2025.
 
@@ -82,6 +84,13 @@ loudly if it differs from the locked roster in either direction:**
 | A `product` value appears that is not in the locked roster | **Fail.** Report the unexpected label and its record count. |
 | A locked roster label is absent from the window | **Fail.** Report which label vanished. |
 | Roster matches exactly | Proceed, having printed the roster and per-label counts. |
+
+**"The window" means every record the window normalizes to, before any
+development truncation.** `--limit` bounds what is written to disk and nothing
+else (D24): a locked label that a truncated run happened not to keep has not
+vanished from the source, and reporting it as missing would be a taxonomy alarm
+manufactured by a development flag. Roster derivation and assertion therefore
+run over the complete normalized window.
 
 **Silently dropping the record, mapping it to a neighbouring label, mapping it
 to `other`, or auto-expanding the taxonomy are all prohibited.** Each would
@@ -343,6 +352,51 @@ population underneath a published benchmark without anyone deciding to.
 **If this interpretation is wrong**, it is wrong in one place and by a fixed
 offset, and every affected number is recomputable from the corpus. That is the
 reason for naming it here rather than leaving it implicit.
+
+### 2.5 Ingestion window semantics
+
+The CLI takes `--start YYYY-MM-DD --end YYYY-MM-DD`. That surface is unchanged;
+what a bare date *means* was never stated, and is pinned here.
+
+**Both bounds are inclusive civil dates.** `--start` includes the whole of that
+day and `--end` includes the whole of its own, through `23:59:59.999999`. §1
+writes the window as `2024-01-01 … 2025-12-31`, which reads as both endpoints
+included; an exclusive `--end` would silently drop the final day of every window
+anyone typed from that sentence.
+
+**The civil frame is the source's own.**
+
+| Source | Frame | Because |
+|---|---|---|
+| `nyc311` | `America/New_York` | §2.4 already reads its floating timestamps as New York civil time. A window in any other frame would cut its days in the wrong place |
+| `cfpb` | UTC | CFPB publishes a per-record offset and normalization converts to UTC, discarding it. There is no single CFPB civil frame a bare date could resolve against, and the stored instant is all that survives |
+
+Both bounds resolve to UTC-aware instants and are compared against
+`CorpusRecord.submitted_at`, which is UTC-aware for both sources. The manifest's
+`window_start` and `window_end` record the **resolved instants**, not the dates
+supplied, so a reader sees the interval that was actually applied rather than
+having to re-derive it.
+
+A single UTC rule for both sources was rejected: it would shift 311's day
+boundaries by four or five hours, putting a request filed at 20:00 on the last
+day of a window outside it. Giving CFPB a civil frame would be worse, since it
+would mean inventing a timezone for records that carry their own.
+
+#### An empty window is a failure, not an empty corpus
+
+**If normalization over the requested window yields zero records, ingest fails
+with a typed error and writes nothing** — no partition, no manifest.
+
+The alternative is worse than an error. An empty run would derive an empty
+roster and lock it into the first manifest, after which every later ingest fails
+with every label unexpected: a self-inflicted version of exactly the taxonomy
+corruption §1.1 exists to prevent. Failing at the point of emptiness keeps that
+unreachable.
+
+The error is raised **before** roster derivation, and reports the source, the
+resolved window bounds, how many cached pages were read, and that none of their
+records fell inside the window — enough to tell an empty cache apart from a
+cache whose records all lie outside the window.
 
 ---
 
@@ -1175,3 +1229,74 @@ migration is defined, because no manifest exists — `data/` is gitignored and n
 ingest has run, so Task 8 writes the first one. From Task 8 onward manifests
 exist on disk, and any later change must increment `manifest_version` and say
 how the previous version is read.
+
+**D23 — A window that normalizes to zero records is a typed ingestion failure,
+not an empty corpus (§2.5, plan Task 8).**
+*Was:* unspecified. Ingest reached roster derivation with no years and surfaced
+`ValueError: cannot derive a roster from no years` — Task 7's internal guard
+leaking through Task 8 as an accidental error type.
+*Now:* zero records in the requested window raises `EmptyWindow`, a subclass of
+the CLI's `IngestError`, before roster derivation, writing no partition and no
+manifest. The message states the source, the resolved window bounds, the number
+of cached pages read, and that none of their records fell inside the window.
+*Why:* an empty run would derive an empty roster and lock it into the first
+manifest, after which every later ingest fails with every label unexpected — a
+self-inflicted version of the taxonomy corruption §1.1 exists to prevent.
+Failing at the point of emptiness makes that unreachable.
+*Why a typed error rather than Task 7's `ValueError`:* `derive_roster`'s guard
+concerns an undefined intersection, an internal precondition of a pure function.
+It is not the ingest-level fact an operator needs, and a caller cannot tell it
+from any other `ValueError`. Task 7 is unchanged; the CLI simply never reaches
+it with no years.
+
+**D24 — `--limit` bounds persistence; roster validation operates on the complete
+window, and a truncated manifest never becomes the lock (§1.1, plan §G).**
+*Was:* `--limit` truncated the normalized stream before roster validation, so a
+limited run could report a locked label as missing purely because truncation
+dropped it. Observed: a corpus holding two labels, re-ingested with `--limit 1`,
+raised `RosterMismatch: missing (1): 'Beta'` — a taxonomy alarm manufactured by
+a development flag.
+*Now:* roster derivation and assertion run over the complete normalized window,
+before any truncation. `--limit` bounds only what is written to disk. The
+manifest records the supplied `limit` exactly as §G already describes.
+*Why:* §1.1's failure condition is already written as "a locked roster label is
+absent **from the window**". The window is a property of `--start`/`--end` and
+the source's data; how many records were kept for development is not part of it.
+*Also decided — the lock comes only from an unbounded corpus.* A manifest whose
+`limit` is non-null describes a deliberately partial corpus and is **not**
+authoritative: a later run does not adopt its roster. A limited run validates
+against the authoritative roster when one exists and derives from its own window
+when none does, and in neither case replaces it. This uses `limit` for precisely
+the purpose §G already gives it — so a truncated corpus can never be mistaken
+for a full one — and keeps a development run from defining the vocabulary a
+production run is judged against.
+*Also recorded — two populations, deliberately.* `label_roster`, `record_count`,
+`per_year_counts` and `part_files` continue to describe the **persisted**
+corpus. Only roster validation uses the full window. On a limited run
+`label_roster` therefore need not contain every label the window held and must
+not be read as the window's taxonomy. Recording the window roster instead was
+considered and rejected for now: it would require changing `build_manifest`'s
+signature a second time, and the manifest contract is better left stable.
+
+**D25 — `--start` and `--end` are inclusive civil dates, resolved in each
+source's own frame (§1, §2.4, §2.5).**
+*Was:* unspecified. Plan Task 8 gave `--start YYYY-MM-DD --end YYYY-MM-DD`
+without stating whether `--end` is inclusive or what timezone a bare date
+denotes, and §1 states the window as `2024-01-01 … 2025-12-31` without either.
+*Now:* the CLI surface is unchanged and both bounds are inclusive whole days.
+311 resolves them in `America/New_York`; CFPB resolves them in UTC. Both become
+UTC-aware instants for comparison, and the manifest records the resolved
+instants rather than the supplied dates.
+*Why per source:* a single UTC rule would shift 311's day boundaries by four or
+five hours, putting a request filed at 20:00 on a window's last day outside it —
+incoherent beside §2.4, which already reads that source's timestamps as New York
+civil time and derives its `submitted_hour` from them. Giving CFPB a civil frame
+would be worse: it carries a per-record offset that normalization discards, so
+any single frame would be invented.
+*Why inclusive:* §1's `2024-01-01 … 2025-12-31` reads as both endpoints
+included, and an exclusive `--end` would silently drop the final day of every
+window typed from that sentence.
+*Consequence, accepted deliberately:* this changes which records a 311 window
+admits relative to the ingestion CLI as first committed, which compared both
+sources against UTC bounds. The shift is intended, not a defect, and the code is
+amended to match this decision rather than the reverse.
