@@ -1,0 +1,946 @@
+"""Ingestion CLI: resumable fetch, roster-before-write, timestamp diagnostic.
+
+No test here touches the network. Fetching is an injected callable, and the
+stubs below are the only thing that ever produces a page — which is also why
+this module can assert that a second run performs zero fetches.
+
+The diagnostic's verdict rule is exercised twice over: directly against
+`build_diagnostic`, where each threshold can be driven to its exact boundary,
+and end to end through `ingest`, where the object has to survive into the
+manifest. §2.3 fixes the rule and D22 fixes the one distributional threshold;
+neither is re-derived here.
+"""
+
+import gzip
+import json
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("pyarrow.parquet", reason="pyarrow lives in requirements/train.txt")
+
+from ingest.cli import (  # noqa: E402
+    HOUR_CONCENTRATION_DOWNGRADE,
+    INSUFFICIENT,
+    RAW_ROOT,
+    STRONGLY_SUSPICIOUS,
+    SUPPORTED,
+    VERDICT_RULE,
+    InvalidDateRange,
+    build_diagnostic,
+    decide_verdict,
+    ingest,
+    main,
+    page_checksum,
+)
+from ingest.manifest import read_manifest  # noqa: E402
+from ingest.roster import RosterMismatch  # noqa: E402
+from ingest.schema import SCHEMA_VERSION  # noqa: E402
+from ingest.storage import iter_part_files, read_corpus  # noqa: E402
+
+# --- building synthetic source pages -----------------------------------------
+
+
+def cfpb_row(external_id, *, product="Alpha", received="2024-03-15T09:00:00-04:00", sent=None):
+    row = {
+        "complaint_id": external_id,
+        "date_received": received,
+        "product": product,
+        "complaint_what_happened": f"narrative {external_id}",
+        "timely": "Yes",
+    }
+    if sent is not None:
+        row["date_sent_to_company"] = sent
+    return row
+
+
+def cfpb_page(rows):
+    return {"hits": {"hits": [{"_source": r} for r in rows]}}
+
+
+def nyc311_row(external_id, *, created="2024-03-15T09:00:00.000", complaint_type="Noise"):
+    return {
+        "unique_key": external_id,
+        "created_date": created,
+        "complaint_type": complaint_type,
+        "descriptor": f"descriptor {external_id}",
+    }
+
+
+class StubFetcher:
+    """Records every call so a resumed run can prove it fetched nothing."""
+
+    def __init__(self, pages, fail_after=None):
+        self.pages = list(pages)
+        self.fail_after = fail_after
+        self.calls = 0
+        self.pages_yielded = 0
+
+    def __call__(self, source, start, end):
+        self.calls += 1
+        for index, page in enumerate(self.pages):
+            if self.fail_after is not None and index >= self.fail_after:
+                raise RuntimeError("network died mid-run")
+            self.pages_yielded += 1
+            yield page
+
+
+def a_cfpb_run(tmp_path, rows_per_page, **kwargs):
+    """Ingest CFPB pages built from label groups; returns (manifest, fetcher)."""
+    fetcher = StubFetcher([cfpb_page(rows) for rows in rows_per_page])
+    manifest = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=kwargs.pop("limit", None),
+        fetcher=fetcher,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+        **kwargs,
+    )
+    return manifest, fetcher
+
+
+# --- CLI arguments -----------------------------------------------------------
+
+
+def test_the_documented_arguments_are_accepted(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_ingest(**kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr("ingest.cli.ingest", fake_ingest)
+    code = main(
+        [
+            "--source",
+            "cfpb",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2025-12-31",
+            "--limit",
+            "500",
+        ]
+    )
+    assert code == 0
+    assert seen["source"] == "cfpb"
+    assert seen["start"] == date(2024, 1, 1)
+    assert seen["end"] == date(2025, 12, 31)
+    assert seen["limit"] == 500
+
+
+def test_limit_is_optional_and_defaults_to_none(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("ingest.cli.ingest", lambda **kw: seen.update(kw))
+    main(["--source", "nyc311", "--start", "2024-01-01", "--end", "2024-12-31"])
+    assert seen["limit"] is None
+
+
+@pytest.mark.parametrize("source", ["cfpb", "nyc311"])
+def test_both_sources_are_selectable(source, monkeypatch):
+    seen = {}
+    monkeypatch.setattr("ingest.cli.ingest", lambda **kw: seen.update(kw))
+    main(["--source", source, "--start", "2024-01-01", "--end", "2024-12-31"])
+    assert seen["source"] == source
+
+
+def test_an_unknown_source_is_rejected():
+    with pytest.raises(SystemExit):
+        main(["--source", "twitter", "--start", "2024-01-01", "--end", "2024-12-31"])
+
+
+def test_an_end_before_start_is_rejected_and_never_swapped():
+    with pytest.raises(InvalidDateRange) as exc:
+        main(["--source", "cfpb", "--start", "2025-01-01", "--end", "2024-01-01"])
+    message = str(exc.value)
+    assert "2025-01-01" in message and "2024-01-01" in message
+
+
+def test_a_malformed_date_is_rejected():
+    with pytest.raises(SystemExit):
+        main(["--source", "cfpb", "--start", "01-01-2024", "--end", "2024-12-31"])
+
+
+def test_a_single_day_window_is_allowed(monkeypatch):
+    seen = {}
+    monkeypatch.setattr("ingest.cli.ingest", lambda **kw: seen.update(kw))
+    main(["--source", "cfpb", "--start", "2024-06-01", "--end", "2024-06-01"])
+    assert seen["start"] == seen["end"] == date(2024, 6, 1)
+
+
+# --- raw cache and resumability ----------------------------------------------
+
+
+def test_a_first_run_writes_gzipped_pages_under_the_raw_root(tmp_path):
+    a_cfpb_run(tmp_path, [[cfpb_row("1")], [cfpb_row("2")]])
+    cached = sorted((tmp_path / "raw" / "cfpb").glob("*.json.gz"))
+    assert len(cached) == 2
+    for path in cached:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            assert "hits" in json.load(handle)
+
+
+def test_a_second_run_with_the_cache_present_performs_zero_fetches(tmp_path):
+    rows = [[cfpb_row("1")], [cfpb_row("2")]]
+    first, _ = a_cfpb_run(tmp_path, rows)
+
+    second_fetcher = StubFetcher([cfpb_page(r) for r in rows])
+    second = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=second_fetcher,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert second_fetcher.pages_yielded == 2, "pages are offered"
+    assert second.record_count == first.record_count
+    assert second.corpus_id == first.corpus_id, "identical corpus from the cache"
+
+
+def test_a_page_whose_checksum_matches_an_existing_file_is_skipped(tmp_path):
+    """The skip is the returned flag, not the file count.
+
+    Content addressing alone keeps the count at one -- rewriting the same page
+    lands on the same name -- so a count assertion would pass against an
+    implementation that never skipped anything. What must be true is that the
+    second store reports it wrote nothing.
+    """
+    from ingest.cli import cache_page
+
+    page = cfpb_page([cfpb_row("1")])
+    first_path, first_written = cache_page(page, "cfpb", tmp_path / "raw")
+    second_path, second_written = cache_page(page, "cfpb", tmp_path / "raw")
+
+    assert first_written is True
+    assert second_written is False, "an already-cached page must not be rewritten"
+    assert first_path == second_path
+    assert len(list((tmp_path / "raw" / "cfpb").glob("*.json.gz"))) == 1
+
+
+def test_a_cached_page_is_not_rewritten_on_disk(tmp_path, monkeypatch):
+    """Counted at the write itself, so a no-op rewrite cannot pass as a skip."""
+    import ingest.cli as cli
+
+    writes = []
+    real_open = cli.gzip.open
+
+    def counting_open(path, mode="rb", *args, **kwargs):
+        if "w" in mode:
+            writes.append(path)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(cli.gzip, "open", counting_open)
+
+    page = cfpb_page([cfpb_row("1")])
+    cli.cache_page(page, "cfpb", tmp_path / "raw")
+    assert len(writes) == 1
+    cli.cache_page(page, "cfpb", tmp_path / "raw")
+    assert len(writes) == 1, "the second store must not touch the file"
+
+
+def test_a_second_run_writes_no_new_pages(tmp_path, monkeypatch):
+    rows = [[cfpb_row("1")], [cfpb_row("2")]]
+    a_cfpb_run(tmp_path, rows)
+
+    import ingest.cli as cli
+
+    writes = []
+    real_open = cli.gzip.open
+
+    def counting_open(path, mode="rb", *args, **kwargs):
+        if "w" in mode:
+            writes.append(path)
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(cli.gzip, "open", counting_open)
+    ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=StubFetcher([cfpb_page(r) for r in rows]),
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert writes == [], "every page was already cached"
+
+
+def test_the_page_checksum_is_content_derived_and_order_independent():
+    a = page_checksum({"hits": {"hits": [{"_source": {"b": 1, "a": 2}}]}})
+    b = page_checksum({"hits": {"hits": [{"_source": {"a": 2, "b": 1}}]}})
+    assert a == b, "key order must not change a page's identity"
+    assert a != page_checksum({"hits": {"hits": []}})
+    assert len(a) == 64
+
+
+def test_an_interrupted_run_resumes_without_duplicating_records(tmp_path):
+    pages = [cfpb_page([cfpb_row(str(i))]) for i in range(1, 5)]
+
+    broken = StubFetcher(pages, fail_after=2)
+    with pytest.raises(RuntimeError):
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=broken,
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+    assert len(list((tmp_path / "raw" / "cfpb").glob("*.json.gz"))) == 2
+
+    resumed = StubFetcher(pages)
+    manifest = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=resumed,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.record_count == 4
+    ids = [r.external_id for r in read_corpus("cfpb", root=tmp_path / "corpus")]
+    assert ids == sorted(ids)
+    assert len(ids) == len(set(ids)) == 4
+
+
+def test_a_resumed_corpus_is_identical_to_a_clean_one(tmp_path):
+    pages = [cfpb_page([cfpb_row(str(i))]) for i in range(1, 5)]
+
+    clean = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=StubFetcher(pages),
+        corpus_root=tmp_path / "clean",
+        raw_root=tmp_path / "clean-raw",
+    )
+
+    with pytest.raises(RuntimeError):
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=StubFetcher(pages, fail_after=1),
+            corpus_root=tmp_path / "resumed",
+            raw_root=tmp_path / "resumed-raw",
+        )
+    resumed = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=StubFetcher(pages),
+        corpus_root=tmp_path / "resumed",
+        raw_root=tmp_path / "resumed-raw",
+    )
+
+    assert resumed.corpus_id == clean.corpus_id
+    assert resumed.record_count == clean.record_count
+    assert resumed.label_roster == clean.label_roster
+
+
+def test_running_with_no_fetcher_uses_the_cache_alone(tmp_path):
+    a_cfpb_run(tmp_path, [[cfpb_row("1")], [cfpb_row("2")]])
+    manifest = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=None,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.record_count == 2
+
+
+# --- limit -------------------------------------------------------------------
+
+
+def test_an_unbounded_run_records_a_null_limit(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row("1"), cfpb_row("2")]])
+    assert manifest.limit is None
+    assert manifest.record_count == 2
+
+
+def test_a_bounded_run_records_its_limit_and_honours_it(tmp_path):
+    rows = [[cfpb_row(str(i)) for i in range(1, 6)]]
+    manifest, _ = a_cfpb_run(tmp_path, rows, limit=3)
+    assert manifest.limit == 3
+    assert manifest.record_count == 3
+    assert len(list(read_corpus("cfpb", root=tmp_path / "corpus"))) == 3
+
+
+def test_the_limit_reaches_the_written_manifest_on_disk(tmp_path):
+    a_cfpb_run(tmp_path, [[cfpb_row(str(i)) for i in range(1, 6)]], limit=2)
+    assert read_manifest("cfpb", root=tmp_path / "corpus").limit == 2
+
+
+# --- roster validation happens before any Parquet write ----------------------
+
+
+def test_the_first_ingest_derives_and_locks_the_roster(tmp_path):
+    manifest, _ = a_cfpb_run(
+        tmp_path,
+        [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]],
+    )
+    assert set(manifest.label_roster) == {"Alpha", "Beta"}
+    assert manifest.label_roster == {"Alpha": 1, "Beta": 1}
+
+
+def test_an_unexpected_label_on_a_later_run_raises(tmp_path):
+    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha")]])
+
+    with pytest.raises(RosterMismatch) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=StubFetcher([cfpb_page([cfpb_row("2", product="Intruder")])]),
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "raw",
+        )
+    assert "Intruder" in str(exc.value)
+
+
+def test_no_part_file_is_written_after_a_roster_mismatch(tmp_path):
+    """The plan's explicit ordering test: validation precedes the first write."""
+    corpus = tmp_path / "corpus"
+    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha")]])
+    before = {p: p.read_bytes() for p in iter_part_files("cfpb", root=corpus)}
+    assert before, "the first run wrote something to compare against"
+
+    with pytest.raises(RosterMismatch):
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=StubFetcher(
+                [cfpb_page([cfpb_row("1", product="Alpha"), cfpb_row("9", product="New")])]
+            ),
+            corpus_root=corpus,
+            raw_root=tmp_path / "raw",
+        )
+
+    after = {p: p.read_bytes() for p in iter_part_files("cfpb", root=corpus)}
+    assert after == before, "no partition may be written or rewritten on a mismatch"
+
+
+def test_a_roster_mismatch_leaves_no_partition_at_all_on_a_first_run(tmp_path):
+    corpus = tmp_path / "corpus"
+    with pytest.raises(RosterMismatch):
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=StubFetcher(
+                [
+                    cfpb_page(
+                        [
+                            cfpb_row("1", product="Alpha", received="2024-03-15T09:00:00-04:00"),
+                            cfpb_row(
+                                "2",
+                                product="OnlyIn2025",
+                                received="2025-03-15T09:00:00-04:00",
+                            ),
+                        ]
+                    )
+                ]
+            ),
+            corpus_root=corpus,
+            raw_root=tmp_path / "raw",
+        )
+    assert iter_part_files("cfpb", root=corpus) == []
+    assert not (corpus / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").exists()
+
+
+def test_a_missing_locked_label_raises(tmp_path):
+    """A later run whose data no longer contains a locked label.
+
+    The second run reads a *different* raw cache: the first cache is cumulative
+    and still holds the Beta record, so a vanished label only appears when the
+    pages a run reads no longer carry it. The corpus root is shared, which is
+    what makes the first run's manifest the locked roster.
+    """
+    a_cfpb_run(
+        tmp_path,
+        [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]],
+    )
+    with pytest.raises(RosterMismatch) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=StubFetcher([cfpb_page([cfpb_row("3", product="Alpha")])]),
+            corpus_root=tmp_path / "corpus",
+            raw_root=tmp_path / "later-raw",
+        )
+    assert exc.value.missing == frozenset({"Beta"})
+
+
+def test_nyc311_has_no_roster_assertion(tmp_path):
+    """311 has 276 complaint types and no locked roster in the spec."""
+    fetcher = StubFetcher(
+        [[nyc311_row("1", complaint_type="Noise"), nyc311_row("2", complaint_type="Anything")]]
+    )
+    manifest = ingest(
+        source="nyc311",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        limit=None,
+        fetcher=fetcher,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert set(manifest.label_roster) == {"Noise", "Anything"}
+
+
+# --- the diagnostic, driven directly -----------------------------------------
+
+
+def local_times(hours):
+    """One naive local datetime per record, on a fixed Monday."""
+    return [datetime(2024, 3, 4, hour, 30) for hour in hours]
+
+
+def spread_hours(n):
+    """Hours spread evenly enough that concentration stays well under D22."""
+    return [i % 24 for i in range(n)]
+
+
+def diagnostic(deltas, *, total=None, hours=None, source="cfpb"):
+    paired = 0 if deltas is None else len(deltas)
+    total = paired if total is None else total
+    hours = spread_hours(total) if hours is None else hours
+    return build_diagnostic(
+        source=source,
+        submitted_local=local_times(hours),
+        deltas_seconds=deltas,
+        paired_count=paired,
+        total_count=total,
+    )
+
+
+def test_the_diagnostic_carries_both_evidence_classes_and_the_rule():
+    d = diagnostic([7200.0] * 100)
+    assert d["primary_evidence"]["evidence_class"] == "field_delta"
+    assert d["secondary_evidence"]["evidence_class"] == "distributional_anomaly"
+    assert d["verdict"] in {STRONGLY_SUSPICIOUS, SUPPORTED, INSUFFICIENT}
+    assert d["verdict_rule"] == VERDICT_RULE
+    assert isinstance(d["verdict_branch"], str) and d["verdict_branch"]
+    assert d["not_directly_testable"] is False
+
+
+def test_a_three_second_median_is_strongly_suspicious():
+    d = diagnostic([3.0] * 100)
+    assert d["verdict"] == STRONGLY_SUSPICIOUS
+    assert d["primary_evidence"]["median_delta_seconds"] == 3.0
+
+
+def test_a_multi_hour_median_with_no_sub_minute_mass_is_supported():
+    d = diagnostic([86400.0] * 100)
+    assert d["verdict"] == SUPPORTED
+
+
+def test_forty_percent_coverage_is_insufficient_regardless_of_deltas():
+    d = diagnostic([86400.0] * 40, total=100)
+    assert d["primary_evidence"]["pair_coverage"] == pytest.approx(0.40)
+    assert d["verdict"] == INSUFFICIENT
+    assert "coverage" in d["verdict_branch"]
+
+
+def test_coverage_exactly_at_the_threshold_is_not_forced():
+    d = diagnostic([86400.0] * 50, total=100)
+    assert d["primary_evidence"]["pair_coverage"] == pytest.approx(0.50)
+    assert d["verdict"] == SUPPORTED
+
+
+def test_half_the_deltas_under_a_minute_is_strongly_suspicious():
+    d = diagnostic([30.0] * 50 + [86400.0] * 50)
+    assert d["primary_evidence"]["frac_delta_le_1min"] == pytest.approx(0.50)
+    assert d["verdict"] == STRONGLY_SUSPICIOUS
+
+
+def test_a_fifth_identical_timestamps_is_strongly_suspicious():
+    d = diagnostic([0.0] * 20 + [86400.0] * 80)
+    assert d["primary_evidence"]["frac_identical_timestamps"] == pytest.approx(0.20)
+    assert d["verdict"] == STRONGLY_SUSPICIOUS
+
+
+def test_a_median_of_exactly_sixty_seconds_is_strongly_suspicious():
+    d = diagnostic([60.0] * 100)
+    assert d["verdict"] == STRONGLY_SUSPICIOUS
+
+
+def test_a_median_of_exactly_one_hour_can_be_supported():
+    d = diagnostic([3600.0] * 100)
+    assert d["primary_evidence"]["median_delta_seconds"] == 3600.0
+    assert d["verdict"] == SUPPORTED
+
+
+def test_a_negative_delta_prevents_the_supported_verdict():
+    d = diagnostic([-10.0] + [86400.0] * 99)
+    assert d["primary_evidence"]["count_delta_negative"] == 1
+    assert d["verdict"] == INSUFFICIENT
+
+
+def test_the_middle_case_falls_through_to_insufficient():
+    """Median above a minute but below an hour: neither branch fires."""
+    d = diagnostic([600.0] * 100)
+    assert d["verdict"] == INSUFFICIENT
+
+
+def test_the_recorded_metrics_are_the_ones_the_addendum_names():
+    primary = diagnostic([100.0, 200.0, 300.0, 400.0] * 25)["primary_evidence"]
+    for key in (
+        "pair_coverage",
+        "median_delta_seconds",
+        "delta_percentiles_seconds",
+        "frac_delta_le_1min",
+        "frac_delta_le_10min",
+        "frac_delta_le_1h",
+        "count_delta_negative",
+        "count_delta_zero",
+        "frac_identical_timestamps",
+    ):
+        assert key in primary, key
+    assert set(primary["delta_percentiles_seconds"]) == {"p5", "p25", "p50", "p75", "p95", "p99"}
+    assert primary["median_delta_seconds"] == primary["delta_percentiles_seconds"]["p50"]
+
+
+def test_the_secondary_evidence_records_the_shape_metrics():
+    secondary = diagnostic([86400.0] * 48)["secondary_evidence"]
+    assert len(secondary["hour_counts"]) == 24
+    assert len(secondary["weekday_counts"]) == 7
+    assert sum(secondary["hour_counts"]) == 48
+    assert set(secondary["chi_square"]) == {"statistic", "p_value", "degrees_of_freedom"}
+    assert secondary["chi_square"]["degrees_of_freedom"] == 23
+    assert 0.0 <= secondary["hour_concentration"] <= 1.0
+
+
+# --- D22: the one distributional threshold, downgrade only -------------------
+
+
+def test_the_downgrade_threshold_is_the_committed_value():
+    assert HOUR_CONCENTRATION_DOWNGRADE == 0.50
+    assert VERDICT_RULE["hour_concentration_downgrade_at"] == 0.50
+
+
+def test_extreme_concentration_downgrades_a_supported_verdict():
+    hours = [9] * 60 + spread_hours(40)
+    d = diagnostic([86400.0] * 100, hours=hours)
+    assert d["secondary_evidence"]["hour_concentration"] >= 0.50
+    assert d["verdict"] == INSUFFICIENT
+    assert d["secondary_evidence"]["downgraded_verdict"] is True
+    assert d["verdict_branch"] == SUPPORTED, "the primary branch is still recorded"
+
+
+def test_extreme_concentration_never_produces_the_strong_verdict():
+    """A uniform-delta corpus that is merely concentrated stays at doubt, not
+    at an assertion about provenance."""
+    hours = [9] * 90 + spread_hours(10)
+    d = diagnostic([86400.0] * 100, hours=hours)
+    assert d["secondary_evidence"]["hour_concentration"] >= 0.90
+    assert d["verdict"] == INSUFFICIENT
+    assert d["verdict"] != STRONGLY_SUSPICIOUS
+
+
+def test_a_uniform_histogram_with_healthy_deltas_is_not_strongly_suspicious():
+    """Distribution shape alone cannot establish artifact status."""
+    d = diagnostic([86400.0] * 96, hours=[i % 24 for i in range(96)])
+    concentration = d["secondary_evidence"]["hour_concentration"]
+    assert concentration == pytest.approx(1 / 24, abs=1e-9)
+    assert d["verdict"] == SUPPORTED
+    assert d["verdict"] != STRONGLY_SUSPICIOUS
+
+
+def test_concentration_below_the_threshold_has_no_effect():
+    # Filler hours deliberately avoid 9, so the busiest hour is exactly the 40.
+    hours = [9] * 40 + [(i % 14) + 10 for i in range(60)]
+    d = diagnostic([86400.0] * 100, hours=hours)
+    assert d["secondary_evidence"]["hour_concentration"] < 0.50
+    assert d["verdict"] == SUPPORTED
+    assert d["secondary_evidence"]["downgraded_verdict"] is False
+
+
+def test_concentration_cannot_upgrade_a_strongly_suspicious_verdict():
+    d = diagnostic([3.0] * 100, hours=[9] * 100)
+    assert d["secondary_evidence"]["hour_concentration"] == 1.0
+    assert d["verdict"] == STRONGLY_SUSPICIOUS
+    assert d["secondary_evidence"]["downgraded_verdict"] is False
+
+
+def test_concentration_does_not_change_an_already_insufficient_verdict():
+    d = diagnostic([600.0] * 100, hours=[9] * 100)
+    assert d["verdict"] == INSUFFICIENT
+    assert d["secondary_evidence"]["downgraded_verdict"] is False
+
+
+def test_hour_concentration_is_the_largest_count_over_the_total():
+    d = diagnostic([86400.0] * 10, hours=[3] * 4 + [5] * 3 + [7] * 3)
+    assert d["secondary_evidence"]["hour_concentration"] == pytest.approx(0.4)
+
+
+# --- sources without a testable pair -----------------------------------------
+
+
+def test_a_source_with_no_testable_pair_is_insufficient_by_construction():
+    d = diagnostic(None, total=100, source="nyc311")
+    assert d["verdict"] == INSUFFICIENT
+    assert d["not_directly_testable"] is True
+    assert d["primary_evidence"]["available"] is False
+    assert d["primary_evidence"]["evidence_class"] == "field_delta"
+    assert "reason" in d["primary_evidence"]
+
+
+def test_a_source_with_no_pair_still_carries_secondary_evidence():
+    d = diagnostic(None, total=48, source="nyc311")
+    assert d["secondary_evidence"]["evidence_class"] == "distributional_anomaly"
+    assert sum(d["secondary_evidence"]["hour_counts"]) == 48
+
+
+def test_no_pair_is_never_upgraded_by_a_clean_histogram():
+    d = diagnostic(None, total=96, source="nyc311")
+    assert d["verdict"] == INSUFFICIENT
+
+
+def test_the_diagnostic_never_claims_shape_proves_provenance():
+    d = diagnostic([86400.0] * 100)
+    blob = json.dumps(d).lower()
+    assert "proof" not in blob and "proves" not in blob
+    assert "fraud" not in blob
+    assert d["secondary_evidence"]["evidence_class"] == "distributional_anomaly"
+
+
+# --- the diagnostic reaches the manifest -------------------------------------
+
+
+def test_every_manifest_carries_a_diagnostic(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row("1"), cfpb_row("2")]])
+    d = manifest.timestamp_diagnostic
+    assert d["primary_evidence"]["evidence_class"] == "field_delta"
+    assert d["secondary_evidence"]["evidence_class"] == "distributional_anomaly"
+    assert d["verdict_rule"] == VERDICT_RULE
+
+
+def test_the_diagnostic_survives_into_the_manifest_on_disk(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row("1"), cfpb_row("2")]])
+    assert read_manifest("cfpb", root=tmp_path / "corpus").timestamp_diagnostic == (
+        manifest.timestamp_diagnostic
+    )
+
+
+def test_a_cfpb_corpus_with_seconds_apart_timestamps_is_flagged(tmp_path):
+    rows = [
+        cfpb_row(
+            str(i),
+            received=f"2024-03-{(i % 28) + 1:02d}T{i % 24:02d}:00:00-04:00",
+            sent=f"2024-03-{(i % 28) + 1:02d}T{i % 24:02d}:00:03-04:00",
+        )
+        for i in range(1, 25)
+    ]
+    manifest, _ = a_cfpb_run(tmp_path, [rows])
+    d = manifest.timestamp_diagnostic
+    assert d["primary_evidence"]["median_delta_seconds"] == 3.0
+    assert d["verdict"] == STRONGLY_SUSPICIOUS
+
+
+def test_a_nyc311_manifest_is_not_directly_testable(tmp_path):
+    fetcher = StubFetcher([[nyc311_row(str(i)) for i in range(1, 4)]])
+    manifest = ingest(
+        source="nyc311",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        limit=None,
+        fetcher=fetcher,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    d = manifest.timestamp_diagnostic
+    assert d["not_directly_testable"] is True
+    assert d["verdict"] == INSUFFICIENT
+    assert d["primary_evidence"]["available"] is False
+
+
+def test_the_311_histogram_uses_new_york_local_hours(tmp_path):
+    """§2.4 binds submitted_hour to the local representation for this source."""
+    fetcher = StubFetcher(
+        [[nyc311_row(str(i), created="2024-03-15T09:00:00.000") for i in range(1, 4)]]
+    )
+    manifest = ingest(
+        source="nyc311",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        limit=None,
+        fetcher=fetcher,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    counts = manifest.timestamp_diagnostic["secondary_evidence"]["hour_counts"]
+    assert counts[9] == 3, "local 09:00, not the 13:00 UTC instant"
+    assert counts[13] == 0
+
+
+# --- boundaries --------------------------------------------------------------
+
+
+def test_the_cli_module_imports_without_django():
+    import ast
+
+    tree = ast.parse(Path("ingest/cli.py").read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    for module in imported:
+        assert module.split(".")[0] != "django", module
+        assert not module.startswith("ml."), module
+
+
+def test_ingest_opens_no_socket(tmp_path, monkeypatch):
+    import socket
+
+    def boom(*args, **kwargs):
+        raise AssertionError("ingestion must reach the network only through the fetcher")
+
+    monkeypatch.setattr(socket, "socket", boom)
+    monkeypatch.setattr(socket, "create_connection", boom)
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row("1")]])
+    assert manifest.record_count == 1
+
+
+def test_the_default_raw_root_is_under_the_gitignored_data_tree():
+    assert RAW_ROOT.parts[0] == "data"
+
+
+def test_the_cli_computes_no_corpus_id_of_its_own():
+    """Corpus identity stays Task 4's; this module must not invent another."""
+    source = Path("ingest/cli.py").read_text(encoding="utf-8")
+    assert "sha256" not in source.replace("page_checksum", "") or "compute_corpus_id" not in source
+    assert "hashlib.sha256(" not in source or "corpus_id" not in source
+
+
+def test_records_outside_the_window_are_excluded(tmp_path):
+    """The 2024-2025 scope is enforced here, never in the adapter."""
+    rows = [
+        cfpb_row("in", received="2024-06-01T09:00:00-04:00"),
+        cfpb_row("old", received="2023-06-01T09:00:00-04:00"),
+        cfpb_row("new", received="2026-06-01T09:00:00-04:00"),
+    ]
+    manifest, _ = a_cfpb_run(tmp_path, [rows])
+    ids = [r.external_id for r in read_corpus("cfpb", root=tmp_path / "corpus")]
+    assert ids == ["in"]
+    assert manifest.record_count == 1
+
+
+def test_the_window_comes_from_the_arguments_not_a_constant(tmp_path):
+    rows = [
+        cfpb_row("a", received="2024-06-01T09:00:00-04:00"),
+        cfpb_row("b", received="2025-06-01T09:00:00-04:00"),
+    ]
+    manifest = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        limit=None,
+        fetcher=StubFetcher([cfpb_page(rows)]),
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / "raw",
+    )
+    assert manifest.record_count == 1
+    assert manifest.window_start == datetime(2024, 1, 1, tzinfo=UTC)
+    assert manifest.window_end == datetime(2024, 12, 31, tzinfo=UTC) + timedelta(
+        hours=23, minutes=59, seconds=59
+    )
+
+
+# --- each threshold isolated at the rule's own seam ---------------------------
+#
+# On real delta data `median <= 60` always implies `frac_delta_le_1min >= 0.50`,
+# so a corpus-shaped test can never show which of the two branches fired. These
+# drive `decide_verdict` with hand-built metrics -- combinations the arithmetic
+# would not produce together -- so each threshold in VERDICT_RULE is pinned on
+# its own and a changed number cannot hide behind a neighbouring branch.
+
+
+def metrics(**overrides):
+    base = {
+        "evidence_class": "field_delta",
+        "available": True,
+        "pair_coverage": 1.0,
+        "median_delta_seconds": 7200.0,
+        "frac_delta_le_1min": 0.0,
+        "frac_delta_le_10min": 0.0,
+        "frac_delta_le_1h": 0.0,
+        "count_delta_negative": 0,
+        "count_delta_zero": 0,
+        "frac_identical_timestamps": 0.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_the_strong_median_threshold_is_sixty_seconds_exactly():
+    assert decide_verdict(metrics(median_delta_seconds=60.0))[0] == STRONGLY_SUSPICIOUS
+    assert decide_verdict(metrics(median_delta_seconds=61.0))[0] != STRONGLY_SUSPICIOUS
+
+
+def test_the_strong_sub_minute_fraction_threshold_is_one_half_exactly():
+    assert decide_verdict(metrics(frac_delta_le_1min=0.50))[0] == STRONGLY_SUSPICIOUS
+    assert decide_verdict(metrics(frac_delta_le_1min=0.49))[0] != STRONGLY_SUSPICIOUS
+
+
+def test_the_identical_timestamp_threshold_is_one_fifth_exactly():
+    assert decide_verdict(metrics(frac_identical_timestamps=0.20))[0] == STRONGLY_SUSPICIOUS
+    assert decide_verdict(metrics(frac_identical_timestamps=0.19))[0] != STRONGLY_SUSPICIOUS
+
+
+def test_the_supported_median_threshold_is_one_hour_exactly():
+    assert decide_verdict(metrics(median_delta_seconds=3600.0))[0] == SUPPORTED
+    assert decide_verdict(metrics(median_delta_seconds=3599.0))[0] == INSUFFICIENT
+
+
+def test_the_supported_sub_minute_ceiling_is_five_percent_exactly():
+    assert decide_verdict(metrics(frac_delta_le_1min=0.049))[0] == SUPPORTED
+    assert decide_verdict(metrics(frac_delta_le_1min=0.05))[0] == INSUFFICIENT
+
+
+def test_a_single_negative_delta_blocks_the_supported_branch():
+    assert decide_verdict(metrics(count_delta_negative=0))[0] == SUPPORTED
+    assert decide_verdict(metrics(count_delta_negative=1))[0] == INSUFFICIENT
+
+
+def test_the_coverage_floor_is_one_half_exactly():
+    assert decide_verdict(metrics(pair_coverage=0.50))[0] == SUPPORTED
+    verdict, branch = decide_verdict(metrics(pair_coverage=0.49))
+    assert verdict == INSUFFICIENT
+    assert branch == "pair_coverage_below_threshold"
+
+
+def test_low_coverage_overrides_even_a_strongly_suspicious_delta_set():
+    """§2.3: below half coverage the verdict is insufficient, whatever the
+    deltas say. It is an override, not one branch among several."""
+    verdict, branch = decide_verdict(metrics(pair_coverage=0.10, median_delta_seconds=3.0))
+    assert verdict == INSUFFICIENT
+    assert branch == "pair_coverage_below_threshold"
+
+
+def test_the_branch_is_recorded_so_a_reader_sees_which_fired():
+    assert decide_verdict(metrics(median_delta_seconds=3.0))[1] == STRONGLY_SUSPICIOUS
+    assert decide_verdict(metrics())[1] == SUPPORTED
+    assert decide_verdict(metrics(median_delta_seconds=600.0))[1] == "no_branch_matched"
+    assert decide_verdict({"available": False})[1] == "no_testable_pair"
