@@ -5,13 +5,16 @@ trained on. If it did not change when a part file changed, that citation would
 be a lie.
 """
 
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pyarrow.parquet", reason="pyarrow lives in requirements/train.txt")
 
 from ingest.manifest import (  # noqa: E402
+    MANIFEST_VERSION,
     ChecksumMismatch,
     CorpusManifest,
     ManifestNotFound,
@@ -36,7 +39,56 @@ def record(external_id: str, day: int, label: str = "Mortgage") -> CorpusRecord:
     )
 
 
-def a_corpus(root, labels=("Mortgage", "Credit card")):
+# A structurally complete diagnostic, exactly as plan §G documents it. The
+# manifest stores it opaquely -- computing one is Task 8, not this module -- so
+# this is test data whose only job is to prove the structure survives a round
+# trip byte for byte.
+DIAGNOSTIC = {
+    "verdict": "supported_plausible_event_time",
+    "verdict_branch": "supported_plausible_event_time",
+    "not_directly_testable": False,
+    "verdict_rule": {
+        "strongly_suspicious_median_delta_seconds_max": 60,
+        "strongly_suspicious_frac_delta_le_1min_min": 0.5,
+        "strongly_suspicious_frac_identical_timestamps_min": 0.2,
+        "supported_median_delta_seconds_min": 3600,
+        "supported_frac_delta_le_1min_max": 0.05,
+        "supported_count_delta_negative_max": 0,
+        "insufficient_pair_coverage_below": 0.5,
+        "hour_concentration_downgrade_at": 0.5,
+    },
+    "primary_evidence": {
+        "evidence_class": "field_delta",
+        "available": True,
+        "pair_coverage": 0.97,
+        "median_delta_seconds": 259200.0,
+        "delta_percentiles_seconds": {
+            "p5": 3600.0,
+            "p25": 86400.0,
+            "p50": 259200.0,
+            "p75": 432000.0,
+            "p95": 864000.0,
+            "p99": 1728000.0,
+        },
+        "frac_delta_le_1min": 0.0,
+        "frac_delta_le_10min": 0.0,
+        "frac_delta_le_1h": 0.01,
+        "count_delta_negative": 0,
+        "count_delta_zero": 0,
+        "frac_identical_timestamps": 0.0,
+    },
+    "secondary_evidence": {
+        "evidence_class": "distributional_anomaly",
+        "hour_counts": [10] * 24,
+        "weekday_counts": [30] * 7,
+        "chi_square": {"statistic": 0.0, "p_value": 1.0, "degrees_of_freedom": 23},
+        "hour_concentration": 0.0417,
+        "downgraded_verdict": False,
+    },
+}
+
+
+def a_corpus(root, labels=("Mortgage", "Credit card"), limit=None, diagnostic=None):
     write_partition(
         [record("1", 1, labels[0]), record("2", 2, labels[1])], "cfpb", 2024, 0, root=root
     )
@@ -45,6 +97,8 @@ def a_corpus(root, labels=("Mortgage", "Credit card")):
         window_start=datetime(2024, 1, 1, tzinfo=UTC),
         window_end=datetime(2024, 12, 31, tzinfo=UTC),
         source_api_version="v1",
+        limit=limit,
+        timestamp_diagnostic=DIAGNOSTIC if diagnostic is None else diagnostic,
         root=root,
     )
 
@@ -100,6 +154,8 @@ def test_corpus_id_changes_when_the_corpus_gains_a_part(tmp_path):
         window_start=manifest.window_start,
         window_end=manifest.window_end,
         source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
         root=tmp_path,
     )
     assert rebuilt.corpus_id != manifest.corpus_id
@@ -117,6 +173,8 @@ def test_corpus_id_is_stable_when_only_mtime_changes(tmp_path):
         window_start=manifest.window_start,
         window_end=manifest.window_end,
         source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
         root=tmp_path,
     )
     assert rebuilt.corpus_id == manifest.corpus_id, "identity is content, not filesystem metadata"
@@ -214,3 +272,244 @@ def test_manifest_carries_no_operational_complaint_data(tmp_path):
 
     names = {f.name for f in dataclasses.fields(CorpusManifest)}
     assert not names & {"complaint_id", "complaint_ids", "pk", "id"}
+
+
+# --- the Task 8 manifest contract (plan section G) ---------------------------
+#
+# `manifest_version`, `limit` and `timestamp_diagnostic` are required fields.
+# This module stores the diagnostic; it does not compute one -- no verdict
+# logic, no hour_concentration, no delta arithmetic lives here.
+
+
+def test_the_manifest_carries_the_three_contract_fields(tmp_path):
+    m = a_corpus(tmp_path, limit=500)
+    assert m.manifest_version == MANIFEST_VERSION == 1
+    assert m.limit == 500
+    assert m.timestamp_diagnostic == DIAGNOSTIC
+
+
+def test_manifest_version_is_distinct_from_schema_version(tmp_path):
+    """They version different things: `schema_version` is the `CorpusRecord`
+    schema and the `v<N>` path segment; `manifest_version` is this document's
+    own shape. A single number could not say that."""
+    import dataclasses
+
+    m = a_corpus(tmp_path)
+    names = {f.name for f in dataclasses.fields(CorpusManifest)}
+    assert {"manifest_version", "schema_version"} <= names
+
+    assert m.schema_version == SCHEMA_VERSION
+    assert m.manifest_version == MANIFEST_VERSION
+    # The storage tree is keyed on the record schema, never on this field.
+    assert f"v{SCHEMA_VERSION}" in next(iter(m.part_files))
+
+
+def test_schema_version_was_not_incremented(tmp_path):
+    """Bumping it for a manifest change would orphan every written partition."""
+    assert SCHEMA_VERSION == 1
+    assert a_corpus(tmp_path).schema_version == 1
+
+
+def test_all_eleven_original_fields_survive(tmp_path):
+    m = a_corpus(tmp_path)
+    for name in (
+        "schema_version",
+        "source_slug",
+        "window_start",
+        "window_end",
+        "ingested_at",
+        "record_count",
+        "per_year_counts",
+        "label_roster",
+        "part_files",
+        "source_api_version",
+        "corpus_id",
+    ):
+        assert hasattr(m, name), name
+    assert m.source_slug == "cfpb"
+    assert m.record_count == 2
+    assert m.per_year_counts == {2024: 2}
+    assert len(m.corpus_id) == 64
+
+
+# --- serialisation round trip ------------------------------------------------
+
+
+def test_write_manifest_emits_the_three_new_keys(tmp_path):
+    m = a_corpus(tmp_path, limit=250)
+    write_manifest(m, root=tmp_path)
+    raw = (tmp_path / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").read_text(encoding="utf-8")
+    payload = json.loads(raw)
+    assert payload["manifest_version"] == 1
+    assert payload["limit"] == 250
+    assert payload["timestamp_diagnostic"] == DIAGNOSTIC
+
+
+def test_read_manifest_reconstructs_the_new_fields_exactly(tmp_path):
+    m = a_corpus(tmp_path, limit=7)
+    write_manifest(m, root=tmp_path)
+    back = read_manifest("cfpb", root=tmp_path)
+    assert back == m
+    assert back.manifest_version == 1
+    assert back.limit == 7
+    assert back.timestamp_diagnostic == DIAGNOSTIC
+
+
+def test_a_none_limit_serialises_as_json_null(tmp_path):
+    m = a_corpus(tmp_path, limit=None)
+    path = write_manifest(m, root=tmp_path)
+    raw = path.read_text(encoding="utf-8")
+    assert '"limit": null' in raw
+    assert json.loads(raw)["limit"] is None
+    assert read_manifest("cfpb", root=tmp_path).limit is None
+
+
+def test_the_diagnostic_structure_survives_the_round_trip_completely(tmp_path):
+    m = a_corpus(tmp_path)
+    write_manifest(m, root=tmp_path)
+    back = read_manifest("cfpb", root=tmp_path).timestamp_diagnostic
+
+    assert back == DIAGNOSTIC
+    assert back["primary_evidence"]["evidence_class"] == "field_delta"
+    assert back["secondary_evidence"]["evidence_class"] == "distributional_anomaly"
+    assert back["not_directly_testable"] is False
+    assert len(back["secondary_evidence"]["hour_counts"]) == 24
+    assert len(back["secondary_evidence"]["weekday_counts"]) == 7
+    assert back["verdict_rule"]["hour_concentration_downgrade_at"] == 0.5
+    assert back["primary_evidence"]["delta_percentiles_seconds"]["p50"] == 259200.0
+
+
+def test_a_not_directly_testable_diagnostic_round_trips(tmp_path):
+    """The 311 shape: secondary evidence only, no field-delta pair."""
+    diagnostic = {
+        "verdict": "suspicious_insufficient_evidence",
+        "verdict_branch": "no_testable_pair",
+        "not_directly_testable": True,
+        "verdict_rule": {"insufficient_pair_coverage_below": 0.5},
+        "primary_evidence": {
+            "evidence_class": "field_delta",
+            "available": False,
+            "reason": "the created-to-closed interval is the target variable",
+        },
+        "secondary_evidence": {
+            "evidence_class": "distributional_anomaly",
+            "hour_counts": [1] * 24,
+            "weekday_counts": [1] * 7,
+            "chi_square": {"statistic": 0.0, "p_value": 1.0, "degrees_of_freedom": 23},
+            "hour_concentration": 0.0417,
+            "downgraded_verdict": False,
+        },
+    }
+    m = a_corpus(tmp_path, diagnostic=diagnostic)
+    write_manifest(m, root=tmp_path)
+    back = read_manifest("cfpb", root=tmp_path)
+    assert back.timestamp_diagnostic == diagnostic
+    assert back.timestamp_diagnostic["not_directly_testable"] is True
+    assert back.timestamp_diagnostic["primary_evidence"]["available"] is False
+
+
+def test_serialisation_stays_deterministic_with_the_new_fields(tmp_path):
+    m = a_corpus(tmp_path, limit=3)
+    first = write_manifest(m, root=tmp_path).read_bytes()
+    second = write_manifest(m, root=tmp_path).read_bytes()
+    assert first == second
+
+
+# --- required, not defaulted -------------------------------------------------
+
+
+@pytest.mark.parametrize("key", ["manifest_version", "limit", "timestamp_diagnostic"])
+def test_a_manifest_missing_a_required_new_key_is_rejected(tmp_path, key):
+    """No silent default. The same behaviour the other ten fields already have:
+    a manifest that does not carry the field cannot be read as though it did."""
+    m = a_corpus(tmp_path, limit=9)
+    path = write_manifest(m, root=tmp_path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    del payload[key]
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(KeyError, match=key):
+        read_manifest("cfpb", root=tmp_path)
+
+
+def test_build_manifest_requires_both_new_arguments(tmp_path):
+    """`limit` in particular must not default: a forgotten argument would record
+    a truncated corpus as unbounded, which is the confusion the field exists to
+    prevent."""
+    write_partition([record("1", 1)], "cfpb", 2024, 0, root=tmp_path)
+    common = {
+        "source": "cfpb",
+        "window_start": datetime(2024, 1, 1, tzinfo=UTC),
+        "window_end": datetime(2024, 12, 31, tzinfo=UTC),
+        "source_api_version": "v1",
+        "root": tmp_path,
+    }
+    with pytest.raises(TypeError):
+        build_manifest(**common, timestamp_diagnostic=DIAGNOSTIC)
+    with pytest.raises(TypeError):
+        build_manifest(**common, limit=None)
+
+
+# --- the new fields must not disturb corpus identity -------------------------
+
+
+def test_corpus_id_ignores_the_limit_and_the_diagnostic(tmp_path):
+    """`corpus_id` hashes part-file checksums only. If metadata entered it, two
+    identical corpora described differently would claim to be different data."""
+    baseline = a_corpus(tmp_path, limit=None)
+    with_limit = a_corpus(tmp_path, limit=10)
+    other_diagnostic = a_corpus(
+        tmp_path, diagnostic={"verdict": "suspicious_insufficient_evidence"}
+    )
+
+    assert with_limit.corpus_id == baseline.corpus_id
+    assert other_diagnostic.corpus_id == baseline.corpus_id
+
+
+def test_the_manifest_module_computes_no_verdict():
+    """Contract alignment only: the diagnostic is stored, never derived here.
+
+    Checked against executable code rather than raw text, so a docstring may
+    explain what this module deliberately does *not* do without tripping the
+    guard. Identifiers and non-docstring literals are what would betray real
+    verdict logic.
+    """
+    import ast
+
+    tree = ast.parse(Path("ingest/manifest.py").read_text(encoding="utf-8"))
+
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            doc = ast.get_docstring(node, clean=False)
+            if doc is not None:
+                docstrings.add(doc)
+        # A bare string expression is a field docstring in this module.
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                docstrings.add(node.value.value)
+
+    code_tokens: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            code_tokens.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            code_tokens.add(node.attr)
+        elif isinstance(node, ast.arg):
+            code_tokens.add(node.arg)
+        elif isinstance(node, ast.FunctionDef | ast.ClassDef):
+            code_tokens.add(node.name)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value not in docstrings:
+                code_tokens.add(node.value)
+
+    haystack = " ".join(code_tokens)
+    for forbidden in (
+        "hour_concentration",
+        "strongly_suspicious",
+        "supported_plausible",
+        "chi_square",
+        "median_delta",
+    ):
+        assert forbidden not in haystack, f"{forbidden} is Task 8's, not the manifest's"

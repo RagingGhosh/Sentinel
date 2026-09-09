@@ -21,12 +21,23 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ingest.schema import SCHEMA_VERSION
 from ingest.storage import CORPUS_ROOT, iter_part_files, read_corpus, source_root
 
 MANIFEST_NAME = "manifest.json"
 _CHECKSUM_CHUNK = 1 << 20
+
+MANIFEST_VERSION = 1
+"""The manifest document's own shape (plan §G).
+
+Deliberately **not** `SCHEMA_VERSION`. That one versions `CorpusRecord` and is
+the `v<N>` segment of the storage path, so incrementing it for a manifest change
+would leave every record field identical while every written partition became
+unreachable under a new tree. Adding, removing or retyping a manifest field
+increments this instead and leaves the corpus tree exactly where it is.
+"""
 
 
 class CorpusIntegrityError(Exception):
@@ -50,7 +61,10 @@ class CorpusManifest:
     like a handle to one.
     """
 
+    manifest_version: int
+    """This document's shape. See `MANIFEST_VERSION`."""
     schema_version: int
+    """The `CorpusRecord` schema, which is also the storage path's `v<N>`."""
     source_slug: str
     window_start: datetime
     window_end: datetime
@@ -64,6 +78,21 @@ class CorpusManifest:
     """Corpus-root-relative POSIX path -> SHA256 of the file's bytes."""
     source_api_version: str
     corpus_id: str
+
+    limit: int | None
+    """The `--limit` the ingestion ran under, or `None` for an unbounded run.
+
+    Recorded so a truncated development corpus can never be mistaken for a full
+    one: an artifact citing a `corpus_id` can see whether the corpus behind it
+    was complete."""
+
+    timestamp_diagnostic: dict[str, Any]
+    """The §2.3 provenance diagnostic, stored verbatim.
+
+    This module records it and never computes it — no verdict rule, no delta
+    arithmetic, no `hour_concentration` lives here. Its structure is documented
+    in plan §G, and it is held as a plain mapping so that adding a metric to the
+    diagnostic does not require a change in this file."""
 
 
 def sha256_file(path: Path) -> str:
@@ -96,6 +125,8 @@ def build_manifest(
     window_start: datetime,
     window_end: datetime,
     source_api_version: str,
+    limit: int | None,
+    timestamp_diagnostic: dict[str, Any],
     root: Path = CORPUS_ROOT,
     ingested_at: datetime | None = None,
 ) -> CorpusManifest:
@@ -119,6 +150,7 @@ def build_manifest(
         labels[record.label] += 1
 
     return CorpusManifest(
+        manifest_version=MANIFEST_VERSION,
         schema_version=SCHEMA_VERSION,
         source_slug=source,
         window_start=window_start,
@@ -130,6 +162,8 @@ def build_manifest(
         part_files=dict(sorted(part_checksums.items())),
         source_api_version=source_api_version,
         corpus_id=compute_corpus_id(part_checksums),
+        limit=limit,
+        timestamp_diagnostic=timestamp_diagnostic,
     )
 
 
@@ -162,6 +196,7 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     return CorpusManifest(
+        manifest_version=payload["manifest_version"],
         schema_version=payload["schema_version"],
         source_slug=payload["source_slug"],
         window_start=datetime.fromisoformat(payload["window_start"]),
@@ -173,6 +208,8 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
         part_files=dict(payload["part_files"]),
         source_api_version=payload["source_api_version"],
         corpus_id=payload["corpus_id"],
+        limit=payload["limit"],
+        timestamp_diagnostic=dict(payload["timestamp_diagnostic"]),
     )
 
 
