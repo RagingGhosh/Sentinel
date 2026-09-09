@@ -80,4 +80,4 @@ jobs:
       - name: Corpus storage tests (require the training tier)
         run: |
           python -c "import pyarrow.parquet; print('pyarrow', pyarrow.__version__)"
-          pytest tests/ingest/test_storage.py tests/ingest/test_manifest.py
+          pytest tests/ingest/test_storage.py tests/ingest/test_manifest.py tests/ingest/test_cli.py
