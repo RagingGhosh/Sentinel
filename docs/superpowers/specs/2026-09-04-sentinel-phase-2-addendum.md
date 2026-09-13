@@ -398,6 +398,70 @@ resolved window bounds, how many cached pages were read, and that none of their
 records fell inside the window — enough to tell an empty cache apart from a
 cache whose records all lie outside the window.
 
+This is one of two conditions under which ingest refuses before writing
+anything. The other is §2.6: a `--limit`ed run whose target corpus root already
+holds an authoritative corpus (D26).
+
+### 2.6 Corpus replacement
+
+Ingest writes a source's partitions and manifest into its target corpus root,
+replacing the files it writes rather than merging into them. An unbounded rerun over
+an unbounded corpus is therefore idempotent — the same window and raw cache
+produce the same part files and the same `corpus_id` — and that rerun is the
+resume path. What was never stated is what a `--limit`ed run may do to a root
+that already holds a full corpus. Left unstated, it replaced it: a truncated run
+overwrote the authoritative partitions and manifest, and every artifact citing
+the old `corpus_id` was left naming a corpus that no longer existed.
+
+**A limited run may not replace an authoritative corpus.** An authoritative
+corpus is one whose manifest records `limit: null` (D24). When the target corpus
+root already holds an authoritative manifest for the source, a run with
+`--limit` raises `AuthoritativeCorpusExists`, a subclass of `IngestError`,
+**before `fetch_into_cache` and before any write**. The message states the
+source, the corpus root, the existing manifest's `corpus_id` and `record_count`,
+and that a limited run must target a different root.
+
+| Target corpus root holds | Unbounded run | `--limit`ed run |
+|---|---|---|
+| nothing | Writes an authoritative corpus | **Allowed.** Writes a truncated corpus recording its `limit` |
+| a truncated corpus (`limit` non-null) | Allowed. Replaces it with an authoritative corpus | **Allowed.** Replaces one development corpus with another |
+| an authoritative corpus (`limit: null`) | **Allowed.** The resume path, and idempotent | **Refused** with `AuthoritativeCorpusExists` |
+
+**A development corpus is created deliberately, elsewhere.** The CLI accepts
+`--corpus-root PATH`, defaulting to the existing corpus root (`data/corpus/`). A
+truncated corpus is produced with `--limit N --corpus-root <another path>`, and
+succeeds against a fresh root or one already holding a truncated corpus. The
+argument names where output is written and nothing more: it introduces no second
+kind of corpus, and every root has the layout plan §G describes.
+
+**Consequence for roster validation.** A run reads its roster lock only from its
+own target corpus root (D24). A limited run therefore never consults an
+authoritative roster: the only configuration in which one would be present in
+its root is the configuration refused above. A limited run derives its roster
+from its own window, as §1 prescribes when no lock exists, and asserts against
+that. The authoritative roster continues to guard every unbounded run into the
+authoritative root — the corpus artifacts are trained on. §1.1's rule is
+unchanged: whenever roster validation runs, it runs over the complete normalized
+window before `--limit` truncates anything.
+
+**Rejected alternatives.** Writing limited runs to a distinct non-authoritative
+tree is infrastructure no measurement justifies (invariant 4), and would leave
+every downstream reader to decide which tree to read. Merging a limited run into
+the existing corpus yields a population that is neither the full window nor the
+truncated one — the unannounced change to the experimental population §1.1
+exists to prevent — under a `corpus_id` naming a corpus no single run produced.
+Permitting replacement contradicts the reason plan §G gives for recording
+`limit`: an artifact can see whether the corpus behind its `corpus_id` was
+complete only if a truncated run cannot silently take that corpus's place.
+Requiring a separate root without adding `--corpus-root` would be a rule the CLI
+gives no way to obey.
+
+**Deliberately not decided here.** An unbounded run over a narrower window than
+an existing authoritative corpus also replaces it, discarding records outside
+the new window. That is visible in the manifest's `window_start` and
+`window_end`, and is a different question from truncation. This section does not
+address it.
+
 ---
 
 ---
@@ -1262,11 +1326,16 @@ manifest records the supplied `limit` exactly as §G already describes.
 *Why:* §1.1's failure condition is already written as "a locked roster label is
 absent **from the window**". The window is a property of `--start`/`--end` and
 the source's data; how many records were kept for development is not part of it.
-*Also decided — the lock comes only from an unbounded corpus.* A manifest whose
-`limit` is non-null describes a deliberately partial corpus and is **not**
-authoritative: a later run does not adopt its roster. A limited run validates
-against the authoritative roster when one exists and derives from its own window
-when none does, and in neither case replaces it. This uses `limit` for precisely
+*Also decided — the lock comes only from an unbounded corpus in the run's own
+target root.* A manifest whose `limit` is non-null describes a deliberately
+partial corpus and is **not** authoritative: a later run does not adopt its
+roster. A run reads its lock only from the corpus root it writes to; no other
+root is consulted. A limited run derives its roster from its own complete window
+and never replaces an authoritative roster.
+*Amended by D26:* as first written, this entry also had a limited run validate
+against an authoritative roster present in its own root. D26 refuses a limited
+run into a root holding an authoritative corpus before any write, so that case
+cannot occur, and D26 takes precedence over it. This uses `limit` for precisely
 the purpose §G already gives it — so a truncated corpus can never be mistaken
 for a full one — and keeps a development run from defining the vocabulary a
 production run is judged against.
@@ -1300,3 +1369,49 @@ window typed from that sentence.
 admits relative to the ingestion CLI as first committed, which compared both
 sources against UTC bounds. The shift is intended, not a defect, and the code is
 amended to match this decision rather than the reverse.
+
+**D26 — A limited run may not replace an authoritative corpus (§2.6, plan §G,
+plan Task 8).**
+*Was:* `--limit` bounded persistence and a truncated manifest never became the
+roster lock (D24), but nothing stopped a limited run from overwriting the
+partitions and manifest of an existing unbounded corpus. Observed: an
+authoritative corpus holding two labels, re-ingested with `--limit 1` into the
+same root, was replaced by a one-record corpus whose manifest carried
+`limit: 1`. D24's protection then applied to a corpus that no longer existed.
+*Now:* when the target corpus root already holds an authoritative manifest for
+the source — one whose `limit` is `null` — a run with `--limit` raises
+`AuthoritativeCorpusExists`, a subclass of `IngestError`, before
+`fetch_into_cache` and before any write. The message states the source, the
+corpus root, the existing manifest's `corpus_id` and `record_count`, and that a
+limited run must target a different root. A limited run against a fresh root is
+allowed, and so is one against a root holding a truncated corpus: nothing
+authoritative is at risk, and replacing one development corpus with another is
+the intended iteration loop. An unbounded rerun over an authoritative corpus is
+the resume path, is idempotent, and is unaffected.
+*Why refusal rather than a separate tree, a merge, or replacement:* a second
+tree is infrastructure no measurement justifies (invariant 4) and leaves every
+downstream reader asking which tree to read. A merge produces a corpus that is
+neither the full window nor the truncated one, changing the experimental
+population with nobody deciding to — the failure §1.1 exists to prevent — under
+a `corpus_id` naming a population no single run produced. Permitting replacement
+contradicts the reason plan §G gives for recording `limit`: an artifact citing a
+`corpus_id` cannot see whether the corpus behind it was complete if a typo can
+silently replace it.
+*Also decided — the CLI gains `--corpus-root PATH`.* Without it the refusal has
+no remedy: the CLI writes only to the default corpus root, so a developer
+holding a full corpus could not produce a truncated one at all. The argument
+defaults to the existing corpus root and names where output goes; it adds no
+new corpus concept.
+*Consequence, accepted deliberately — D26 takes precedence over D24's same-root
+limited-run case.* D24 reads the roster lock only from the run's own target
+root. A limited run therefore cannot consult an authoritative same-root roster,
+because that configuration is refused before any write; it derives its roster
+from its own complete window instead. No cross-root roster lookup and no separate
+authoritative-root argument is introduced. The authoritative roster still guards
+every unbounded run into the authoritative root, and D24's underlying invariant
+is intact: whenever roster validation runs, it runs over the complete normalized
+window before `--limit` truncates anything.
+*Not decided here:* an unbounded run over a narrower window also discards the
+records outside it. That is visible, because `window_start` and `window_end` are
+recorded in the manifest, and it is a different question from truncation. It is
+left open rather than folded into this decision.
