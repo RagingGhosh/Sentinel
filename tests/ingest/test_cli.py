@@ -11,6 +11,7 @@ manifest. §2.3 fixes the rule and D22 fixes the one distributional threshold;
 neither is re-derived here.
 """
 
+import ast
 import gzip
 import json
 from datetime import UTC, date, datetime
@@ -27,6 +28,7 @@ from ingest.cli import (  # noqa: E402
     STRONGLY_SUSPICIOUS,
     SUPPORTED,
     VERDICT_RULE,
+    AuthoritativeCorpusExists,
     EmptyWindow,
     IngestError,
     InvalidDateRange,
@@ -41,7 +43,7 @@ from ingest.cli import (  # noqa: E402
 from ingest.manifest import read_manifest  # noqa: E402
 from ingest.roster import RosterMismatch  # noqa: E402
 from ingest.schema import SCHEMA_VERSION  # noqa: E402
-from ingest.storage import iter_part_files, read_corpus  # noqa: E402
+from ingest.storage import CORPUS_ROOT, iter_part_files, read_corpus  # noqa: E402
 
 # --- building synthetic source pages -----------------------------------------
 
@@ -134,6 +136,37 @@ def test_the_documented_arguments_are_accepted(tmp_path, monkeypatch):
     assert seen["start"] == date(2024, 1, 1)
     assert seen["end"] == date(2025, 12, 31)
     assert seen["limit"] == 500
+
+
+def test_corpus_root_reaches_ingest_from_the_command_line(tmp_path, monkeypatch):
+    """D26: the remedy for a refused limited run is a different root, so the
+    command line has to be able to name one."""
+    seen = {}
+    monkeypatch.setattr("ingest.cli.ingest", lambda **kw: seen.update(kw))
+    dev_root = tmp_path / "dev-corpus"
+    main(
+        [
+            "--source",
+            "cfpb",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2025-12-31",
+            "--limit",
+            "10",
+            "--corpus-root",
+            str(dev_root),
+        ]
+    )
+    assert seen["corpus_root"] == dev_root
+    assert isinstance(seen["corpus_root"], Path)
+
+
+def test_corpus_root_defaults_to_the_existing_corpus_root(monkeypatch):
+    seen = {}
+    monkeypatch.setattr("ingest.cli.ingest", lambda **kw: seen.update(kw))
+    main(["--source", "cfpb", "--start", "2024-01-01", "--end", "2025-12-31"])
+    assert seen["corpus_root"] == CORPUS_ROOT
 
 
 def test_limit_is_optional_and_defaults_to_none(tmp_path, monkeypatch):
@@ -832,10 +865,44 @@ def test_the_default_raw_root_is_under_the_gitignored_data_tree():
 
 
 def test_the_cli_computes_no_corpus_id_of_its_own():
-    """Corpus identity stays Task 4's; this module must not invent another."""
-    source = Path("ingest/cli.py").read_text(encoding="utf-8")
-    assert "sha256" not in source.replace("page_checksum", "") or "compute_corpus_id" not in source
-    assert "hashlib.sha256(" not in source or "corpus_id" not in source
+    """Corpus identity stays Task 4's; this module must not invent another.
+
+    Inspects code, not text. D26's refusal message *reads* an existing
+    manifest's `corpus_id`, which is not computing one; what stays forbidden is
+    binding, passing or deriving a `corpus_id`, touching `compute_corpus_id`, or
+    hashing anywhere except the raw-page checksum.
+    """
+    tree = ast.parse(Path("ingest/cli.py").read_text(encoding="utf-8"))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            assert node.id not in {"corpus_id", "compute_corpus_id"}, node.id
+        elif isinstance(node, ast.alias):
+            assert node.name != "compute_corpus_id"
+        elif isinstance(node, ast.keyword):
+            assert node.arg != "corpus_id", "the CLI must not supply a corpus_id"
+        elif isinstance(node, ast.Attribute):
+            assert node.attr != "compute_corpus_id"
+            if node.attr == "corpus_id":
+                assert isinstance(node.ctx, ast.Load), "a corpus_id may be read, never set"
+
+    def sha256_calls(scope):
+        return [
+            n
+            for n in ast.walk(scope)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "sha256"
+        ]
+
+    in_page_checksum = [
+        call
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef) and fn.name == "page_checksum"
+        for call in sha256_calls(fn)
+    ]
+    assert in_page_checksum, "the guard must find the one legitimate hash"
+    assert len(sha256_calls(tree)) == len(in_page_checksum), "hashing outside page_checksum"
 
 
 def test_records_outside_the_window_are_excluded(tmp_path):
@@ -1043,36 +1110,17 @@ def test_empty_window_is_an_ingest_error_not_a_bare_value_error(tmp_path):
 # --- D24: --limit bounds persistence only ------------------------------------
 
 
-def test_a_limited_run_does_not_report_a_truncated_label_as_missing(tmp_path):
-    """The exact failure that motivated D24.
+def test_roster_validation_sees_the_whole_window_not_the_limited_subset(tmp_path):
+    """D24's invariant, proven on a run D26 permits: a limited run into a fresh root.
 
-    Authoritative roster holds Alpha and Beta. A limited rerun persists only
-    Alpha, and must not read that truncation as Beta having vanished.
+    The page holds Alpha in both years and `OnlyIn2025` in 2025 alone. `--limit 1`
+    keeps just the first Alpha. Validated against that kept subset the run would
+    pass — one label, one year, nothing unexpected. Validated against the
+    complete window, `OnlyIn2025` is outside the derived intersection and must
+    fail, before anything is written.
     """
     corpus = tmp_path / "corpus"
-    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]])
-    assert set(read_manifest("cfpb", root=corpus).label_roster) == {"Alpha", "Beta"}
-
-    manifest = ingest(
-        source="cfpb",
-        start=date(2024, 1, 1),
-        end=date(2025, 12, 31),
-        limit=1,
-        fetcher=None,
-        corpus_root=corpus,
-        raw_root=tmp_path / "raw",
-    )
-    assert manifest.limit == 1
-    assert manifest.record_count == 1
-    assert len(list(read_corpus("cfpb", root=corpus))) == 1
-
-
-def test_roster_validation_sees_the_whole_window_not_the_limited_subset(tmp_path):
-    """A label outside the locked roster still fails, even when --limit would
-    have truncated it away. Validation is over the window, so the flag cannot
-    hide a real taxonomy change either."""
-    corpus = tmp_path / "corpus"
-    a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha")]])
+    assert not (corpus / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").exists()
 
     with pytest.raises(RosterMismatch) as exc:
         ingest(
@@ -1080,11 +1128,24 @@ def test_roster_validation_sees_the_whole_window_not_the_limited_subset(tmp_path
             start=date(2024, 1, 1),
             end=date(2025, 12, 31),
             limit=1,
-            fetcher=StubFetcher([cfpb_page([cfpb_row("9", product="Intruder")])]),
+            fetcher=StubFetcher(
+                [
+                    cfpb_page(
+                        [
+                            cfpb_row("1", product="Alpha", received="2024-03-15T09:00:00-04:00"),
+                            cfpb_row("2", product="Alpha", received="2025-03-15T09:00:00-04:00"),
+                            cfpb_row(
+                                "3", product="OnlyIn2025", received="2025-04-15T09:00:00-04:00"
+                            ),
+                        ]
+                    )
+                ]
+            ),
             corpus_root=corpus,
             raw_root=tmp_path / "raw",
         )
-    assert "Intruder" in str(exc.value)
+    assert exc.value.unexpected == {"OnlyIn2025": 1}
+    assert iter_part_files("cfpb", root=corpus) == []
 
 
 def test_a_limited_manifest_never_becomes_the_authoritative_roster(tmp_path):
@@ -1122,11 +1183,8 @@ def test_an_unbounded_corpus_stays_authoritative_when_a_limited_run_is_separate(
     """A limited run against its own corpus root leaves the authoritative one
     untouched and still authoritative.
 
-    Scoped to separate roots deliberately. A limited run sharing a corpus root
-    with an authoritative one overwrites both its partitions and its manifest,
-    so the authoritative corpus stops existing — and no approved document says
-    what a limited run should do to an existing corpus. That gap is reported
-    rather than resolved here by an invented rule.
+    This is the route §2.6 prescribes for a development corpus. The same-root
+    case is refused outright (D26) and is tested in the D26 section below.
     """
     authoritative = tmp_path / "corpus"
     a_cfpb_run(tmp_path, [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]])
@@ -1182,6 +1240,168 @@ def test_the_limit_still_reaches_the_manifest_after_the_reordering(tmp_path):
     assert manifest.limit == 2
     assert manifest.record_count == 2
     assert read_manifest("cfpb", root=tmp_path / "corpus").limit == 2
+
+
+# --- D26: a limited run may not replace an authoritative corpus --------------
+
+
+def an_authoritative_corpus(tmp_path):
+    """An unbounded CFPB corpus under `tmp_path / "corpus"`; returns (root, manifest)."""
+    manifest, _ = a_cfpb_run(
+        tmp_path, [[cfpb_row("1", product="Alpha"), cfpb_row("2", product="Beta")]]
+    )
+    assert manifest.limit is None, "the fixture must be authoritative"
+    return tmp_path / "corpus", manifest
+
+
+def every_file_under(root):
+    """Byte snapshot of every file in a corpus root: partitions and manifest."""
+    return {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def test_a_limited_run_into_an_authoritative_root_is_refused(tmp_path):
+    """The exact failure that motivated D26: without the refusal, this run
+    replaced a two-label corpus with a one-record one."""
+    corpus, existing = an_authoritative_corpus(tmp_path)
+    before = every_file_under(corpus)
+    assert iter_part_files("cfpb", root=corpus), "there is something to destroy"
+
+    with pytest.raises(AuthoritativeCorpusExists) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=1,
+            fetcher=None,
+            corpus_root=corpus,
+            raw_root=tmp_path / "raw",
+        )
+    assert isinstance(exc.value, IngestError)
+
+    assert every_file_under(corpus) == before, "partitions and manifest byte-identical"
+    after = read_manifest("cfpb", root=corpus)
+    assert after.corpus_id == existing.corpus_id
+    assert after.limit is None
+    assert after.record_count == 2
+    assert authoritative_roster("cfpb", corpus) == frozenset({"Alpha", "Beta"})
+
+
+def test_the_refusal_happens_before_any_fetch_or_write(tmp_path):
+    corpus, _ = an_authoritative_corpus(tmp_path)
+    later_raw = tmp_path / "later-raw"
+    fetcher = StubFetcher([cfpb_page([cfpb_row("3", product="Alpha")])])
+
+    with pytest.raises(AuthoritativeCorpusExists):
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=1,
+            fetcher=fetcher,
+            corpus_root=corpus,
+            raw_root=later_raw,
+        )
+    assert fetcher.calls == 0, "fetch_into_cache must not have run"
+    assert fetcher.pages_yielded == 0
+    assert not later_raw.exists(), "not even the raw cache may be written"
+
+
+def test_the_refusal_names_the_corpus_it_protects_and_the_remedy(tmp_path):
+    corpus, existing = an_authoritative_corpus(tmp_path)
+
+    with pytest.raises(AuthoritativeCorpusExists) as exc:
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=1,
+            fetcher=None,
+            corpus_root=corpus,
+            raw_root=tmp_path / "raw",
+        )
+    message = str(exc.value)
+    assert "cfpb" in message
+    assert str(corpus) in message
+    assert existing.corpus_id in message
+    assert f"{existing.record_count} records" in message
+    assert "must target a different root" in message
+
+
+def test_a_limited_run_into_a_fresh_root_succeeds_and_records_its_limit(tmp_path):
+    corpus = tmp_path / "corpus"
+    assert not corpus.exists()
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row(str(i)) for i in range(1, 4)]], limit=2)
+    assert manifest.limit == 2
+    assert manifest.record_count == 2
+    assert read_manifest("cfpb", root=corpus).limit == 2
+
+
+def test_a_limited_run_into_a_truncated_root_succeeds(tmp_path):
+    """Nothing authoritative is at risk: one development corpus replaces another."""
+    corpus = tmp_path / "corpus"
+    first, _ = a_cfpb_run(tmp_path, [[cfpb_row(str(i)) for i in range(1, 4)]], limit=1)
+    assert first.limit == 1
+
+    second = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=2,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    assert second.limit == 2
+    assert second.record_count == 2
+    assert read_manifest("cfpb", root=corpus).limit == 2
+
+
+def test_an_unbounded_rerun_over_an_authoritative_corpus_is_still_idempotent(tmp_path):
+    """The narrowness guard: the resume path must not be caught by the refusal."""
+    corpus, first = an_authoritative_corpus(tmp_path)
+    before = every_file_under(corpus)
+
+    second = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    assert second.limit is None
+    assert second.corpus_id == first.corpus_id
+    assert {k: v for k, v in every_file_under(corpus).items() if k.suffix == ".parquet"} == {
+        k: v for k, v in before.items() if k.suffix == ".parquet"
+    }
+
+
+def test_the_command_line_refuses_a_limited_run_into_an_authoritative_root(tmp_path, monkeypatch):
+    """End to end through `main`: `--corpus-root` must actually reach the guard.
+
+    The working directory is moved to `tmp_path`, so the default raw cache is
+    empty there. Without the guard this run would reach an empty window instead.
+    """
+    corpus, existing = an_authoritative_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(AuthoritativeCorpusExists):
+        main(
+            [
+                "--source",
+                "cfpb",
+                "--start",
+                "2024-01-01",
+                "--end",
+                "2025-12-31",
+                "--limit",
+                "1",
+                "--corpus-root",
+                str(corpus),
+            ]
+        )
+    assert read_manifest("cfpb", root=corpus).corpus_id == existing.corpus_id
 
 
 # --- D25: per-source civil-time window resolution ----------------------------

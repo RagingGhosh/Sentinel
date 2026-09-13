@@ -1,10 +1,12 @@
 """Resumable corpus ingestion, and the timestamp provenance diagnostic.
 
-    python -m ingest.cli --source {cfpb,nyc311} --start YYYY-MM-DD --end YYYY-MM-DD [--limit N]
+    python -m ingest.cli --source {cfpb,nyc311} --start YYYY-MM-DD --end YYYY-MM-DD
+                         [--limit N] [--corpus-root PATH]
 
 The order of operations is load-bearing::
 
-    fetch (or reuse the raw cache)
+    refuse a --limit run into a root holding an authoritative corpus (D26)
+      -> fetch (or reuse the raw cache)
       -> normalize through the source's adapter
       -> filter to the requested window
       -> apply --limit
@@ -57,7 +59,13 @@ from typing import Any
 
 from scipy.stats import chi2
 
-from ingest.manifest import build_manifest, manifest_path, read_manifest, write_manifest
+from ingest.manifest import (
+    CorpusManifest,
+    build_manifest,
+    manifest_path,
+    read_manifest,
+    write_manifest,
+)
 from ingest.roster import assert_roster, derive_roster
 from ingest.schema import CFPBOutcome, CorpusRecord, NYC311Outcome
 from ingest.sources import cfpb, nyc311
@@ -104,6 +112,15 @@ class IngestError(Exception):
 
 class InvalidDateRange(IngestError):
     """`--end` precedes `--start`. Never silently swapped."""
+
+
+class AuthoritativeCorpusExists(IngestError):
+    """A `--limit`ed run targeted a root holding an authoritative corpus (D26, §2.6).
+
+    Raised before `fetch_into_cache` and before any write, so the existing
+    partitions and manifest are untouched. A development corpus belongs under a
+    different `--corpus-root`.
+    """
 
 
 class EmptyWindow(IngestError):
@@ -397,6 +414,18 @@ def build_diagnostic(
 # --- ingestion ---------------------------------------------------------------
 
 
+def authoritative_manifest(source: str, corpus_root: Path) -> CorpusManifest | None:
+    """The manifest in `corpus_root` if it is authoritative, else `None`.
+
+    Only an **unbounded** manifest (`limit` null) is authoritative (D24). This
+    is the one predicate both the roster lock and the D26 refusal ask.
+    """
+    if not manifest_path(source, corpus_root).is_file():
+        return None
+    manifest = read_manifest(source, root=corpus_root)
+    return manifest if manifest.limit is None else None
+
+
 def authoritative_roster(source: str, corpus_root: Path) -> frozenset[str] | None:
     """The locked roster, or `None` when no authoritative corpus exists (D24).
 
@@ -406,13 +435,15 @@ def authoritative_roster(source: str, corpus_root: Path) -> frozenset[str] | Non
     adopting it would let a development run define the vocabulary a production
     run is judged against. That is the field earning §G's justification for it
     rather than merely stating it.
+
+    The lock is read only from the run's own target root; no other root is
+    consulted. Since D26 a limited run never reaches an authoritative lock at
+    all — a limited run into a root holding one is refused before this is
+    asked — so the lock found here only ever guards unbounded runs, and a
+    limited run derives its roster from its own complete window.
     """
-    if not manifest_path(source, corpus_root).is_file():
-        return None
-    manifest = read_manifest(source, root=corpus_root)
-    if manifest.limit is not None:
-        return None
-    return frozenset(manifest.label_roster)
+    manifest = authoritative_manifest(source, corpus_root)
+    return None if manifest is None else frozenset(manifest.label_roster)
 
 
 def _locked_roster(source: str, corpus_root: Path, observed_by_year: dict[int, set[str]]):
@@ -445,6 +476,19 @@ def ingest(
 
     corpus_root = Path(corpus_root)
     raw_root = Path(raw_root)
+
+    # D26: a truncated run may not replace a full corpus. Checked before the
+    # fetch and before any write, so a refused run leaves no trace at all.
+    if limit is not None:
+        existing = authoritative_manifest(source, corpus_root)
+        if existing is not None:
+            raise AuthoritativeCorpusExists(
+                f"{source}: {corpus_root} already holds an authoritative corpus "
+                f"(corpus_id {existing.corpus_id}, {existing.record_count} records, "
+                f"limit null). A --limit run may not replace it (D26); a limited run "
+                f"must target a different root via --corpus-root."
+            )
+
     window_start, window_end = resolve_window(source, start, end)
 
     fetch_into_cache(source, start, end, fetcher, raw_root)
@@ -536,12 +580,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="bound records for development; recorded in the manifest",
     )
+    parser.add_argument(
+        "--corpus-root",
+        type=Path,
+        default=CORPUS_ROOT,
+        help="corpus root to write; a --limit run needs one without an authoritative corpus",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    ingest(source=args.source, start=args.start, end=args.end, limit=args.limit)
+    ingest(
+        source=args.source,
+        start=args.start,
+        end=args.end,
+        limit=args.limit,
+        corpus_root=args.corpus_root,
+    )
     return 0
 
 
