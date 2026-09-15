@@ -21,6 +21,10 @@ merged lazily, so peak memory is one batch per part file rather than one whole
 file -- let alone one whole corpus. The CFPB window alone is on the order of
 millions of narratives.
 
+*Partitions are not a corpus.* This module writes, lists, removes and merges part
+files. Whether a tree of them is a valid corpus is decided by its manifest, and
+reading one as a corpus goes through `ingest.manifest.load_corpus` (D27).
+
 Parquet output is **not** claimed to be byte-for-byte reproducible; pyarrow makes
 no such guarantee across versions or compression codecs. Corpus identity is
 therefore taken from the bytes actually on disk (see `ingest.manifest`), which is
@@ -35,6 +39,7 @@ from __future__ import annotations
 
 import heapq
 import re
+import shutil
 from collections.abc import Iterable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -132,6 +137,22 @@ def write_partition(
     return path
 
 
+def remove_source_tree(source: str, root: Path = CORPUS_ROOT) -> None:
+    """Delete one source's versioned tree, and nothing else (D27).
+
+    Only `<root>/<source>/v<SCHEMA_VERSION>/` goes. Other sources, and other
+    schema versions of this one, stay where they are, so an artifact citing them
+    can still find its bytes. An absent tree is not an error.
+
+    Deleting the manifest *first* is `ingest.manifest.clear_corpus`'s job: that
+    ordering is the validity boundary, and this module does not know the
+    manifest's name.
+    """
+    tree = source_root(root, source)
+    if tree.exists():
+        shutil.rmtree(tree)
+
+
 def iter_part_files(
     source: str,
     years: Iterable[int] | None = None,
@@ -178,17 +199,30 @@ def _stream_part(path: Path) -> Iterator[CorpusRecord]:
         parquet_file.close()
 
 
+def read_parts(paths: Iterable[Path]) -> Iterator[CorpusRecord]:
+    """Merge the given part files in `(submitted_at, external_id)` order.
+
+    Each part file is already sorted, so a lazy k-way merge produces globally
+    sorted output while holding at most one batch per part file. Nothing here
+    ever calls `read_table`: that would materialise a whole part file, and a
+    test asserts it is never reached. Callers choose the files — `read_corpus`
+    passes whatever exists, `load_corpus` only what a manifest lists.
+    """
+    return heapq.merge(*(_stream_part(path) for path in paths), key=_sort_key)
+
+
 def read_corpus(
     source: str,
     years: Iterable[int] | None = None,
     root: Path = CORPUS_ROOT,
 ) -> Iterator[CorpusRecord]:
-    """Stream a source's corpus in `(submitted_at, external_id)` order.
+    """Stream whatever part files exist for a source — a partition reader (D27).
 
-    Each part file is already sorted, so a lazy k-way merge produces globally
-    sorted output while holding at most one batch per part file. Nothing here
-    ever calls `read_table`: that would materialise a whole part file, and a
-    test asserts it is never reached.
+    **Not a corpus reader.** It asserts nothing about validity: it reads the
+    Parquet files present whether or not a manifest describes them. That is
+    exactly what `build_manifest` needs, since it reads the partitions a run has
+    just written before any manifest exists. Everything else reads a corpus
+    through `ingest.manifest.load_corpus`, and a test enforces that no other
+    production module imports this function.
     """
-    streams = [_stream_part(path) for path in iter_part_files(source, years, root)]
-    return heapq.merge(*streams, key=_sort_key)
+    return read_parts(iter_part_files(source, years, root))

@@ -10,6 +10,14 @@ consequences follow deliberately from that definition: the id is stable when a
 file's mtime changes but its bytes do not, and it changes when a part is added
 or removed even if every surviving part is untouched.
 
+**The manifest is the validity boundary (D27).** A source/version tree without
+a valid manifest is not a corpus. A run deletes the manifest before anything
+else (`clear_corpus`) and writes it last, atomically (`write_manifest`), so a
+manifest on disk always describes a completed run. `load_corpus` is the only
+corpus reader; `read_corpus` is the partition reader `build_manifest` uses. This
+is a validity boundary, not atomic directory replacement: a failed run loses the
+previous corpus, which is rebuilt by rerunning ingest from the raw cache.
+
 Django-independent, like the rest of `ingest/`.
 """
 
@@ -17,14 +25,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ingest.schema import SCHEMA_VERSION
-from ingest.storage import CORPUS_ROOT, iter_part_files, read_corpus, source_root
+from ingest.schema import SCHEMA_VERSION, CorpusRecord
+from ingest.storage import (
+    CORPUS_ROOT,
+    iter_part_files,
+    read_corpus,
+    read_parts,
+    remove_source_tree,
+    source_root,
+)
 
 MANIFEST_NAME = "manifest.json"
 _CHECKSUM_CHUNK = 1 << 20
@@ -50,6 +68,14 @@ class ManifestNotFound(CorpusIntegrityError):
 
 class ChecksumMismatch(CorpusIntegrityError):
     """A part file is missing, or its bytes differ from the recorded digest."""
+
+
+class UnlistedPartFile(CorpusIntegrityError):
+    """A part file exists on disk that the manifest does not list (D27).
+
+    A completed run leaves exactly the files it lists, so an extra one means the
+    tree was changed by something other than that run.
+    """
 
 
 @dataclass(frozen=True)
@@ -182,10 +208,19 @@ def write_manifest(manifest: CorpusManifest, root: Path = CORPUS_ROOT) -> Path:
 
     path = manifest_path(manifest.source_slug, root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+    # Written beside its destination and moved into place, so a reader finds the
+    # previous manifest or the new one and never half of either. Only this file
+    # is replaced atomically; the tree around it is not (D27).
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".manifest-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -230,3 +265,54 @@ def verify_manifest(manifest: CorpusManifest, root: Path = CORPUS_ROOT) -> None:
                 f"part file {relative} does not match its recorded checksum "
                 f"(expected {expected}, found {actual})"
             )
+
+
+# --- D27: the validity boundary ----------------------------------------------
+
+
+def clear_corpus(source: str, root: Path = CORPUS_ROOT) -> None:
+    """Delete a source's corpus: its manifest first, then its versioned tree (D27).
+
+    The order is the validity boundary. Once the manifest is gone the tree is no
+    longer a corpus, so if removing the partitions then fails part-way, what is
+    left cannot be read as one. Other sources and schema versions are untouched.
+    """
+    manifest_path(source, root).unlink(missing_ok=True)
+    remove_source_tree(source, root=root)
+
+
+def load_corpus(
+    source: str,
+    years: Iterable[int] | None = None,
+    root: Path = CORPUS_ROOT,
+) -> tuple[CorpusManifest, Iterator[CorpusRecord]]:
+    """The only corpus reader: a source's corpus, validated against its manifest.
+
+    A tree without a manifest is not a corpus, whatever Parquet it holds, so a
+    missing manifest raises `ManifestNotFound`. The part files on disk must be
+    exactly the ones the manifest lists: an extra one raises `UnlistedPartFile`,
+    and a missing or altered one raises `ChecksumMismatch`. All of that is
+    checked here, before a single record is yielded, so a caller never trains on
+    part of a corpus that later fails to verify.
+
+    Byte verification is not optional: `corpus_id` ties an artifact to exact
+    input bytes only if the bytes are checked when the corpus is loaded. Only the
+    listed files are then streamed, with `read_corpus`'s ordering and memory
+    guarantees — `read_corpus` itself stays the partition reader `build_manifest`
+    needs before any manifest exists (D27).
+    """
+    root = Path(root)
+    manifest = read_manifest(source, root=root)
+
+    on_disk = {path.relative_to(root).as_posix() for path in iter_part_files(source, root=root)}
+    unlisted = sorted(on_disk - set(manifest.part_files))
+    if unlisted:
+        raise UnlistedPartFile(
+            f"{source}: part files on disk that the manifest does not list: {', '.join(unlisted)}"
+        )
+
+    verify_manifest(manifest, root=root)
+
+    wanted = set(iter_part_files(source, years, root=root))
+    listed = [root / relative for relative in sorted(manifest.part_files)]
+    return manifest, read_parts(path for path in listed if path in wanted)

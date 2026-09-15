@@ -7,26 +7,27 @@ The order of operations is load-bearing::
 
     refuse a --limit run into a root holding an authoritative corpus (D26)
       -> fetch (or reuse the raw cache)
-      -> normalize through the source's adapter
-      -> filter to the requested window
-      -> apply --limit
-      -> assert the label roster                <-- before any Parquet is written
+      -> normalize through the source's adapter, filtered to the window
+      -> refuse an empty window (D23)
+      -> assert the label roster over the whole window   <-- before the corpus changes
+      -> apply --limit, and compute the timestamp diagnostic
+      -> clear the source's tree, manifest first (D27)
       -> write partitions
-      -> compute the timestamp diagnostic
-      -> build and write the manifest
+      -> build the manifest and write it last, atomically
 
-The roster assertion sits where it does deliberately (§1.1): a corpus written
-before its taxonomy is checked has already changed the experimental population,
-and deleting it afterwards is not the same as never having written it. A test
-asserts no part file appears after a `RosterMismatch`.
+Every refusal comes before the clearing step. The roster assertion in
+particular sits where it does deliberately (§1.1): a corpus written before its
+taxonomy is checked has already changed the experimental population, and
+deleting it afterwards is not the same as never having written it. Tests assert
+that nothing on disk changes after any refusal.
 
 **Resumability is content-addressed, not a checkpoint file.** Each fetched page
 is stored gzipped at `data/raw/<source>/<sha256>.json.gz`, so a page whose
 checksum matches an existing file is skipped. Re-running performs zero writes
 and no fetch is required at all: normalize and load read the cache. An
 interrupted run leaves whole pages behind, never half of one, and the resumed
-run rewrites every partition from the full cache — so a resumed corpus is
-byte-identical to a clean one rather than merely equivalent.
+run replaces the source's whole tree from the full cache (D27) — so a resumed
+corpus is byte-identical to a clean one rather than merely equivalent.
 
 **Fetching is injected.** No approved document specifies an endpoint, a
 pagination scheme, a retry policy or a rate limit for either source, so none is
@@ -62,6 +63,7 @@ from scipy.stats import chi2
 from ingest.manifest import (
     CorpusManifest,
     build_manifest,
+    clear_corpus,
     manifest_path,
     read_manifest,
     write_manifest,
@@ -533,8 +535,6 @@ def ingest(
     by_partition: dict[int, list[CorpusRecord]] = {}
     for record in records:
         by_partition.setdefault(record.submitted_at.year, []).append(record)
-    for year, partition in sorted(by_partition.items()):
-        write_partition(partition, source, year, 0, root=corpus_root)
 
     local = _local_hour_source(source)
     diagnostic = build_diagnostic(
@@ -546,6 +546,15 @@ def ingest(
     )
 
     api_version = cfpb.SOURCE_API_VERSION if source == "cfpb" else nyc311.SOURCE_API_VERSION
+
+    # D27: every refusal has already run. From here the source's corpus is
+    # replaced, and the manifest is the validity boundary — deleted first, written
+    # last. A failure in between leaves no manifest, so no corpus; rerunning from
+    # the raw cache recovers it. This is not atomic directory replacement.
+    clear_corpus(source, root=corpus_root)
+    for year, partition in sorted(by_partition.items()):
+        write_partition(partition, source, year, 0, root=corpus_root)
+
     manifest = build_manifest(
         source=source,
         window_start=window_start,

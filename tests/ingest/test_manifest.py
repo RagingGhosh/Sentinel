@@ -6,27 +6,32 @@ be a lie.
 """
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
-pytest.importorskip("pyarrow.parquet", reason="pyarrow lives in requirements/train.txt")
+pq = pytest.importorskip("pyarrow.parquet", reason="pyarrow lives in requirements/train.txt")
 
 from ingest.manifest import (  # noqa: E402
     MANIFEST_VERSION,
     ChecksumMismatch,
+    CorpusIntegrityError,
     CorpusManifest,
     ManifestNotFound,
+    UnlistedPartFile,
     build_manifest,
+    clear_corpus,
     compute_corpus_id,
+    load_corpus,
     read_manifest,
     sha256_file,
     verify_manifest,
     write_manifest,
 )
 from ingest.schema import SCHEMA_VERSION, CorpusRecord  # noqa: E402
-from ingest.storage import write_partition  # noqa: E402
+from ingest.storage import iter_part_files, write_partition  # noqa: E402
 
 
 def record(external_id: str, day: int, label: str = "Mortgage") -> CorpusRecord:
@@ -465,6 +470,194 @@ def test_corpus_id_ignores_the_limit_and_the_diagnostic(tmp_path):
 
     assert with_limit.corpus_id == baseline.corpus_id
     assert other_diagnostic.corpus_id == baseline.corpus_id
+
+
+# --- D27: the manifest is written last, atomically ----------------------------
+
+MANIFEST = Path("cfpb") / f"v{SCHEMA_VERSION}" / "manifest.json"
+
+
+def record_at(external_id: str, when: datetime, label: str = "Mortgage") -> CorpusRecord:
+    return CorpusRecord(
+        source="cfpb",
+        external_id=external_id,
+        text=f"text {external_id}",
+        label=label,
+        submitted_at=when,
+    )
+
+
+def a_written_corpus(root, records=None):
+    """Partitions plus a manifest on disk: a complete corpus under D27."""
+    records = records or [record("1", 1), record("2", 2)]
+    by_year: dict[int, list[CorpusRecord]] = {}
+    for r in records:
+        by_year.setdefault(r.submitted_at.year, []).append(r)
+    for year, partition in by_year.items():
+        write_partition(partition, "cfpb", year, 0, root=root)
+    manifest = build_manifest(
+        source="cfpb",
+        window_start=datetime(2024, 1, 1, tzinfo=UTC),
+        window_end=datetime(2025, 12, 31, tzinfo=UTC),
+        source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
+        root=root,
+    )
+    write_manifest(manifest, root=root)
+    return manifest
+
+
+def refuse_replace(src, dst):
+    raise OSError("the disk filled at the last moment")
+
+
+def test_write_manifest_moves_a_temporary_file_from_the_same_directory(tmp_path, monkeypatch):
+    m = a_corpus(tmp_path)
+    calls: list[tuple[Path, Path]] = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        calls.append((Path(src), Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr("ingest.manifest.os.replace", spy)
+    path = write_manifest(m, root=tmp_path)
+
+    assert len(calls) == 1, "exactly one atomic replacement"
+    src, dst = calls[0]
+    assert dst == path
+    assert src.parent == path.parent, "a rename across directories is not atomic"
+    assert src != path
+    assert not src.exists(), "the temporary file becomes the manifest"
+    assert read_manifest("cfpb", root=tmp_path) == m
+
+
+def test_a_failed_manifest_write_leaves_the_previous_manifest_intact(tmp_path, monkeypatch):
+    path = write_manifest(a_corpus(tmp_path, limit=None), root=tmp_path)
+    before = path.read_bytes()
+
+    monkeypatch.setattr("ingest.manifest.os.replace", refuse_replace)
+    with pytest.raises(OSError):
+        write_manifest(a_corpus(tmp_path, limit=5), root=tmp_path)
+    monkeypatch.undo()
+
+    assert path.read_bytes() == before, "never a half-written manifest"
+    files = sorted(p.name for p in path.parent.iterdir() if p.is_file())
+    assert files == ["manifest.json"], "no temporary file may be left behind"
+
+
+def test_a_failed_first_manifest_write_leaves_no_manifest(tmp_path, monkeypatch):
+    m = a_corpus(tmp_path)
+    monkeypatch.setattr("ingest.manifest.os.replace", refuse_replace)
+    with pytest.raises(OSError):
+        write_manifest(m, root=tmp_path)
+    monkeypatch.undo()
+
+    assert not (tmp_path / MANIFEST).exists()
+    assert [p for p in (tmp_path / MANIFEST).parent.iterdir() if p.is_file()] == []
+
+
+# --- D27: clearing a corpus, manifest first ----------------------------------
+
+
+def test_clearing_deletes_the_manifest_and_every_partition(tmp_path):
+    a_written_corpus(tmp_path)
+    clear_corpus("cfpb", root=tmp_path)
+    assert not (tmp_path / "cfpb" / f"v{SCHEMA_VERSION}").exists()
+
+
+def test_clearing_deletes_the_manifest_before_anything_else(tmp_path, monkeypatch):
+    """If removing the partitions fails part-way, what is left must not be a corpus."""
+    a_written_corpus(tmp_path)
+
+    def locked(*args, **kwargs):
+        raise OSError("a part file is locked")
+
+    monkeypatch.setattr("ingest.manifest.remove_source_tree", locked)
+    with pytest.raises(OSError):
+        clear_corpus("cfpb", root=tmp_path)
+
+    assert not (tmp_path / MANIFEST).exists(), "the manifest goes first"
+    assert iter_part_files("cfpb", root=tmp_path), "the partitions were never reached"
+    with pytest.raises(ManifestNotFound):
+        load_corpus("cfpb", root=tmp_path)
+
+
+def test_clearing_an_absent_corpus_is_a_no_op(tmp_path):
+    clear_corpus("cfpb", root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+# --- D27: load_corpus, the only corpus reader --------------------------------
+
+
+def test_load_corpus_requires_a_manifest(tmp_path):
+    """Parquet files without a manifest are not a corpus."""
+    write_partition([record("1", 1)], "cfpb", 2024, 0, root=tmp_path)
+    with pytest.raises(ManifestNotFound):
+        load_corpus("cfpb", root=tmp_path)
+
+
+def test_load_corpus_rejects_a_part_file_the_manifest_does_not_list(tmp_path):
+    a_written_corpus(tmp_path)
+    write_partition([record("9", 9)], "cfpb", 2024, 1, root=tmp_path)
+
+    with pytest.raises(UnlistedPartFile) as exc:
+        load_corpus("cfpb", root=tmp_path)
+    assert isinstance(exc.value, CorpusIntegrityError)
+    assert "part-0001.parquet" in str(exc.value)
+
+
+def test_load_corpus_rejects_a_missing_listed_part(tmp_path):
+    m = a_written_corpus(tmp_path)
+    (tmp_path / next(iter(m.part_files))).unlink()
+    with pytest.raises(ChecksumMismatch):
+        load_corpus("cfpb", root=tmp_path)
+
+
+def test_load_corpus_rejects_altered_bytes_before_yielding_anything(tmp_path):
+    """Verification happens when the corpus is loaded, not lazily mid-iteration."""
+    m = a_written_corpus(tmp_path)
+    part = tmp_path / next(iter(m.part_files))
+    part.write_bytes(part.read_bytes() + b"\x00")
+
+    with pytest.raises(ChecksumMismatch):
+        load_corpus("cfpb", root=tmp_path)
+
+
+def two_years_of_records():
+    return [
+        record_at("late", datetime(2025, 3, 1, tzinfo=UTC)),
+        record_at("b", datetime(2024, 1, 2, tzinfo=UTC)),
+        record_at("a", datetime(2024, 1, 2, tzinfo=UTC)),
+        record_at("first", datetime(2024, 1, 1, tzinfo=UTC)),
+    ]
+
+
+def test_load_corpus_streams_the_listed_files_in_merge_order(tmp_path):
+    written = a_written_corpus(tmp_path, two_years_of_records())
+    manifest, stream = load_corpus("cfpb", root=tmp_path)
+
+    assert manifest == written == read_manifest("cfpb", root=tmp_path)
+    assert [r.external_id for r in stream] == ["first", "a", "b", "late"]
+
+
+def test_load_corpus_applies_a_years_filter(tmp_path):
+    a_written_corpus(tmp_path, two_years_of_records())
+    _, stream = load_corpus("cfpb", years=[2025], root=tmp_path)
+    assert [r.external_id for r in stream] == ["late"]
+
+
+def test_load_corpus_never_materialises_a_whole_part_file(tmp_path, monkeypatch):
+    a_written_corpus(tmp_path, two_years_of_records())
+
+    def explode(*args, **kwargs):
+        raise AssertionError("load_corpus must stream batches, not read whole tables")
+
+    monkeypatch.setattr(pq, "read_table", explode)
+    _, stream = load_corpus("cfpb", root=tmp_path)
+    assert [r.external_id for r in stream] == ["first", "a", "b", "late"]
 
 
 def test_the_manifest_module_computes_no_verdict():

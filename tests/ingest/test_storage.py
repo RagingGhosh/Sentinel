@@ -5,7 +5,9 @@ training dependency tier, and the application CI job deliberately installs
 neither pandas nor pyarrow.
 """
 
+import ast
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -14,8 +16,10 @@ pq = pytest.importorskip("pyarrow.parquet", reason="pyarrow lives in requirement
 from ingest.schema import SCHEMA_VERSION, CorpusRecord  # noqa: E402
 from ingest.storage import (  # noqa: E402
     READ_BATCH_SIZE,
+    iter_part_files,
     partition_path,
     read_corpus,
+    remove_source_tree,
     write_partition,
 )
 
@@ -151,3 +155,83 @@ def test_writing_a_naive_timestamp_raises(tmp_path):
     naive = datetime(2024, 1, 1, 0, 0, 0)
     with pytest.raises(ValueError, match="naive"):
         write_partition([record("1", naive)], "cfpb", 2024, 0, root=tmp_path)
+
+
+# --- D27: the partition reader, and source-tree removal ----------------------
+
+
+def test_read_corpus_reads_partitions_for_which_no_manifest_exists_yet(tmp_path):
+    """`build_manifest` reads what a run has just written before any manifest
+    describes it, so the partition reader must not require one (D27)."""
+    write_partition([record("1", t(1))], "cfpb", 2024, 0, root=tmp_path)
+    assert not (tmp_path / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").exists()
+    assert [r.external_id for r in read_corpus("cfpb", root=tmp_path)] == ["1"]
+
+
+def test_removing_a_source_tree_deletes_every_partition_of_that_version(tmp_path):
+    write_partition([record("a", t(1))], "cfpb", 2024, 0, root=tmp_path)
+    write_partition([record("b", datetime(2025, 6, 1, tzinfo=UTC))], "cfpb", 2025, 0, root=tmp_path)
+    assert len(iter_part_files("cfpb", root=tmp_path)) == 2
+
+    remove_source_tree("cfpb", root=tmp_path)
+
+    assert iter_part_files("cfpb", root=tmp_path) == []
+    assert not (tmp_path / "cfpb" / f"v{SCHEMA_VERSION}").exists()
+
+
+def test_removing_a_source_tree_touches_no_other_source_or_schema_version(tmp_path):
+    """An older `v<N>` stays findable so an artifact citing it can locate its bytes."""
+    write_partition([record("a", t(1))], "cfpb", 2024, 0, root=tmp_path)
+    other = CorpusRecord(
+        source="nyc311", external_id="1", text="noise", label="Noise", submitted_at=t(1)
+    )
+    write_partition([other], "nyc311", 2024, 0, root=tmp_path)
+    another_version = (
+        tmp_path / "cfpb" / f"v{SCHEMA_VERSION + 1}" / "year=2024" / "part-0000.parquet"
+    )
+    another_version.parent.mkdir(parents=True)
+    another_version.write_bytes(b"another schema version's bytes")
+    (tmp_path / "unrelated.txt").write_text("keep me", encoding="utf-8")
+
+    target = f"cfpb/v{SCHEMA_VERSION}/"
+    survivors = {
+        p: p.read_bytes()
+        for p in tmp_path.rglob("*")
+        if p.is_file() and not p.relative_to(tmp_path).as_posix().startswith(target)
+    }
+    assert len(survivors) == 3, "nyc311, the other version, and the stray file"
+
+    remove_source_tree("cfpb", root=tmp_path)
+
+    for path, content in survivors.items():
+        assert path.is_file(), f"{path} must survive"
+        assert path.read_bytes() == content
+
+
+def test_removing_an_absent_source_tree_is_a_no_op(tmp_path):
+    remove_source_tree("cfpb", root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_only_the_manifest_module_imports_the_partition_reader():
+    """D27: `load_corpus` is the only corpus reader.
+
+    `read_corpus` asserts nothing about validity, so a production module that
+    imported it would be reading a tree that may not be a corpus. Tests are
+    exempt — they exercise the partition reader directly.
+    """
+    allowed = {Path("ingest/storage.py"), Path("ingest/manifest.py")}
+    importers: set[Path] = set()
+    for package in ("ingest", "ml"):
+        for path in Path(package).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and any(
+                    alias.name == "read_corpus" for alias in node.names
+                ):
+                    importers.add(path)
+                elif isinstance(node, ast.Attribute) and node.attr == "read_corpus":
+                    importers.add(path)
+
+    assert Path("ingest/manifest.py") in importers, "the guard must see the legitimate import"
+    assert importers - allowed == set(), sorted(str(p) for p in importers - allowed)

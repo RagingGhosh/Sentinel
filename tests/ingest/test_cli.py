@@ -32,6 +32,7 @@ from ingest.cli import (  # noqa: E402
     EmptyWindow,
     IngestError,
     InvalidDateRange,
+    authoritative_manifest,
     authoritative_roster,
     build_diagnostic,
     decide_verdict,
@@ -40,7 +41,12 @@ from ingest.cli import (  # noqa: E402
     page_checksum,
     resolve_window,
 )
-from ingest.manifest import read_manifest  # noqa: E402
+from ingest.manifest import (  # noqa: E402
+    ManifestNotFound,
+    load_corpus,
+    manifest_path,
+    read_manifest,
+)
 from ingest.roster import RosterMismatch  # noqa: E402
 from ingest.schema import SCHEMA_VERSION  # noqa: E402
 from ingest.storage import CORPUS_ROOT, iter_part_files, read_corpus  # noqa: E402
@@ -1401,6 +1407,249 @@ def test_the_command_line_refuses_a_limited_run_into_an_authoritative_root(tmp_p
                 str(corpus),
             ]
         )
+    assert read_manifest("cfpb", root=corpus).corpus_id == existing.corpus_id
+
+
+# --- D27: a successful run replaces the source's tree ------------------------
+
+
+def assert_disk_is_the_manifest(corpus, manifest):
+    """D27's post-success invariant, checked on disk and through the gated reader."""
+    on_disk = {
+        p.relative_to(corpus).as_posix() for p in iter_part_files(manifest.source_slug, root=corpus)
+    }
+    assert on_disk == set(manifest.part_files), "disk must be exactly what the manifest lists"
+
+    loaded, stream = load_corpus(manifest.source_slug, root=corpus)
+    records = list(stream)
+    assert loaded == manifest
+    assert len(records) == manifest.record_count
+    assert all(manifest.window_start <= r.submitted_at <= manifest.window_end for r in records)
+
+
+def two_years(product="Alpha"):
+    return [
+        cfpb_row("a", product=product, received="2024-03-15T09:00:00-04:00"),
+        cfpb_row("b", product=product, received="2025-03-15T09:00:00-04:00"),
+    ]
+
+
+def test_a_successful_run_leaves_disk_exactly_equal_to_its_manifest(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path, [two_years()])
+    assert manifest.per_year_counts == {2024: 1, 2025: 1}
+    assert_disk_is_the_manifest(tmp_path / "corpus", manifest)
+
+
+def test_a_limited_run_into_a_truncated_root_leaves_no_stale_partition(tmp_path):
+    """The observed D27 defect: `limit: 1` once recorded `record_count: 2`."""
+    corpus = tmp_path / "corpus"
+    first, _ = a_cfpb_run(tmp_path, [two_years()], limit=2)
+    assert first.per_year_counts == {2024: 1, 2025: 1}
+
+    second = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=1,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+
+    assert second.limit == 1
+    assert second.record_count == 1 <= second.limit
+    assert second.per_year_counts == {2024: 1}
+    assert not any("year=2025" in part for part in second.part_files)
+    assert_disk_is_the_manifest(corpus, second)
+
+
+def test_a_narrower_unbounded_window_replaces_an_authoritative_corpus_completely(tmp_path):
+    """The other observed defect: a 2024-only manifest kept its 2025 partition."""
+    corpus = tmp_path / "corpus"
+    full, _ = a_cfpb_run(tmp_path, [two_years()])
+    assert full.limit is None and full.record_count == 2
+
+    narrow = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        limit=None,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+
+    assert narrow.limit is None, "still an authoritative corpus, just a narrower one"
+    assert narrow.record_count == 1
+    assert narrow.per_year_counts == {2024: 1}
+    assert narrow.window_end == datetime(2024, 12, 31, 23, 59, 59, 999999, tzinfo=UTC)
+    assert narrow.corpus_id != full.corpus_id
+    assert not (corpus / "cfpb" / f"v{SCHEMA_VERSION}" / "year=2025").exists()
+    assert_disk_is_the_manifest(corpus, narrow)
+
+
+def test_a_rerun_replaces_only_its_own_source_and_schema_version(tmp_path):
+    corpus = tmp_path / "corpus"
+    ingest(
+        source="nyc311",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        limit=None,
+        fetcher=StubFetcher([[nyc311_row("1")]]),
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    another_version = corpus / "cfpb" / f"v{SCHEMA_VERSION + 1}" / "year=2024" / "part-0000.parquet"
+    another_version.parent.mkdir(parents=True)
+    another_version.write_bytes(b"another schema version's bytes")
+
+    target = f"cfpb/v{SCHEMA_VERSION}/"
+    survivors = {
+        p: p.read_bytes()
+        for p in corpus.rglob("*")
+        if p.is_file() and not p.relative_to(corpus).as_posix().startswith(target)
+    }
+
+    a_cfpb_run(tmp_path, [two_years()])
+    ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2024, 12, 31),
+        limit=None,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+
+    for path, content in survivors.items():
+        assert path.is_file() and path.read_bytes() == content, f"{path} must be untouched"
+
+
+def test_the_manifest_and_old_partitions_are_gone_before_the_first_write(tmp_path, monkeypatch):
+    import ingest.cli as cli_module
+
+    corpus, _ = an_authoritative_corpus(tmp_path)
+    real_write_partition = cli_module.write_partition
+    observed = []
+
+    def spy(records, source, year, part_index, root):
+        observed.append(
+            (manifest_path(source, root).exists(), list(iter_part_files(source, root=root)))
+        )
+        return real_write_partition(records, source, year, part_index, root=root)
+
+    monkeypatch.setattr("ingest.cli.write_partition", spy)
+    ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+
+    assert observed, "the run wrote partitions"
+    manifest_existed, parts_present = observed[0]
+    assert not manifest_existed, "the manifest must be deleted before any partition write"
+    assert parts_present == [], "the previous tree must be cleared before any partition write"
+
+
+def test_a_failed_partition_write_leaves_no_manifest_and_a_recoverable_root(tmp_path, monkeypatch):
+    import ingest.cli as cli_module
+
+    corpus = tmp_path / "corpus"
+    first, _ = a_cfpb_run(tmp_path, [two_years()])
+    real_write_partition = cli_module.write_partition
+    calls = []
+
+    def fail_on_second(records, source, year, part_index, root):
+        calls.append(year)
+        if len(calls) == 2:
+            raise OSError("disk full while writing the second partition")
+        return real_write_partition(records, source, year, part_index, root=root)
+
+    monkeypatch.setattr("ingest.cli.write_partition", fail_on_second)
+    with pytest.raises(OSError):
+        ingest(
+            source="cfpb",
+            start=date(2024, 1, 1),
+            end=date(2025, 12, 31),
+            limit=None,
+            fetcher=None,
+            corpus_root=corpus,
+            raw_root=tmp_path / "raw",
+        )
+    monkeypatch.undo()
+
+    assert not manifest_path("cfpb", corpus).exists(), "a failed load leaves no manifest"
+    with pytest.raises(ManifestNotFound):
+        load_corpus("cfpb", root=corpus)
+    assert authoritative_manifest("cfpb", corpus) is None, "the root is not a corpus"
+
+    recovered = ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=None,
+        corpus_root=corpus,
+        raw_root=tmp_path / "raw",
+    )
+    assert recovered.corpus_id == first.corpus_id, "rerunning from the raw cache recovers it"
+    assert_disk_is_the_manifest(corpus, recovered)
+
+
+@pytest.mark.parametrize("failure", ["d26_refusal", "roster_mismatch", "empty_window"])
+def test_predictable_failures_happen_before_anything_is_cleared(tmp_path, monkeypatch, failure):
+    """D27 clears only after every pre-write refusal has passed (§2.5)."""
+    corpus, existing = an_authoritative_corpus(tmp_path)
+    before = every_file_under(corpus)
+
+    def must_not_clear(*args, **kwargs):
+        raise AssertionError("the corpus was cleared before validation finished")
+
+    monkeypatch.setattr("ingest.cli.clear_corpus", must_not_clear)
+
+    common = {"source": "cfpb", "corpus_root": corpus}
+    if failure == "d26_refusal":
+        expected, run = (
+            AuthoritativeCorpusExists,
+            dict(
+                start=date(2024, 1, 1),
+                end=date(2025, 12, 31),
+                limit=1,
+                fetcher=None,
+                raw_root=tmp_path / "raw",
+            ),
+        )
+    elif failure == "roster_mismatch":
+        expected, run = (
+            RosterMismatch,
+            dict(
+                start=date(2024, 1, 1),
+                end=date(2025, 12, 31),
+                limit=None,
+                fetcher=StubFetcher([cfpb_page([cfpb_row("9", product="Intruder")])]),
+                raw_root=tmp_path / "later-raw",
+            ),
+        )
+    else:
+        expected, run = (
+            EmptyWindow,
+            dict(
+                start=date(2023, 1, 1),
+                end=date(2023, 12, 31),
+                limit=None,
+                fetcher=None,
+                raw_root=tmp_path / "raw",
+            ),
+        )
+
+    with pytest.raises(expected):
+        ingest(**common, **run)
+
+    assert every_file_under(corpus) == before, "byte-identical: nothing was cleared"
     assert read_manifest("cfpb", root=corpus).corpus_id == existing.corpus_id
 
 
