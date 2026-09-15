@@ -1706,3 +1706,91 @@ means one boundary rule governs every date cut in the project, and reporting
 empty folds follows D29's treatment of empty periods.
 *Scope:* resolves Task 10's ambiguities only. The expanding-window design of
 §6.3 and D11 and the behaviour of `temporal_split` are unchanged.
+
+**D31 — Out-of-fold category aggregates take both their observations and their
+breach threshold from the fold's fit block alone (§3.2, §4.2, §6.3, §7, D11,
+D15, D30, plan §J, §K, plan Tasks 11 and 13).**
+*Was:* incomplete, with a leakage path. `category_breach_rate` is a rate of
+`nyc311_sla_breach`, which exists only once §7's per-type threshold turns
+`resolution_hours` into a label, yet plan Task 11 depends only on Task 10 and its
+API receives outcomes that carry no label. Taking the labels from Task 13's
+frozen training-period thresholds would let a training row's own
+`resolution_hours` move the p75 that labels the earlier rows in its fold's fit
+block, and so move that row's own `category_breach_rate` — the defect D15
+removed `sla_hours` for, and a breach of Task 11's own defining property. §6.3's
+unseen-category rule, "the training-period global mean", is stated for validation
+and test; applied to a training row it would include that row's own outcome,
+which plan §J forbids for warm-up rows for exactly that reason. Open requests
+and the shapes of the Task 11 structures were unspecified.
+*Now — the breach rate.* For each Task 10 fold, the breach thresholds are fitted
+exclusively on that fold's fit block, with Task 13's threshold semantics: each
+category's p75 of `resolution_hours`, and the global p75 of the same fit block as
+the fallback for a category with fewer than 100 observations. Breach labels are
+derived only from outcomes in that fit block, `category_breach_rate` is computed
+from those labels, and the result is applied to that fold's apply block. For
+validation and test rows, the thresholds are the training-period thresholds and
+the rates come from the whole training period. The threshold calculation is one
+small, pure, reusable training utility with exactly Task 13's semantics; it is
+not duplicated anywhere, and Task 13 reuses it. Introducing it does not
+implement Task 13.
+*Now — a category absent from a fold's fit block.* An out-of-fold apply row whose
+category does not occur in that fold's fit block receives that fit block's
+global aggregate. The whole-training-period global statistic is never used for an
+out-of-fold apply row; it applies only to validation and test rows whose category
+was unseen in training. Warm-up rows remain `NaN`.
+*Now — open requests.* A row whose `resolution_hours` is `None` contributes to
+neither the category mean nor the breach-rate statistic. It may still receive
+aggregates computed from eligible observations. A statistic with no eligible
+observations is `NaN`. Whether open requests remain in the eventual
+model-training population is left to the risk-model task.
+*Now — shapes and definitions.* `records`, `outcomes` and fold indices align by
+position, and their `external_id`s are checked for consistency. `ValueError` is
+raised for mismatched lengths, mismatched external IDs, outcomes that are not NYC
+311 outcomes, or a fold collection that does not partition the expected row
+positions exactly. Means and rates are plain and record-weighted, with no
+smoothing and no minimum-count rule for aggregates, and sums use `math.fsum` so
+they are stable and deterministic. `AggregateColumns` is a frozen dataclass
+holding `category_mean_resolution_hours` and `category_breach_rate`, each aligned
+by position to `records`. `FrozenAggregates` is a frozen dataclass holding
+read-only per-category mappings and the two global values. Standard library only.
+*Now — the p75 threshold definition.* A p75 is linear interpolation between
+adjacent order statistics: with the values sorted ascending as `x[0] … x[n − 1]`
+and `h = (n − 1) × 0.75`, the percentile is
+`x[floor(h)] + fractional_part(h) × (x[ceil(h)] − x[floor(h)])`. It is computed by
+a small pure training utility that imports neither `ingest` nor `numpy`, and this
+definition is the shared Sentinel threshold definition that Task 13 also uses.
+*Now — what the fallback counts.* The fewer-than-100 rule counts only eligible
+observations, those whose `resolution_hours` is not `None`. Open requests
+contribute to no category p75, no global p75 and no breach-rate statistic, and a
+fit block's global fallback likewise uses only that same fit block's eligible
+observations. With zero eligible observations the threshold is undefined, and
+the corresponding breach-rate statistic is `NaN`.
+*Now — when a category counts as seen.* For category-specific aggregates and
+thresholds, a category is seen only through its eligible observations, those
+whose `resolution_hours` is not `None`. A category that appears in a fit block
+with zero eligible observations therefore receives that fit block's global
+aggregate where the global value is defined, rather than `NaN`. The same rule
+applies on the frozen training path: for validation and test rows, a training
+category with no eligible observations receives the training global aggregate
+where defined. Where the relevant global statistic itself has no eligible
+observations, the aggregate is `NaN`. `fallback_categories` reports the
+categories with 1 to 99 eligible observations; it is metadata only and does not
+alter any Task 11 feature value.
+*Now — what a valid fold collection is.* Partitioning the row positions is
+necessary but not sufficient. Each fold's fit block must equal the warm-up plus
+every preceding apply block, so it can never contain its own apply block or any
+later one. A fold collection that fails either check raises `ValueError`.
+*The invariant.* For every out-of-fold apply value, both (A) the observations used
+to compute the category aggregate and (B) the threshold used to turn
+`resolution_hours` into a breach label come exclusively from that fold's fit
+block. No current-row, same-timestamp, later, validation or test target can
+influence either.
+*Why:* it is the only construction in which a row's own outcome cannot reach its
+own breach-rate feature, which §6.3, D11 and D15 already require. Per-fold
+thresholds serve only as an intermediate step of the aggregate and never become a
+feature, so D15's rejection of a second threshold used as a feature does not
+apply; one shared primitive keeps the per-fold thresholds and the label thresholds
+from ever diverging in definition. Using the fit block's own global value for an
+unseen category is the out-of-fold counterpart of §6.3's validation and test rule.
+*Scope:* resolves Task 11's semantics only. Task 9's `temporal_split`, Task 10's
+folds, and the meaning of Task 13's frozen label thresholds are unchanged.
