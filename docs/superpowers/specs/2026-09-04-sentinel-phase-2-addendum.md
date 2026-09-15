@@ -1652,3 +1652,57 @@ would split 80 / 20 / 0 rather than 50 / 30 / 20. The original rule is kept, not
 replaced.
 *Scope:* a record of the behaviour Task 9 implements. It changes no other
 Task 9 behaviour.
+
+**D30 — Forward-chaining folds use exactly `n_folds` apply blocks over the
+records after the realised warm-up, cut by the Task 9 / D29 rule (§6.3, D11,
+D29, plan §J, plan Task 10).**
+*Was:* inconsistent and incomplete. Plan §J describes "the four date cuts
+dividing the remaining 80% into four equal-count blocks, plus the warm-up
+boundary — five apply blocks total", while the same section sizes each apply
+block at ~16% of the training period and the function defaults to `n_folds=5`.
+Four cuts inside the remainder make five blocks, not four, and four blocks of
+the remaining 80% would hold 20% each, not ~16%. Plan Task 10 also left open how
+fold cuts are measured once ties move the warm-up boundary, what an empty fold
+is, and whether degenerate inputs "behave or raise".
+*Now:* `forward_chaining_folds(timestamps, n_folds=5, warmup_fraction=0.20) ->
+list[Fold]` runs over the training period's timestamps only; validation and test
+take no part, and Task 9's `temporal_split` is unchanged. The warm-up is realised
+by Task 9's date-cut semantics: its boundary is the largest timestamp whose
+cumulative record count does not exceed `warmup_fraction × n`, with D29's
+fallback to the earliest timestamp when none does. With W the realised warm-up
+record count, the remaining `n − W` records are divided into exactly `n_folds`
+approximately equal-count apply blocks — five of ~16% each by default — whose
+boundary targets are `W + (n − W) × k / n_folds` for `k = 1 … n_folds`. Every
+boundary uses the Task 9 / D29 rule: the largest timestamp whose cumulative
+count does not exceed the target; the records at a boundary timestamp join the
+earlier block, so a timestamp group is never split; and when no timestamp beyond
+the previous boundary satisfies a target, the boundary stays at the previous one
+and that fold's apply block is empty. The final target is `n`, so the apply
+blocks together cover every record after the warm-up. The windows expand: fold
+`i`'s fit block is every record strictly before its apply block, and its apply
+block holds the records after the previous boundary up to and including its own.
+*Also decided — degenerate inputs.* The result always contains exactly `n_folds`
+`Fold` objects, and empty apply folds are valid and reported rather than raised.
+`n_folds` must be an integer of at least 1, and `bool` is not accepted.
+`warmup_fraction` must be finite and strictly between 0 and 1. Empty `timestamps`
+raise `ValueError`. A single-timestamp input puts every record in the warm-up and
+returns `n_folds` empty apply folds. `n_folds=1` is valid and yields one apply
+block holding everything after the warm-up.
+*Also decided — the `Fold` fields.* `fit_indices` and `apply_indices` are tuples
+of original input positions in ascending chronological order; records sharing a
+timestamp appear in ascending input position, so the order is deterministic.
+`fit_end` is the previous boundary, the last timestamp in the fit block.
+`apply_end` is the fold's inclusive boundary, and equals `fit_end` for an empty
+fold. `apply_start` is the earliest timestamp in the apply block, or `None` for
+an empty fold. The warm-up size is reported as `len(folds[0].fit_indices)`,
+because the first fold's fit block is exactly the warm-up.
+*Why:* five apply blocks is the only reading consistent with ~16%, "five apply
+blocks total" and `n_folds=5`. Measuring the fold cuts against the realised
+remainder keeps the apply blocks equal-count among themselves when ties move the
+warm-up, which is what "dividing the remaining … into equal-count blocks"
+describes; measuring them as fixed shares of the whole period would let a large
+tied first group shrink the first fold instead. Reusing the Task 9 / D29 rule
+means one boundary rule governs every date cut in the project, and reporting
+empty folds follows D29's treatment of empty periods.
+*Scope:* resolves Task 10's ambiguities only. The expanding-window design of
+§6.3 and D11 and the behaviour of `temporal_split` are unchanged.
