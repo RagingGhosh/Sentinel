@@ -32,9 +32,11 @@ from ingest.cli import (  # noqa: E402
     EmptyWindow,
     IngestError,
     InvalidDateRange,
+    InvalidLimit,
     authoritative_manifest,
     authoritative_roster,
     build_diagnostic,
+    build_parser,
     decide_verdict,
     ingest,
     main,
@@ -1651,6 +1653,172 @@ def test_predictable_failures_happen_before_anything_is_cleared(tmp_path, monkey
 
     assert every_file_under(corpus) == before, "byte-identical: nothing was cleared"
     assert read_manifest("cfpb", root=corpus).corpus_id == existing.corpus_id
+
+
+# --- D28: --limit must be a positive integer ---------------------------------
+
+INVALID_LIMITS = [0, -1]
+
+
+def forbid_everything_after_the_limit_check(monkeypatch):
+    """Patch every step D28 must precede to fail loudly if it is reached.
+
+    A manifest lookup (the D26 check and the roster lock both start there),
+    clearing, and either kind of write. The fetcher is deliberately left alone:
+    whether it runs is asserted from its own call count, so that a check moved
+    after `fetch_into_cache` is caught by the no-fetch invariant itself.
+    """
+
+    def reached(*args, **kwargs):
+        raise AssertionError("a step D28 must precede ran before --limit was validated")
+
+    for name in ("manifest_path", "read_manifest", "clear_corpus", "write_partition"):
+        monkeypatch.setattr(f"ingest.cli.{name}", reached)
+    monkeypatch.setattr("ingest.cli.write_manifest", reached)
+
+
+def an_invalid_limit_run(tmp_path, limit, corpus_root, fetcher):
+    return ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=limit,
+        fetcher=fetcher,
+        corpus_root=corpus_root,
+        raw_root=tmp_path / "later-raw",
+    )
+
+
+@pytest.mark.parametrize("limit", INVALID_LIMITS)
+def test_an_invalid_limit_is_refused_on_a_fresh_root(tmp_path, monkeypatch, limit):
+    corpus = tmp_path / "corpus"
+    fetcher = StubFetcher([cfpb_page([cfpb_row("1")])])
+    forbid_everything_after_the_limit_check(monkeypatch)
+
+    with pytest.raises(InvalidLimit) as exc:
+        an_invalid_limit_run(tmp_path, limit, corpus, fetcher)
+
+    assert isinstance(exc.value, IngestError)
+    message = str(exc.value)
+    assert f"got {limit}" in message, "the error names the value supplied"
+    assert "positive integer" in message
+    assert fetcher.calls == 0
+    assert not corpus.exists(), "nothing written"
+    assert not (tmp_path / "later-raw").exists(), "not even the raw cache"
+
+
+@pytest.mark.parametrize("limit", INVALID_LIMITS)
+def test_an_invalid_limit_never_reaches_the_fetcher(tmp_path, limit):
+    """No patches here: the fetcher's own call count is the evidence."""
+    fetcher = StubFetcher([cfpb_page([cfpb_row("1")])])
+
+    with pytest.raises(InvalidLimit):
+        an_invalid_limit_run(tmp_path, limit, tmp_path / "corpus", fetcher)
+
+    assert fetcher.calls == 0, "fetch_into_cache must not run"
+    assert fetcher.pages_yielded == 0
+    assert not (tmp_path / "later-raw").exists()
+
+
+@pytest.mark.parametrize("limit", INVALID_LIMITS)
+def test_an_invalid_limit_precedes_the_d26_refusal(tmp_path, monkeypatch, limit):
+    """Against an authoritative root D26 would refuse too. D28 must answer
+    first, and without so much as reading the manifest D26 would read."""
+    corpus, existing = an_authoritative_corpus(tmp_path)
+    before = every_file_under(corpus)
+    fetcher = StubFetcher([cfpb_page([cfpb_row("3")])])
+    forbid_everything_after_the_limit_check(monkeypatch)
+
+    with pytest.raises(InvalidLimit):
+        an_invalid_limit_run(tmp_path, limit, corpus, fetcher)
+    monkeypatch.undo()
+
+    assert fetcher.calls == 0
+    assert every_file_under(corpus) == before, "the corpus is byte-identical"
+    assert read_manifest("cfpb", root=corpus).corpus_id == existing.corpus_id
+
+
+@pytest.mark.parametrize("root_kind", ["fresh", "authoritative"])
+@pytest.mark.parametrize("limit", INVALID_LIMITS)
+def test_the_command_line_reaches_the_same_limit_check(tmp_path, monkeypatch, limit, root_kind):
+    if root_kind == "authoritative":
+        corpus, _ = an_authoritative_corpus(tmp_path)
+    else:
+        corpus = tmp_path / "fresh-corpus"
+    before = every_file_under(corpus) if corpus.exists() else {}
+    monkeypatch.chdir(tmp_path)
+    forbid_everything_after_the_limit_check(monkeypatch)
+
+    with pytest.raises(InvalidLimit) as exc:
+        main(
+            [
+                "--source",
+                "cfpb",
+                "--start",
+                "2024-01-01",
+                "--end",
+                "2025-12-31",
+                "--limit",
+                str(limit),
+                "--corpus-root",
+                str(corpus),
+            ]
+        )
+    monkeypatch.undo()
+
+    assert f"got {limit}" in str(exc.value)
+    assert (every_file_under(corpus) if corpus.exists() else {}) == before
+    assert not (tmp_path / "data").exists(), "the default raw cache was never touched"
+
+
+def test_the_parser_keeps_limit_as_a_plain_integer():
+    """D28 lives in `ingest()` alone; the parser does not duplicate the rule."""
+    for value in ("0", "-1", "1"):
+        args = build_parser().parse_args(
+            ["--source", "cfpb", "--start", "2024-01-01", "--end", "2025-12-31", "--limit", value]
+        )
+        assert args.limit == int(value)
+
+
+def test_a_limit_of_one_is_still_accepted(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row("1"), cfpb_row("2")]], limit=1)
+    assert manifest.limit == 1
+    assert manifest.record_count == 1
+
+
+def test_a_limit_of_one_is_still_accepted_from_the_command_line(tmp_path, monkeypatch):
+    # Seed the default raw cache the command line reads, relative to tmp_path.
+    ingest(
+        source="cfpb",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=None,
+        fetcher=StubFetcher([cfpb_page([cfpb_row("1"), cfpb_row("2")])]),
+        corpus_root=tmp_path / "seed-corpus",
+        raw_root=tmp_path / RAW_ROOT,
+    )
+    monkeypatch.chdir(tmp_path)
+    dev = tmp_path / "dev-corpus"
+
+    code = main(
+        [
+            "--source",
+            "cfpb",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2025-12-31",
+            "--limit",
+            "1",
+            "--corpus-root",
+            str(dev),
+        ]
+    )
+
+    assert code == 0
+    written = read_manifest("cfpb", root=dev)
+    assert written.limit == 1
+    assert written.record_count == 1
 
 
 # --- D25: per-source civil-time window resolution ----------------------------

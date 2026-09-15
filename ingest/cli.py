@@ -5,7 +5,8 @@
 
 The order of operations is load-bearing::
 
-    refuse a --limit run into a root holding an authoritative corpus (D26)
+    refuse an --end before --start, then a --limit below one (D28)
+      -> refuse a --limit run into a root holding an authoritative corpus (D26)
       -> fetch (or reuse the raw cache)
       -> normalize through the source's adapter, filtered to the window
       -> refuse an empty window (D23)
@@ -114,6 +115,17 @@ class IngestError(Exception):
 
 class InvalidDateRange(IngestError):
     """`--end` precedes `--start`. Never silently swapped."""
+
+
+class InvalidLimit(IngestError):
+    """`--limit` is zero or negative (D28, §2.8).
+
+    A limit bounds the records persisted, and nothing below one bounds anything:
+    zero would persist the empty corpus D23 already refuses, and a negative value
+    would be applied as a slice that silently drops records. Raised immediately
+    after `InvalidDateRange`, before any manifest is read, anything is fetched,
+    or anything is written.
+    """
 
 
 class AuthoritativeCorpusExists(IngestError):
@@ -475,6 +487,8 @@ def ingest(
     """Fetch, normalize, validate, write, and describe one source's corpus."""
     if end < start:
         raise InvalidDateRange(f"--end {end.isoformat()} precedes --start {start.isoformat()}")
+    if limit is not None and limit < 1:
+        raise InvalidLimit(f"--limit must be a positive integer; got {limit}")
 
     corpus_root = Path(corpus_root)
     raw_root = Path(raw_root)
