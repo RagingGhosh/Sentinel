@@ -121,7 +121,8 @@ queue unusable, and would put a corpus into a free-tier Postgres for no
 operational reason.
 
 **Corpus records live on disk as files** (Parquet under `data/`, gitignored),
-read by training and evaluation code only. They are never migrated into, joined
+read by training and evaluation code only, and always through `load_corpus`, the
+manifest-gated corpus reader (§2.7, D27). They are never migrated into, joined
 against, or synchronised with `complaints_complaint`.
 
 ### 2.1 The corpus record
@@ -398,18 +399,32 @@ resolved window bounds, how many cached pages were read, and that none of their
 records fell inside the window — enough to tell an empty cache apart from a
 cache whose records all lie outside the window.
 
-This is one of two conditions under which ingest refuses before writing
-anything. The other is §2.6: a `--limit`ed run whose target corpus root already
-holds an authoritative corpus (D26).
+#### Every refusal that precedes a corpus write
+
+The empty window is one of several refusals ingest raises before it writes
+anything to a corpus root. They are listed together so none is found by accident:
+
+| Refusal | Raised when |
+|---|---|
+| `InvalidDateRange` | `--end` precedes `--start` |
+| `InvalidLimit` | `--limit` is not a positive integer (§2.8, D28) |
+| `AuthoritativeCorpusExists` | a `--limit`ed run targets a root holding an authoritative corpus (§2.6, D26) |
+| fetch and adapter normalization errors | a page cannot be fetched, or a row violates its source's contract — for example §2.4's DST rejections |
+| `EmptyWindow` | the window normalizes to zero records (this section, D23) |
+| `RosterMismatch` | the window's labels differ from the roster in either direction (§1.1) |
+
+Each leaves an existing corpus untouched. Only once every one of them has passed
+does a run begin replacing the corpus (§2.7, D27).
 
 ### 2.6 Corpus replacement
 
-Ingest writes a source's partitions and manifest into its target corpus root,
-replacing the files it writes rather than merging into them. An unbounded rerun over
-an unbounded corpus is therefore idempotent — the same window and raw cache
-produce the same part files and the same `corpus_id` — and that rerun is the
-resume path. What was never stated is what a `--limit`ed run may do to a root
-that already holds a full corpus. Left unstated, it replaced it: a truncated run
+A successful run replaces the source's whole versioned tree with a corpus of the
+current run's window, and nothing from the previous corpus survives it (§2.7,
+D27). An unbounded rerun over an unbounded corpus is therefore idempotent — the
+same window and raw cache produce the same part files and, within one
+environment, the same `corpus_id` — and that rerun is the resume path. What was
+never stated is what a `--limit`ed run may do to a root that already holds a
+full corpus. Left unstated, it replaced it: a truncated run
 overwrote the authoritative partitions and manifest, and every artifact citing
 the old `corpus_id` was left naming a corpus that no longer existed.
 
@@ -425,7 +440,7 @@ and that a limited run must target a different root.
 |---|---|---|
 | nothing | Writes an authoritative corpus | **Allowed.** Writes a truncated corpus recording its `limit` |
 | a truncated corpus (`limit` non-null) | Allowed. Replaces it with an authoritative corpus | **Allowed.** Replaces one development corpus with another |
-| an authoritative corpus (`limit: null`) | **Allowed.** The resume path, and idempotent | **Refused** with `AuthoritativeCorpusExists` |
+| an authoritative corpus (`limit: null`) | **Allowed.** Replaces it with the current window's corpus, even a narrower one (D27); idempotent when the window and cache are unchanged | **Refused** with `AuthoritativeCorpusExists` |
 
 **A development corpus is created deliberately, elsewhere.** The CLI accepts
 `--corpus-root PATH`, defaulting to the existing corpus root (`data/corpus/`). A
@@ -456,11 +471,108 @@ complete only if a truncated run cannot silently take that corpus's place.
 Requiring a separate root without adding `--corpus-root` would be a rule the CLI
 gives no way to obey.
 
-**Deliberately not decided here.** An unbounded run over a narrower window than
-an existing authoritative corpus also replaces it, discarding records outside
-the new window. That is visible in the manifest's `window_start` and
-`window_end`, and is a different question from truncation. This section does not
-address it.
+**A narrower unbounded window replaces the corpus completely.** An unbounded run
+over a narrower window than an existing authoritative corpus is allowed, and
+every record outside the new window is removed (§2.7, D27). §1.1 still applies:
+a locked CFPB label absent from the narrower window fails `RosterMismatch`.
+
+### 2.7 Corpus writes, validity and reading
+
+Beyond the layout in plan §G, what a corpus root contains was never specified.
+`write_partition` overwrote one path and deleted nothing, `build_manifest`
+described whatever part files were on disk, and `read_corpus` read whatever part
+files were on disk whether or not a manifest existed. A rerun that wrote fewer
+year partitions than its predecessor left the rest behind and counted them, and a
+run failing part-way left new partitions under the previous manifest. This
+section fixes both (D27).
+
+**A successful run replaces the source's corpus with the current window.** Once
+every refusal listed in §2.5 has passed, ingest:
+
+1. deletes the source's `manifest.json`;
+2. deletes the rest of `<corpus root>/<source>/v<SCHEMA_VERSION>/`;
+3. writes the run's partitions;
+4. writes the manifest last, to a temporary file in the same directory that is
+   then moved into place with `os.replace`.
+
+The resulting corpus is the current run's window, whatever the previous corpus
+held — including a window narrower than the one it replaces. Stale partitions
+cannot survive. No other source, and no other schema version's tree, is touched:
+the storage layout keeps an older `v<N>` findable precisely so that an artifact
+citing it can still locate its bytes.
+
+After a successful run:
+
+- the part files on disk are exactly the manifest's `part_files`;
+- every record lies within `window_start` .. `window_end`;
+- a limited manifest satisfies `1 <= record_count <= limit` (§2.5, §2.8).
+
+**The manifest is the validity boundary.** A source/version tree without a valid
+manifest is not a corpus, whatever Parquet files it contains. The manifest is
+deleted before any partition is removed or written, and written only after every
+partition, so its presence means a run completed and wrote exactly what it lists.
+
+**`load_corpus` is the only corpus reader.** It lives beside the manifest and:
+
+- raises `ManifestNotFound` when there is no manifest;
+- raises a `CorpusIntegrityError` when a part file exists on disk that
+  `part_files` does not list;
+- raises `ChecksumMismatch` when a listed part file is missing or its bytes
+  differ from the recorded digest;
+- otherwise streams exactly the listed files, in `(submitted_at, external_id)`
+  order, holding at most one batch per part file.
+
+Byte verification is required rather than optional because plan §R already
+claims that `corpus_id` ties an artifact to exact input bytes, and that claim
+holds only if the bytes are checked when the corpus is loaded.
+
+**`read_corpus` is a low-level partition reader, not a corpus reader.** It keeps
+Task 4's signature and behaviour: it reads whatever part files exist and asserts
+nothing about validity. That is exactly what `build_manifest` needs — it reads
+the partitions a run has just written, before the manifest describing them
+exists — and it is what the storage tests exercise. Nothing else may use it. It
+cannot itself require a manifest: the manifest module already depends on the
+storage module, so the reverse dependency would be circular, and `build_manifest`
+would be left with nothing to read with.
+
+**A validity boundary, not atomic directory replacement.** D27 does not replace
+the tree atomically, and nothing here claims that it does.
+
+| | What D27 provides | What it does not provide |
+|---|---|---|
+| A reader using `load_corpus` | The previous completed corpus, no corpus, or the new completed corpus — never a mixture of two runs | Continuous availability: between deleting the old manifest and writing the new one, the source has no corpus |
+| A run that fails after clearing | No manifest, so nothing that could be mistaken for a complete corpus | Survival of the previous corpus |
+| The manifest file itself | A complete document or none, through a single-file `os.replace` | Any atomic swap of the directory tree around it |
+
+Staging a complete tree and switching it in was rejected. On Windows `os.replace`
+cannot move a directory over an existing non-empty one, so the switch becomes two
+renames with a gap between them, and making it genuinely atomic needs a pointer
+that changes plan §G's layout. That is infrastructure no measurement justifies
+(invariant 4), spent protecting a corpus plan §X already treats as regenerable.
+
+**Recovery after a failed load is a rerun from the raw cache.** A run that fails
+after clearing leaves no manifest: that root is not authoritative (D26), holds no
+roster lock (D24), and `load_corpus` refuses it. Rerunning over the same window
+rebuilds the corpus from the raw cache without network access.
+
+**Not decided here:** concurrent ingests into, or reads from, one corpus root.
+
+### 2.8 The value of `--limit`
+
+**`--limit` must be a positive integer.** Zero or a negative value raises
+`InvalidLimit`, a subclass of `IngestError`, immediately after the
+`InvalidDateRange` check — before the D26 refusal, before `fetch_into_cache`, and
+before any write. The message names the value supplied, and the command line
+reaches the same check because the CLI passes the value through unchanged (D28).
+
+`--limit 0` would persist the empty corpus §2.5 already defines as a failure,
+with an empty roster and a diagnostic computed over nothing. A negative value
+bounds nothing: applied as a slice, `-1` silently drops the window's last record
+and records `limit: -1`. Checking before D26 means a nonsensical value never
+causes a manifest to be read.
+
+This rule concerns the value of `limit` alone and is independent of how a run
+replaces the corpus (§2.7).
 
 ---
 
@@ -1415,3 +1527,91 @@ window before `--limit` truncates anything.
 records outside it. That is visible, because `window_start` and `window_end` are
 recorded in the manifest, and it is a different question from truncation. It is
 left open rather than folded into this decision.
+*Resolved by D27:* an unbounded run over a narrower window is allowed and
+replaces the corpus completely, removing every record outside the new window.
+This entry's open question is closed. Its description of that outcome became
+accurate only when D27 made replacement remove stale partitions.
+
+**D27 — A successful run replaces the source's corpus with the current run's
+window; the manifest is the validity boundary, and a corpus is read only through
+it (§2, §2.5, §2.6, §2.7, plan §D, §F, §G, §P, §R, §X, plan Tasks 4, 8, 16, 17,
+19).**
+*Was:* unspecified, and inconsistent. `write_partition` overwrote one path and
+deleted nothing; `build_manifest` described every part file on disk; `read_corpus`
+read every part file on disk whether or not a manifest existed. A rerun that
+wrote fewer year partitions left the rest in place and counted them. Observed: a
+`limit: 1` run into a truncated root recorded `record_count: 2`, and an unbounded
+2024-only run into an authoritative root kept its 2025 partition under a manifest
+whose `window_end` was 2024-12-31. §2.6 and D26 described a replacement the code
+did not perform. A run failing after its first partition write left new
+partitions under the previous manifest, which D24 and D26 went on reading as
+authoritative and `read_corpus` read as a mixed population.
+*Now — replacement.* Once every pre-write refusal has passed (§2.5), ingest
+deletes the source's manifest, then the rest of
+`<corpus root>/<source>/v<SCHEMA_VERSION>/`, then writes its partitions, then
+writes the manifest last to a same-directory temporary file moved into place with
+`os.replace`. The corpus that results is the current run's window, whatever the
+previous corpus held — including a window **narrower** than the corpus it
+replaces, and an authoritative corpus replaced by a narrower one: records outside
+the new window are removed, and no stale partition survives. After a successful
+run the part files on disk are exactly `part_files`, every record lies within
+`window_start` .. `window_end`, and a limited manifest satisfies
+`1 <= record_count <= limit` (D23, D28). No other source and no other schema
+version is touched.
+*Now — validity.* A source/version tree without a valid manifest is not a corpus.
+`load_corpus` is the only corpus reader: it raises `ManifestNotFound` without a
+manifest, a `CorpusIntegrityError` for a part file on disk that `part_files` does
+not list, and `ChecksumMismatch` for a listed file that is missing or whose bytes
+differ from its digest; otherwise it streams exactly the listed files in
+`(submitted_at, external_id)` order. `read_corpus` is reclassified as a low-level
+partition reader. It keeps its signature and behaviour, remains usable before any
+manifest exists, asserts nothing about validity, and is used only by
+`build_manifest` and by tests. This changes the Task 4 contract, which presented
+`read_corpus` as the corpus reader.
+*A validity boundary, not atomic directory replacement.* A reader using
+`load_corpus` sees the previous completed corpus, no corpus, or the new completed
+corpus, and never a mixture of runs. The tree is not replaced atomically: the
+previous corpus does not survive a failed write, and between deleting the old
+manifest and writing the new one the source has no corpus. Only the manifest
+file itself is replaced atomically.
+*Why this rather than staging, retention, or refusal:* staging needs a directory
+swap that is not atomic on every supported platform, or a pointer that changes
+the §G layout — infrastructure no measurement justifies (invariant 4) for a
+corpus plan §X already calls regenerable from the raw cache. Keeping old
+partitions is the merge D26 rejected under §1.1. Refusing whenever old partitions
+exist would block D26's permitted development loop. Making `read_corpus` itself
+require a manifest would need a circular dependency between the storage and
+manifest modules, and would leave `build_manifest` no way to read what it is
+about to describe.
+*Consequences, accepted deliberately.* An I/O failure after clearing loses the
+previous corpus; no predictable failure can reach that step. Recovery is a rerun
+from the raw cache. A run that fails after clearing leaves no manifest, so that
+root is not authoritative (D26) and holds no roster lock (D24): the next CFPB run
+derives its roster from its own window rather than comparing against the lost
+lock. The failed run had already validated that window against the lock, so a
+rerun over the same raw cache reproduces the same taxonomy. An artifact citing a
+replaced `corpus_id` can no longer verify it against disk. Narrowing a CFPB
+corpus remains subject to §1.1: a locked label absent from the narrower window
+fails `RosterMismatch`.
+*Resolves D26's open question:* an unbounded run over a narrower window may
+replace an authoritative corpus, and replaces it completely.
+*Not decided here:* concurrent ingests into, or reads from, one corpus root.
+
+**D28 — `--limit` must be a positive integer (§2.5, §2.8, plan §G, plan Task
+8).**
+*Was:* unspecified. `--limit 0` wrote a zero-record corpus and manifest with an
+empty roster and a diagnostic computed over nothing. `--limit -1` was applied as
+a slice, silently dropped the window's last record, and recorded `limit: -1`.
+*Now:* `ingest()` raises `InvalidLimit`, a subclass of `IngestError`, when
+`limit` is not `None` and is less than 1. The check sits immediately after
+`InvalidDateRange`, before the D26 refusal, before `fetch_into_cache`, and before
+any write, and its message names the value supplied. The command line reaches the
+same check because `main()` propagates it exactly as it does `InvalidDateRange`;
+the argument parser keeps `type=int`, so the rule lives in one place for every
+caller.
+*Why:* plan §G defines `limit` as a bound on the records persisted, and a
+negative number bounds nothing. A zero limit produces the empty corpus D23
+already decided is a failure rather than a corpus. Checking before D26 means a
+nonsensical value never causes a manifest to be read.
+*Kept separate from D27:* this decision concerns the value of `limit` alone. It
+is independent of how a run replaces or validates the corpus.
