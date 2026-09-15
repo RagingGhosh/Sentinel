@@ -1615,3 +1615,40 @@ already decided is a failure rather than a corpus. Checking before D26 means a
 nonsensical value never causes a manifest to be read.
 *Kept separate from D27:* this decision concerns the value of `limit` alone. It
 is independent of how a run replaces or validates the corpus.
+
+**D29 — The temporal split keeps plan §H's boundary rule and adds one explicit
+fallback for a boundary no timestamp satisfies (§6.1, plan §H, plan Task 9).**
+*Was:* inconsistent. Plan §H places each boundary at "the largest timestamp
+whose cumulative count does not exceed the target", but that rule has no answer
+when the earliest eligible group of records sharing a timestamp is itself larger
+than the target. Plan Task 9 nevertheless requires that "a single-timestamp
+input puts everything in train and reports it" — an outcome the rule as written
+cannot produce, because a single timestamp's only cumulative count is the whole
+corpus, which exceeds the train target of `0.70 × n`.
+*Now:* §H's rule stands unchanged. Unique timestamps are sorted ascending with
+their cumulative record counts. The train boundary is the largest timestamp
+whose cumulative count does not exceed `train_fraction × n`; the validation
+boundary is the largest whose cumulative count does not exceed
+`(train_fraction + validation_fraction) × n`. Every record at a boundary
+timestamp belongs to the earlier period, so a group of records sharing a
+timestamp is never split across periods. When no timestamp satisfies a
+boundary, one explicit fallback applies, and nothing else changes. For the train
+boundary, the boundary is the earliest timestamp, which places that entire
+oversized group in train. For the validation boundary, if no timestamp after the
+train boundary satisfies the validation target, `val_end` equals `train_end` and
+validation is empty. Empty periods are valid, and are reported with a zero count
+rather than raised. A single-timestamp corpus therefore places every record in
+train and reports empty validation and test periods.
+*Why this fallback:* it is the smallest addition that lets §H's rule produce
+Task 9's required single-timestamp outcome, and it preserves the rule's
+guarantees everywhere else. Outside the fallback, train never exceeds its
+requested share and test never falls below its own, so ties can never shrink the
+evaluation population.
+*Rejected — the crossing-boundary interpretation:* assigning the group whose
+cumulative count crosses a target to the earlier period would also yield the
+single-timestamp outcome, but it contradicts "does not exceed", and under heavy
+ties it can empty the test period entirely: 5,000 / 3,000 / 2,000 tied records
+would split 80 / 20 / 0 rather than 50 / 30 / 20. The original rule is kept, not
+replaced.
+*Scope:* a record of the behaviour Task 9 implements. It changes no other
+Task 9 behaviour.
