@@ -1794,3 +1794,40 @@ from ever diverging in definition. Using the fit block's own global value for an
 unseen category is the out-of-fold counterpart of §6.3's validation and test rule.
 *Scope:* resolves Task 11's semantics only. Task 9's `temporal_split`, Task 10's
 folds, and the meaning of Task 13's frozen label thresholds are unchanged.
+**D32 — §2.4's claim that a CFPB `submitted_hour` is already anchored to the
+filer's own clock is stale; the stored UTC instant is what survives (§2.4, §2.5,
+plan §J, plan Task 12).**
+*Was:* §2.4 justifies deriving 311's hour and weekday from the local
+representation partly by asserting that "CFPB's timestamps arrive with real
+offsets, so its `submitted_hour` is already anchored to the filer's own clock".
+That describes the field as *published*, not as *stored*. `ingest.sources.cfpb`
+rejects a naive timestamp and then converts the parsed value with
+`.astimezone(UTC)`, so the published offset is consumed and discarded during
+normalization and `CorpusRecord.submitted_at` holds the UTC instant alone. §2.5
+already states this correctly — CFPB "publishes a per-record offset and
+normalization converts to UTC, discarding it", and "the stored instant is all
+that survives". The addendum therefore asserted both, and the two readings
+disagree about what a CFPB corpus record still carries.
+*Now:* §2.5's statement is the correct one and governs. A CFPB corpus record
+retains no filer-local wall clock, so its `submitted_hour` and
+`submitted_weekday` are read from the stored UTC instant, that being the only
+representation which exists. NYC 311 is unchanged: its hour and weekday come
+from the `America/New_York` civil representation via `nyc311.to_source_local`,
+per §2.4's table and D21. Feature assembly therefore dispatches on
+`CorpusRecord.source` — `nyc311` converts to New York civil time, `cfpb` uses the
+stored instant as it is. That is the same rule `ingest.cli` already applies to
+Task 8's hour and weekday diagnostics, so the diagnostic and the feature have one
+stated basis rather than two.
+*Why:* the stale sentence reads as a guarantee that a CFPB hour carries diurnal
+meaning in the filer's own time, which no consumer of the corpus can rely on,
+and it was the stated reason the two domains' `submitted_hour` were held to mean
+the same thing. They do not: 311's is anchored to New York civil time and CFPB's
+to UTC, so the two are not on a common civil frame. That is a finding §5.4's
+reduced-feature cross-domain cross-target robustness probe must state about its
+own inputs — the probe already carries a required feature-distribution
+diagnostic and a binding prohibition on overclaiming — and it is recorded here
+rather than left for a reader to rediscover from the adapters.
+*Scope:* documentation only. No ingestion, normalization, schema, storage or
+manifest behaviour changes; no corpus is re-ingested; no threshold, split, fold
+or aggregate semantics are touched. D1–D31 are unaltered, and §2.4's table rows,
+its DST rejections and D21 all stand.
