@@ -1831,3 +1831,66 @@ rather than left for a reader to rediscover from the adapters.
 manifest behaviour changes; no corpus is re-ingested; no threshold, split, fold
 or aggregate semantics are touched. D1–D31 are unaltered, and §2.4's table rows,
 its DST rejections and D21 all stand.
+**D33 — Task 13's record-facing threshold API lives beside the pure primitive,
+refuses unresolved requests, and counts eligible observations (§7, §K, D10, D31,
+plan Task 13).**
+*Was:* plan Task 13 placed `fit_thresholds`, `apply_thresholds` and
+`FrozenThresholds` in `ml/training/thresholds.py`, took `min_records=100`, and
+returned `np.ndarray[bool]`. Four things collided with what already exists. D31
+states the p75 is computed by a utility importing neither `ingest` nor `numpy`,
+yet the Task 13 signatures need `CorpusRecord`, `NYC311Outcome` and `numpy` in
+that same file — and `ml.training.aggregates` imports that module, so numpy would
+become a Task 11 dependency. §7 and §K say "fewer than 100 training *records*"
+while D31 counts only eligible observations, which disagree for any type whose
+requests are largely still open. A `bool` array has no representation for a
+request with no `resolution_hours`, forcing a population decision D31 explicitly
+left to the risk-model task. And an undefined threshold is `NaN`, against which
+every comparison is false, so an undefined threshold would silently label every
+record "not breached".
+*Now — where the API lives.* `ml/training/thresholds.py` stays the pure shared
+primitive, importing neither `ingest` nor `numpy`, and `CategoryThresholds`,
+`linear_percentile`, `fit_category_thresholds` and `is_breach` keep their current
+names and semantics. Task 13's record- and outcome-facing API lives in
+`ml/training/labels.py`, which may import `numpy` and `ingest` and which **calls**
+the primitive rather than restating it. No percentile, interpolation,
+minimum-count, global-fallback or breach comparison is written a second time.
+*Now — the minimum-count rule.* D31 governs: the hundred counts **eligible
+observations**, those whose `resolution_hours` is not `None`, never raw records.
+The authoritative parameter is `min_eligible`, defaulting to 100. Plan Task 13's
+`min_records` spelling is stale and does not override D31.
+*Now — unresolved requests.* `apply_thresholds` raises `ValueError` when any
+supplied outcome has `resolution_hours` of `None`. It does not coerce one to
+`False`, drop it, shorten the returned array, or invent a third boolean state:
+each would either manufacture a "not breached" label for a request that was never
+resolved or break positional alignment with `records`. Whether open requests
+remain in the model-training population stays with the risk-model task, as D31
+says.
+*Now — undefined thresholds.* Fitting may still report an undefined threshold as
+`NaN` exactly as D31 says. **Applying one may not.** If the threshold that would
+apply to a record is `NaN`, `apply_thresholds` raises `ValueError` rather than
+emitting labels that are false only because every comparison with `NaN` is false.
+*Now — the frozen object.* `FrozenThresholds` is a new immutable type wrapping
+the primitive's `CategoryThresholds`, carrying Task 13's own field names:
+`per_type`, `global_fallback` and `fallback_type_count`. Task 11's type is
+neither renamed nor altered. The two fallback counters are deliberately different
+quantities and are not interchangeable: `CategoryThresholds.fallback_categories`
+is the categories with **1 to 99** eligible observations, while
+`fallback_type_count` is **every** type whose applied threshold is the global
+fallback, including a type with **zero** eligible observations that
+`fallback_categories` omits.
+*Now — breach rate.* Task 13 owns a small pure per-period breach-rate helper, as
+§7 and §K require the resulting rate per period to be published. It consumes
+applied labels and computes no threshold of its own.
+*Why:* every clause keeps one definition in one place. Splitting the module is
+what lets D31's "imports neither `ingest` nor `numpy`" stay literally true while
+Task 13 still receives the record and outcome objects its callers hold, and it
+keeps Task 11's tests running in the CI job that installs no training tier.
+Refusing unresolved requests and undefined thresholds converts two silent
+false-label paths into loud ones, which is the same principle §1.1 applies to a
+normalizer that quietly repairs a record.
+*Scope:* Task 13 only. Task 9's split, Task 10's folds, Task 11's aggregates and
+Task 12's feature assembly are unchanged, as is every existing name in
+`ml/training/thresholds.py`. D1–D32 are unaltered. The stale "Create
+`ml/training/thresholds.py`" and "Prerequisites: Task 9" lines in plan Task 13
+predate Task 11 creating that file; correcting them is deferred to a separate
+documentation cleanup rather than mixed into this task.
