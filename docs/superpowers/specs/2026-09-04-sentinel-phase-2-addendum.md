@@ -1894,3 +1894,122 @@ Task 12's feature assembly are unchanged, as is every existing name in
 `ml/training/thresholds.py`" and "Prerequisites: Task 9" lines in plan Task 13
 predate Task 11 creating that file; correcting them is deferred to a separate
 documentation cleanup rather than mixed into this task.
+**D34 — Task 14 metrics: the full scope except recall@k, baseline priors fitted
+on training labels, and every class order and polarity supplied by the caller
+(§5.1, §5.2, §5.3, §5.4, §5.5, D7, D17, plan Task 14, plan Task 18).**
+*Was:* plan Task 14 listed `macro_f1`, `per_class_report`, `top_k_accuracy`,
+`pr_auc`, `minority_report`, `recall_at_k`, `majority_baseline` and
+`stratified_baseline`, and required every function to carry its baseline, but
+left several published numbers undecided: whether the confusion matrix §5.2
+requires and the ROC-AUC §5.4 and §5.5 name as secondary belong to it; whether a
+baseline's class prior comes from training or evaluation labels, §5.1 saying only
+"computed on the same split"; how many random draws a stratified baseline makes
+and from what seed; which definition of PR-AUC applies; how a class absent from
+the evaluation population enters the macro average; how top-k treats ties and a
+`k` wider than the roster; which baseline recall@k carries; and who decides class
+order, the minority class and positive polarity.
+*Now — scope.* Task 14 implements `macro_f1`, `per_class_report`,
+`confusion_matrix`, `top_k_accuracy`, `pr_auc`, a secondary `roc_auc`,
+`minority_report`, `majority_baseline` and `stratified_baseline`. **`recall_at_k`
+is deferred to Task 18.** §5.3 requires "the same baselines" for both retrieval
+arms but defines none, and a majority or stratified classifier baseline has no
+meaning for retrieval, while plan Task 18 already requires recall@k over
+`RecordRef`. Task 18 therefore owns recall@k's semantics and its baseline, and no
+retrieval baseline such as k/N is invented here.
+*Now — results carry baselines.* Every public metric returns a structured result
+holding the primary score and the named baseline scores applicable to that
+metric, never a bare float. Baseline generation lives only in `majority_baseline`
+and `stratified_baseline`; metrics consume the predictions or rankings those
+produce and never reconstruct a baseline classifier themselves. A metric for
+which the contract defines no baseline is not given an invented one.
+*Now — baseline priors.* Both baselines fit their class prior from **training
+labels only** and are then scored on the evaluation population. Neither the
+majority class nor the stratified distribution is ever derived from validation or
+test targets: §5.1's "computed on the same split" means evaluated on the same
+split. A majority-class tie resolves to the earliest label in the caller-supplied
+roster order.
+*Now — the stratified-random baseline.* It draws its predictions from the
+training-label class distribution in **exactly one** draw from
+`numpy.random.default_rng(seed)`. `seed` is required and has no default; there
+are no repeated Monte Carlo draws and no analytic expected score. The caller
+records the seed in experiment metadata. This is an evaluation baseline only and
+is unrelated to the prohibition on stratified-random data *splits*.
+*Now — PR-AUC.* `pr_auc` is Average Precision in its step-wise definition,
+the sum over score thresholds of (Rₙ − Rₙ₋₁) × Pₙ. The trapezoidal area under the
+precision–recall curve is not used: its linear interpolation between operating
+points is optimistic at exactly the imbalances §5.4 describes. ROC-AUC is
+computed as a secondary figure only (D7).
+*Now — implementation.* The metric arithmetic is written explicitly over NumPy and
+the standard library, and hand-verified against hand-computed fixtures.
+scikit-learn is not introduced for it, and no dependency is added.
+*Now — the roster and zero denominators.* The caller supplies the complete,
+ordered class roster. For per-class precision, recall and F1, an undefined
+zero-denominator case resolves explicitly to `0.0`, support is reported, and a
+class absent from the evaluation population stays represented. Macro-F1 averages
+over the **full supplied roster**, never over only the classes present in the
+targets or predictions.
+*Now — top-k.* `top_k_accuracy` takes a score matrix whose columns correspond
+exactly to the supplied labels, in that order. `k` must be at least 1; a `k`
+greater than the number of classes raises `ValueError` and is never clamped. Tied
+scores break deterministically by roster order, and unknown or misaligned labels
+and a target/score length mismatch raise.
+*Now — order, taxonomy and polarity.* Metrics never infer a class taxonomy, a
+class order, a minority class or a positive polarity. The caller supplies the
+ordered labels, and a `positive_label` wherever a metric is binary or
+polarity-specific, as §5.4 already requires a polarity mapping to be stated
+rather than implied. Unknown labels in targets or predictions raise. That one
+roster order governs the confusion matrix, the per-class report, macro-F1, the
+top-k score columns, top-k tie-breaking and majority-class tie-breaking.
+*Now — ranking baselines.* The majority baseline has one definition across
+classification and ranking metrics: the training class-prior vector, fitted from
+training labels only, with its entries in the supplied roster order and ties in
+the prior resolved by that order. For a label metric it predicts the class with
+the highest training prior. For a ranking metric the complete prior vector is the
+score vector, identical for every evaluation row. Majority Average Precision
+therefore equals the positive-class base rate wherever the evaluation population
+holds positives, majority ROC-AUC equals 0.5 wherever it holds both positives and
+negatives, and majority top-k ranks the k classes with the highest training
+prior. The stratified-random baseline is reported **only** for the label metrics
+`macro_f1`, `per_class_report`, `confusion_matrix` and `minority_report`, and
+**never** for `pr_auc`, `roc_auc` or `top_k_accuracy`. Its single seeded draw
+yields one label per row and defines neither a continuous score nor a ranking;
+manufacturing either — including using the 0/1 draw as a score — would be the
+invented baseline the clause on results forbids. On a 99:1 population that
+substitution reports an Average Precision anywhere from 0.01 to 1.0 depending on
+the seed alone.
+*Now — undefined ranking metrics.* `pr_auc` raises `ValueError` when the
+evaluation population holds no example of `positive_label`. `roc_auc` raises
+`ValueError` when it holds no positive example or no negative example. Neither
+returns `0.0` or `NaN`, and the message names the metric and the missing class
+condition.
+*Now — an empty evaluation population.* Every public metric raises `ValueError`
+when the evaluation population is empty. The `0.0` zero-denominator rule applies
+only to an individual roster class absent from a **non-empty** evaluation
+population; applied to no data at all it would publish a macro-F1 of `0.0` that
+describes nothing.
+*Now — confusion-matrix baselines.* The confusion-matrix result carries the
+model's matrix beside the majority baseline's and the stratified baseline's,
+each built by the same function, with rows the true class and columns the
+predicted class, in the supplied roster order. A confusion matrix is never
+reduced to a scalar to satisfy the baseline rule.
+*Now — the majority baseline is mandatory.* As §5.1 requires, every applicable
+public metric result carries its majority-class baseline, in the ranking form
+above wherever the metric needs scores or a ranking, and no metric may return a
+model score without it. The stratified-random baseline is carried only by the
+four label metrics named above.
+*Now — CI.* The stratified-random baseline requires
+`numpy.random.default_rng`, so the Task 14 tests need NumPy, which CI's
+application job does not install. `tests/ml/training/test_metrics.py` is therefore
+added to the ML job's existing path-selected test command. This is an explicit
+exception to plan Task 14's "must not change anything outside `ml/training/`",
+and no other CI change is made.
+*Why:* every clause above moves a published figure, so each is fixed before any
+metric is computed rather than discovered in code. Fitting baseline priors on
+training labels keeps the do-nothing comparison free of evaluation targets by the
+same rule §6.3 applies to target-derived features; a single seeded draw keeps the
+stratified figure reproducible under plan §R; and a caller-supplied order and
+polarity keep the metrics from becoming a second, unreviewed taxonomy beside the
+roster §1 derives from data.
+*Scope:* Task 14 only. Tasks 9–13 are unchanged, `recall_at_k` moves to Task 18,
+the one CI test-path line above is the only change outside `ml/training/` and
+its tests, and D1–D33 are unaltered.
