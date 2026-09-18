@@ -2013,3 +2013,112 @@ roster §1 derives from data.
 *Scope:* Task 14 only. Tasks 9–13 are unchanged, `recall_at_k` moves to Task 18,
 the one CI test-path line above is the only change outside `ml/training/` and
 its tests, and D1–D33 are unaltered.
+**D35 — Task 15 artifacts: joblib only, a closed metadata schema written last, an
+immutable version directory, and a feature builder bound to the artifact's own
+spec (§3.3, §6.1, §7, D12, D27, D34, plan §P, plan §R, plan Task 15).**
+*Was:* plan §P fixed the directory layout and named the `metadata.json` fields,
+and plan Task 15 fixed `write_artifact(model, metadata, path)` and
+`load_artifact(path) -> LoadedArtifact` exposing `feature_spec` and a
+`build_features(records)`. Left open were: which of the two model formats Task 15
+supports; which fields are required, which may be null, and what types they must
+have; what happens to unknown keys and to values JSON cannot represent exactly;
+whether a version directory may be written twice and what a failed write leaves
+behind; how the directory relates to the metadata; what else `LoadedArtifact`
+exposes; and, decisively, how a feature builder taking only `records` could build
+`RiskFeaturesV1`, whose two aggregate columns Task 12 can only take from Task 11's
+`AggregateColumns`. As written, the primary risk artifact could never build its
+own features.
+*Now — format and layout.* Task 15 supports **joblib only**: the model is
+`model.joblib` and the metadata is `metadata.json`, both directly inside the
+version directory. ONNX is not written here and no dependency is added; the ONNX
+MiniLM checkpoint belongs to Task 18. Loading a joblib file unpickles arbitrary
+code, so only trusted, self-produced artifacts may be loaded.
+*Now — the feature builder.* `LoadedArtifact.build_features(records,
+aggregates=None)` delegates to Task 12's `build_features` with the artifact's own
+`FeatureSpec`. The artifact binds the spec; it never freezes or embeds aggregate
+values. Scoring a spec that names an aggregate feature without supplying
+aggregates therefore raises Task 12's `FeatureUnavailable`, which is exactly the
+"primary artifact cannot score CFPB" behaviour plan Task 19 asserts.
+*Now — the feature spec.* `feature_spec` is a non-empty JSON array of non-empty,
+distinct strings, and `feature_spec_version` a non-empty string. They load as
+`FeatureSpec(names=tuple(feature_spec), version=feature_spec_version)` in exactly
+the stored order: nothing is sorted, deduplicated, expanded to the ten-field
+`RiskFeatures` interface, or read from the model object. A duplicated, empty or
+non-string name raises `ArtifactSchemaError` rather than being repaired.
+*Now — the load guard.* At load, every name in `feature_spec` is checked against
+what this environment can produce, using Task 12's public `build_features` one
+name at a time. If any cannot be produced, loading raises `FeatureSpecMismatch`
+naming **every** unavailable feature, in spec order. The guard runs at load, as
+plan Task 15 states; `write_artifact` does not check feature availability.
+*Now — required fields.* Every artifact carries all sixteen base keys:
+`model_name`, `model_version`, `trained_at`, `git_sha`, `corpus_id`,
+`corpus_schema_version`, `source_window`, `split`, `feature_spec`,
+`feature_spec_version`, `label_roster`, `thresholds`, `metrics`,
+`warmup_row_count`, `seeds` and `dependency_versions`. A missing key raises
+`ArtifactSchemaError` naming it. Only `label_roster`, `thresholds` and
+`warmup_row_count` may be an explicit `null`, meaning not applicable to this kind
+of artifact; `null` anywhere else is invalid. The optional keys
+`embedding_dimension`, `embedding_model_id`, `embedding_model_sha256` and
+`experiment_label` may be absent but, when present, must be non-null and valid.
+Neither function ever supplies a missing value.
+*Now — types.* Validation is shallow and structural. `model_name`,
+`model_version`, `git_sha`, `corpus_id`, `feature_spec_version`,
+`embedding_model_id`, `embedding_model_sha256` and `experiment_label` are
+non-empty strings; `trained_at` is an ISO-8601 timestamp with a timezone;
+`corpus_schema_version` is an integer, `warmup_row_count` a non-negative integer
+and `embedding_dimension` a positive integer, booleans excluded; `split`,
+`thresholds`, `metrics`, `seeds` and `dependency_versions` are JSON objects.
+`source_window` and `label_roster` are checked only for presence and
+nullability. The inner structure of every object belongs to the task that
+produces it, and Task 15 defines none of it.
+*Now — unknown keys and strict JSON.* An unknown top-level key raises
+`ArtifactSchemaError`, so a misspelt field cannot pass unnoticed. Serialization is
+strict JSON: a non-finite float, a non-string object key, or any value JSON has no
+exact representation for raises `ArtifactSchemaError` instead of being converted —
+non-finite values are never written as `NaN` or as `null`. Loading is equally
+strict: `NaN` or `Infinity` tokens, duplicate keys, invalid UTF-8 and a non-object
+document all raise `ArtifactSchemaError`.
+*Now — the directory.* `path` is the caller-provided version directory. Its final
+component must equal `model_version` and its parent's final component must equal
+`model_name`, checked by both `write_artifact` and `load_artifact`; a mismatch
+raises `ArtifactSchemaError`. The comparison is lexical and uses the path as the
+caller gave it: `.` and `..` are normalised away as text, so `<model>/v1/../v1`
+names `<model>/v1`, but symbolic links and junctions are never resolved, so a link
+`v2` pointing at `v1` is checked as `v2` and cannot load `v1`'s artifact. Nothing
+is derived from the path or written into the metadata from it.
+*Now — immutability and the validity boundary.* A published version directory is
+immutable: `write_artifact` raises `FileExistsError` when the directory already
+holds `metadata.json` or `model.joblib`. All validation runs before anything is
+written. The model is written first; `metadata.json` is written **last**,
+through a temporary file in the same directory and `os.replace`, the D27
+pattern. `metadata.json` is the validity boundary: a directory without it is not
+an artifact, so a write that fails part-way leaves nothing loadable. Loading
+raises `FileNotFoundError` for a missing `metadata.json` or `model.joblib`, and
+unpickles the model only after the metadata, the directory and the feature guard
+have all passed.
+*Now — the loaded artifact.* `LoadedArtifact` is frozen and training-side: it
+exposes `model`, a deeply read-only `metadata`, `feature_spec` and
+`build_features`. It has no prediction or serving API, and nothing here touches
+`ml/registry.py`. `ArtifactSchemaError` and `FeatureSpecMismatch` are both
+`ValueError`s, like the rest of `ml.training`. The writer records the metadata it
+is given exactly and never recomputes a split, a threshold, a metric, an
+aggregate or a label.
+*Now — deferred.* What `feature_spec` and `build_features` mean for a text triage
+artifact or an embedder artifact is not defined here; Tasks 16 and 18 define those
+contracts.
+*Now — CI.* The artifact tests need joblib and scikit-learn, which CI's
+application job does not install, so `tests/ml/training/test_artifacts.py` is
+added to the ML job's existing path-selected test command. No other CI change is
+made.
+*Why:* an artifact exists to be trusted later by a process that did not train
+it. Every clause above closes a way that trust could be misplaced without an
+error: a builder quietly given different columns, a field quietly invented or
+dropped, a value quietly rounded into valid JSON, a published version quietly
+overwritten, or a half-written directory quietly accepted. Binding the spec while
+leaving aggregates to the caller is the only reading under which the primary risk
+artifact can build its features at all, and it keeps Task 11's out-of-fold and
+frozen aggregate paths where D31 put them.
+*Scope:* Task 15 only. Tasks 9–14 are unchanged, `ml/registry.py` is unchanged
+and nothing is wired into serving; triage and embedder feature semantics are
+deferred to Tasks 16 and 18; the one CI test-path line is the only change outside
+`ml/training/` and its tests; D1–D34 are unaltered.
