@@ -2348,3 +2348,234 @@ than a score to beat.
 *Scope of this clause:* Task 16 implementation detail only. No metric function,
 roster, published figure, artifact field or earlier decision changes; Tasks 9–15
 keep their behaviour; and D1–D35 remain unaltered.
+**D37 — Task 17 the 311 risk model: outcomes persisted in a sidecar, open
+requests split from the labelled population, a two-band decision threshold tuned
+on validation, and a frozen HistGradientBoosting recipe (§2.1, §2.7, §4.2, §5.5,
+§6, §7, §G, D1, D3, D11, D15, D21, D27, D30, D31, D33, D34, D35, plan §J, §K,
+§L, plan Task 17).**
+*Was:* Task 17 was unimplementable and several of its published figures were
+undefined. The corpus stores `CorpusRecord` only — `ingest/cli.py` normalises
+`(record, outcome)` pairs and then persists the records alone — so
+`NYC311Outcome.resolution_hours`, from which the entire target derives, reached
+no consumer. Every Task 11 and Task 13 API Task 17 must call takes a sequence of
+those outcomes. Left open besides: the 311 training window, §1's window being
+CFPB's alone; whether open requests belong to the model population, which D31 and
+D33 both deferred here by name; what "decision banding" means, named three times
+and defined nowhere; the positive class and roster order for a boolean target;
+which thresholded metrics carry §5.5's stratified baseline, given D34 forbids it
+on any ranking metric; who owns the calibration curve §5.5 requires and Task 14
+never implemented; class weighting; every `HistGradientBoostingClassifier`
+hyperparameter; the artifact's identity; and the shape of its `thresholds` object.
+*Now — outcome persistence (D37.1).* `SCHEMA_VERSION` stays **1** and no outcome
+field joins `CorpusRecord`. A source that has an outcome stream persists it as an
+authoritative **sidecar inside that source's existing corpus root**, beside the
+record partitions and the manifest, rather than discarding it at ingest. For NYC
+311 the sidecar carries `external_id` and `resolution_hours`, the latter nullable
+for an open request. Outcome parts join the manifest's integrity check and the
+`corpus_id`, so an artifact citing that identity is bound to both its record and
+its outcome bytes. A public `load_outcomes(...)` joins the manifest layer and
+reads only manifest-declared outcome files, verifies their checksums before
+yielding, never reads `data/raw/`, never silently skips a malformed row, and
+preserves `external_id` identity. `load_corpus` remains the authoritative
+`CorpusRecord` reader and is unchanged. Together the record corpus and the
+outcome sidecar are Task 17's authoritative input. A corpus without a sidecar
+stays valid for every task that needs no outcome; Task 17 requires one. No
+database or ORM representation of the outcome stream is introduced.
+*Now — the training window (D37.2).* 311 uses **2024-01-01 through 2025-12-31
+inclusive**, under D21's NYC civil-time interpretation. This is a Sentinel design
+decision taken here, **not** a claim that §1 or any earlier document already
+fixed a 311 window; §1's window is CFPB's.
+*Now — open requests (D37.3).* An open request stays in the corpus, in the
+temporal split, in fold construction and in aggregate construction, and may
+receive aggregate features. It is **not** a member of the labelled population: it
+never receives `nyc311_sla_breach`, contributes to no threshold statistic, and is
+excluded from classifier fitting and from every evaluation metric. The order is
+therefore: all records → temporal split → thresholds and aggregates → feature
+construction → resolved-only model population. An unresolved outcome is never
+coerced to `False`, which is the refusal D33 already built into
+`apply_thresholds`.
+*Now — decision banding (D37.4).* Two bands: **low** where the score is below the
+threshold and **high** where it is at or above it. The score is the model's
+predicted probability of the positive class `True`. The candidate grid is
+`0.05, 0.10, … 0.95`. The threshold is selected on the **validation period
+alone**, maximising the positive class's F1 for `True`; an exact tie takes the
+**lowest** threshold. No test record may influence the selection, and the chosen
+value is applied unchanged to validation and test.
+*Now — the positive class and the roster (D37.5).* `False` is the negative,
+non-breach class and `True` the positive, breach class. The roster order is
+exactly `(False, True)`, written to metadata as the JSON list `[false, true]`.
+That one order governs the classifier's class ordering, the probability columns,
+the thresholded predictions, every metric and the recorded roster.
+*Now — published metrics (D37.6).* The ranking metrics are **PR-AUC (headline)**
+and **ROC-AUC (secondary)**, both scored on the probability of `True` with
+`positive_label=True` and carrying the majority baseline only, as D34 requires.
+The thresholded supporting metrics are `minority_report` and `confusion_matrix`,
+computed from the frozen decision threshold over the full `(False, True)` roster,
+carrying the majority and stratified-random baselines wherever D34 permits.
+Macro-F1 is **not** introduced as a risk headline, and the stratified-random
+baseline is **never** used as a ranking baseline.
+*Now — breach rate (D37.7).* Task 13's `breach_rate` is published per validation
+and test period, computed over that period's resolved, labelled population. Open
+requests are not in the denominator.
+*Now — the calibration curve (D37.8).* Validation and test each carry a
+diagnostic calibration curve over **10 uniform probability bins**, reporting only
+the populated bins, each with `mean_predicted_probability`, `fraction_positive`
+and `count`. It is ancillary diagnostic information: not a scalar headline, not a
+Task 14 metric, and it carries no baseline. No Brier score is added.
+*Now — class imbalance (D37.9).* `class_weight=None` and no resampling. The
+residual imbalance the p75 threshold produces is reported, not engineered away,
+which is the same rule §1.1 applies to CFPB's.
+*Now — the model (D37.10).* `HistGradientBoostingClassifier` with
+`learning_rate=0.1`, `max_iter=100`, `max_leaf_nodes=31`, `max_depth=None`,
+`min_samples_leaf=20`, `l2_regularization=0.0`, `early_stopping=False`,
+`class_weight=None` and `random_state=17`. No hyperparameter search; every other
+parameter takes the pinned scikit-learn 1.9.0 default. `early_stopping=False` is
+explicit and load-bearing: the estimator's `'auto'` default would carve an
+internal **random** validation split out of the training rows, which is exactly
+the non-temporal evaluation §6 prohibits.
+*Now — artifact identity (D37.11).* `model_name` is `"nyc311_sla_risk"`,
+`model_version` is `"v1"`, and `experiment_label` is
+`"nyc311 sla risk histgradientboosting"`, giving the version directory
+`nyc311/nyc311_sla_risk/v1/`. `feature_spec` is exactly `RiskFeaturesV1`'s five
+names in order — `submitted_hour`, `submitted_weekday`, `text_length`,
+`category_mean_resolution_hours`, `category_breach_rate` — under
+`feature_spec_version` `"risk_features_v1"`. `warmup_row_count` is
+`len(folds[0].fit_indices)`, the realised warm-up D30 defines, and is **not**
+null here: unlike triage, this model has an out-of-fold construction and so has a
+warm-up to count.
+*Now — threshold metadata (D37.12).* The fitted Task 13 information is recorded
+under `thresholds` as `min_eligible` (100), `percentile` (0.75), `per_type`,
+`global_fallback` and `fallback_type_count`, taken directly from
+`FrozenThresholds`. Those five fields are exactly the `FrozenThresholds`
+content, and remain so. Beside them, inside that same `thresholds` object, the
+frozen decision band of D37.4 is recorded as `{"decision": {"value":
+<threshold>, "quantity": "probability_of_true"}}`, where `value` is the
+validation-selected threshold the evaluation was frozen at and `quantity` names
+what it thresholds. This mirrors how D36 records triage's abstention threshold,
+and is what lets a loaded artifact re-apply its own operating point without
+consulting anything outside itself. Nothing further about the selection is
+recorded — not the candidate grid, not the objective, not the tie-break, not the
+validation population size, not the achieved validation F1. Those are specified
+in D37.4 and live in the experiment code, which the artifact's `git_sha` already
+identifies. `decision` is additional nested metadata within the existing
+nullable `thresholds` object, not a new top-level artifact metadata field: no
+threshold mathematics is recomputed in Task 17 and no new top-level artifact
+field is created, so D35's closed schema still refuses every unknown key.
+*Now — features and aggregates (D37.13).* Training rows use
+`forward_chaining_folds(...)` then `oof_category_aggregates(...)`; validation and
+test rows use `fit_category_aggregates(train_records, train_outcomes)` then
+`apply_category_aggregates(...)`. These existing public Task 11 APIs are called,
+never restated, and the columns reach Task 12 through `AggregateColumns` and
+`build_features`. `RiskFeaturesV1` remains authoritative, and `sla_hours`,
+`age_hours`, `priority_rank`, `queue_depth` and `assignee_open_count` remain
+outside it.
+*Now — dependency versions (D37.14).* The artifact records the versions Task 17
+actually uses: numpy, scipy, scikit-learn and joblib. `onnxruntime` is not
+recorded merely because plan §R's generic provenance sentence names it; this
+experiment does not use it.
+*Now — scope (D37.15).* Task 17 may touch the minimum `ingest` storage and
+manifest surface D37.1 requires in order to persist and load the outcome sidecar.
+It must not change the `CorpusRecord` schema, aggregate semantics, threshold
+semantics, `ml/training/metrics.py`, `features.py`, `labels.py`, `thresholds.py`
+or `splits.py`, the registry or any serving path, Django, or the database schema,
+and it adds no dependency unless a pinned one is genuinely insufficient.
+*Why:* the sidecar is the only resolution that leaves `CorpusRecord` — and
+therefore every existing corpus tree, every `corpus_id` already citable and
+Task 16's published artifact — untouched while making the risk target reachable
+at all; putting outcomes into the record schema would bump `SCHEMA_VERSION` and
+strand every partition already written. Keeping open requests in the split and
+the aggregates but out of the labelled population is what lets them inform a
+category's feature history without ever acquiring a label that would have to be
+invented. Two bands rather than three is the smallest banding that yields the
+thresholded predictions §5.5's stratified baseline needs, since D34 allows that
+baseline on no ranking metric. And fixing the hyperparameters keeps the published
+PR-AUC attributable to the recipe rather than to an unrecorded search.
+*Scope:* Task 17 only, plus the sidecar surface D37.1 names. Tasks 9–16 keep
+their behaviour, `CorpusRecord` and `SCHEMA_VERSION` are unchanged, Task 16's
+artifact and decisions are untouched, and D1–D36 are unaltered.
+*Now — manifest versioning (D37.16), completing D37.1.* `MANIFEST_VERSION`
+becomes **2**, while `CorpusManifest.schema_version` stays **1**: the manifest
+document gains a field, the `CorpusRecord` schema does not, and §G separates the
+two numbers for exactly this case. Manifest v1 files stay **readable**. Reading a
+v1 manifest interprets the absent `outcome_part_files` as `{}` and leaves every
+existing `part_files` semantic untouched. That compatibility is **read-only**: a
+new write always emits v2. A v2 manifest carries `outcome_part_files`, which may
+be empty for a source with no outcome stream. `verify_manifest` verifies the
+outcome parts wherever they are declared, and `load_corpus` continues to load
+record parts and only record parts. `load_outcomes` on a manifest declaring no
+outcome parts raises a **typed absence error**; it does not return an empty
+iterator, because "this corpus has no outcome sidecar" and "this sidecar is empty"
+are different facts and a caller must not confuse them. Manifest-version
+compatibility may never change the record corpus's `CorpusRecord` schema version
+or silently reinterpret existing record data. The deliberate default for
+`outcome_part_files` is an exception granted to this one new optional field and
+does not extend to `manifest_version`, `limit` or `timestamp_diagnostic`, which
+keep their no-silent-default rule.
+*Now — the sidecar layout (D37.17).* **Existing record partitions do not move.**
+They stay in `year=YYYY/` under the source's versioned root, and the sidecar is
+added beside them as `outcomes/year=YYYY/part-*.parquet` under that same root.
+Outcome filenames need not mirror record filenames. The manifest keeps the two
+checksum sets **separate**, as `part_files` and `outcome_part_files`, so a reader
+can tell which bytes are which without parsing a path. Outcome parts take part in
+manifest verification, in corpus identity and in source-tree replacement and
+deletion — the last for free, since `remove_source_tree` removes the whole
+versioned root. `compute_corpus_id` is **unchanged**; `build_manifest` passes it
+the merged record-and-outcome checksum set. A record-only corpus therefore keeps
+the identity it already has, because merging an empty outcome set changes
+nothing, while a corpus holding sidecar bytes has an identity that binds them.
+`load_outcomes` reads only manifest-declared outcome parts, verifies their
+checksums before yielding anything, rejects an outcome file on disk the manifest
+does not list, never reads `data/raw/`, preserves `external_id`, raises on a
+malformed row, and raises the typed absence error above when no sidecar is
+declared.
+*Why these two:* keeping the record partitions where they are is what makes
+"existing corpora remain valid" literally true — relocating them inside `v1`
+would strand every manifest already written and amount to a schema change under
+another name. Separate checksum maps keep `part_files` meaning exactly what it
+has always meant, so no existing reader is reinterpreted. And leaving
+`compute_corpus_id` alone while merging at the call site is what lets a
+record-only corpus keep its published identity while a corpus with outcomes gets
+one that genuinely covers its inputs.
+*Scope of these two clauses:* the manifest document and the corpus layout only.
+`CorpusRecord`, `SCHEMA_VERSION`, `part_files` semantics, `load_corpus`,
+`compute_corpus_id` and every Task 9–16 behaviour are unchanged, and D1–D36
+remain unaltered.
+*Now — a correction to D37.1's sidecar schema, and the scope of outcome
+persistence.* The NYC 311 outcome sidecar carries **three** columns, not two:
+`external_id`, `resolution_hours` and `closed_at`. D37.1's original two-column
+sketch was unimplementable: `NYC311Outcome` has three fields, and both
+`ml/training/aggregates.py` and `ml/training/labels.py` validate that the objects
+they receive **are** `NYC311Outcome` instances — which D37.15 forbids changing —
+so a loader reconstructing only two fields would have had to invent the third. A
+`closed_at` of `None` means "still open at ingest" in §2.1, so pairing it with a
+non-null `resolution_hours` would have produced a self-contradictory object.
+*The semantics.* A **resolved** request has a non-null `external_id`, a non-null
+`resolution_hours` and a non-null `closed_at`, the latter being the **actual
+normalised NYC 311 close timestamp from the source**. An **open** request has a
+non-null `external_id` with `resolution_hours` and `closed_at` both null.
+`closed_at` is **never reconstructed** as `submitted_at + resolution_hours`: the
+sidecar preserves what the source published, and a derived value would silently
+become authoritative the moment the two disagreed — a rounding difference, a
+timezone normalisation, or a corrected close time upstream. `load_outcomes`
+therefore returns real `NYC311Outcome` instances carrying all three fields, which
+is what keeps the Task 11 and Task 13 validation paths working with no adapter.
+*The scope of outcome persistence.* D37's requirement to persist an outcome
+stream applies **specifically to the NYC 311 stream Task 17 consumes**. A future
+source-specific outcome stream defines its own sidecar schema in the task that
+first consumes it. Concretely: Task 17 defines and persists NYC 311 outcomes;
+**Task 19 may later define a CFPB outcome sidecar** for the CFPB stream it
+consumes; and Task 17 must **not** invent or implement that future CFPB schema.
+The Task 17 ingest changes therefore stay NYC 311-specific, and CFPB ingest
+behaviour is unchanged by them.
+*Why:* a sidecar exists so a later process can trust what an earlier one
+observed. Two of the three fields would have forced the loader to fabricate the
+third, and the only fabrication available contradicted the field's documented
+meaning. Fixing the schema at three columns costs one nullable timestamp per row
+and removes the contradiction entirely. Confining the requirement to NYC 311
+keeps Task 17 from designing a schema for data it never reads, which is the same
+discipline D35 applied when it left triage and embedder feature semantics to the
+tasks that own them.
+*Scope of this clause:* the NYC 311 sidecar schema and the reach of D37's
+persistence requirement. `CorpusRecord`, `SCHEMA_VERSION`, `part_files`,
+`load_corpus`, `compute_corpus_id`, CFPB ingest and every Task 9–16 behaviour are
+unchanged, and D1–D36 remain unaltered.
