@@ -2579,3 +2579,227 @@ tasks that own them.
 persistence requirement. `CorpusRecord`, `SCHEMA_VERSION`, `part_files`,
 `load_corpus`, `compute_corpus_id`, CFPB ingest and every Task 9–16 behaviour are
 unchanged, and D1–D36 remain unaltered.
+**D38 — Task 18 duplicate retrieval: both arms frozen under one shared
+configuration, the MiniLM asset pinned by digest as an external prerequisite,
+no embedder artifact written in Phase 2, and D18's artifact clause deferred to
+Phase 3 (§2.2, §5.3, §6.1, §6.2, D18, D34, D35, plan §N, plan Task 18).**
+*Was:* §5.3 locked the comparison methodology before either candidate was built
+and D18 fixed the dimension discipline, but no clause elected the values either
+arm needs. Undecided on entry: the MiniLM checkpoint, its pooling rule, sequence
+length and tokenizer; where the ONNX weights come from and whether a test may
+fetch them; the benchmark's own TF-IDF recipe, D36's being Task 16-scoped; `k`,
+the evaluation and perturbation populations, their seed and the tuning budget;
+recall@k's definition and the baseline §5.3 requires but does not define, which
+D34 deferred here; whether Task 18 writes an embedder artifact, which D35 also
+deferred here; and the `TextEmbedder` protocol's return type, fit seam and input
+contract.
+*Now — the checkpoint, chosen here rather than assumed.* The MiniLM arm is
+**`sentence-transformers/all-MiniLM-L6-v2`** at repository revision
+**`1110a243fdf4706b3f48f1d95db1a4f5529b4d41`**, and the export is that
+revision's **`onnx/model.onnx`**. The optimised exports `model_O1` through
+`model_O4` and every quantized export are excluded: a benchmark that cannot say
+which bytes produced its number is not a benchmark. D18's warning stands
+unweakened — this clause fixes *which* checkpoint Sentinel measures and fixes
+nothing about its output width.
+*Now — the graph, and what Sentinel adds to it.* The export takes three int64
+inputs, `input_ids`, `attention_mask` and `token_type_ids`, and emits a single
+output `last_hidden_state` of shape `(batch, sequence, hidden)`. **The graph
+performs no pooling and no normalisation**; the published model's pooling and
+normalising modules are outside it. Sentinel therefore applies
+**attention-mask weighted mean pooling, then L2 normalisation**, which
+reproduces the checkpoint's documented representation rather than inventing one.
+`token_type_ids` are zeros, every input being a single segment. Batches are
+padded to their longest member, which the graph requires; because pooling is
+mask-weighted, **padding changes no vector**, and that is asserted rather than
+assumed. `embedding_dimension` is read from the observed output width on every
+run, and the literal `384` appears nowhere under `ml/embedders/`.
+*Now — the model is frozen.* Phase 2 performs inference only: no fine-tuning, no
+gradient computation, no training-mode execution. ONNX Runtime is the only
+execution path.
+*Now — tokenization is delegated, never hand-written.* Token ids come from
+**`tokenizers==0.23.2`**, pinned in **`requirements/ml.txt`**, reading the
+checkpoint's own `tokenizer.json` from the same revision as the weights.
+Sentinel does not implement word-piece segmentation, text normalisation or
+special-token placement: a hand-rolled tokenizer disagreeing with the
+checkpoint's by a single token yields embeddings that are wrong in a way no test
+of ours would catch, and the benchmark would then measure our tokenizer rather
+than the representation.
+*Now — sequence length, and whose number each one is.* Sentinel truncates to
+**256 word-piece tokens**, from the right, and records the count of truncated
+inputs. Three distinct limits exist and must not be conflated:
+| Limit | Whose it is |
+|---|---|
+| 128 | the packaged `tokenizer.json`'s own default truncation and fixed padding |
+| 256 | **Sentinel's benchmark limit**, set by this decision |
+| 512 | the ONNX graph's positional limit, which it enforces by failing |
+**256 is Sentinel's benchmark setting and is not the checkpoint's native
+maximum.** Sentinel **explicitly overrides** the tokenizer's packaged 128-token
+truncation and fixed-padding defaults; loaded as shipped, that file would
+silently shorten every input to 128 while this decision said 256. The effective
+limit in force is asserted by test, so a tokenizer whose defaults change cannot
+quietly change the benchmark.
+*Now — the model asset is an external prerequisite, verified by digest.* The
+weights and `tokenizer.json` live under
+**`ml/artifacts/embedders/all_minilm_l6_v2/v1/`**, relocatable with the optional
+**`SENTINEL_MINILM_DIR`** environment variable. Neither file is committed: the
+weights are already excluded by `.gitignore`'s `ml/artifacts/**/*.onnx` rule,
+and the rule excluding `tokenizer.json` is added when Task 18 is implemented.
+Both carry a required expected SHA256, verified on every load:
+| Asset | Bytes | Expected SHA256 |
+|---|---|---|
+| `model.onnx` | 90,405,214 | `6fd5d72fe4589f189f8ebc006442dbb529bb7ce38f8082112682524616046452` |
+| `tokenizer.json` | 466,247 | `be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037` |
+The pair of digests **is** the model identity: weights and tokenizer are pinned
+together, because either swapped alone produces silently wrong vectors. A
+missing asset raises **`ModelAssetUnavailable`**; a digest mismatch raises
+**`ModelAssetMismatch`**. **No digest is ever adopted from whatever file is
+found**: a first-observed bootstrap would verify nothing, and is prohibited.
+*Now — no test touches the network, and no test downloads a model.* This extends
+§2's ingest-scoped rule to the whole project. The TF-IDF arm, the shared
+configuration, every leakage assertion and every perturbation assertion run with
+no assets present. MiniLM-specific tests **skip** when the assets are absent, and
+the skip names the missing path rather than passing silently; setting
+**`SENTINEL_REQUIRE_MINILM=1`** converts that skip into a failure, so an
+environment that is supposed to hold the assets cannot go green without them. **A
+benchmark run fails closed**: unlike a test, the benchmark never skips the MiniLM
+arm — a missing or mismatched asset aborts the run rather than publishing a
+one-armed comparison.
+*Now — the benchmark's TF-IDF arm, frozen here and not inherited.* D36's
+word-plus-character recipe belongs to Task 16's classifier and is not carried
+over; a representation chosen for a classifier is not thereby a representation
+for retrieval. The benchmark arm is a single character-n-gram block:
+`analyzer="char_wb"`, `ngram_range=(3, 5)`, `lowercase=True`, `min_df=2`,
+`max_df=1.0`, `max_features=2048`, `norm="l2"`, `sublinear_tf=False`,
+`dtype=np.float32`, **dense output**. Every parameter not named takes the pinned
+scikit-learn 1.9.0 default, and `dependency_versions` records the version that
+supplied those defaults. **The vocabulary and IDF weights are fitted on
+training-period text only** (§6.2, vocabulary construction). `max_features` is
+load-bearing rather than cosmetic: it bounds this arm's observed
+`embedding_dimension` so both arms return dense `float32` matrices of comparable
+width, which is what lets the protocol's return type stay honest. No
+dimensionality reduction, stemming, stop-word list or tuned parameter is added.
+*Now — one frozen `BenchmarkConfig`, with its values.* The corpus is **CFPB**,
+loaded through `load_corpus`; the window is the one its manifest records; the
+split is §6.1's at **`DEFAULT_FRACTIONS`, 70 / 15 / 15**. The **index
+population** is every in-window record whose `submitted_at` falls at or before
+the end of the test period — never a record later than the query period (§6.2,
+evaluation-index construction). The **query population** is **500 test-period
+records**, drawn deterministically. The **seed is 18**. **`k` is 10** and is the
+headline; **recall@1, recall@5 and recall@10** are reported, the same set for
+both arms. Similarity is **cosine over L2-normalised vectors**. The **tuning
+budget is zero for both arms** — neither receives a hyperparameter search, which
+satisfies §5.3's equal-effort rule at its only defensible point. **Both arms
+receive the same `BenchmarkConfig` object**, asserted by identity rather than
+equality, and **the perturbed texts are generated once from that object and
+passed identically to both arms** — an arm never perturbs for itself, that being
+the likeliest way two arms silently stop comparing the same thing.
+*Now — the perturbations.* Three types, each reported separately, all applied to
+**the same 500 records** under **the same seed**: **synonym substitution** from a
+frozen in-repo substitution table, on at most **20% of eligible tokens**;
+**truncation** to the **leading 60% of characters**, never below one character;
+and **typo injection** by **adjacent-character transposition** at **2% of
+characters**. No external or downloaded synonym corpus is used: a downloaded
+lexicon would make the benchmark non-reproducible in exactly the way §5.3 exists
+to prevent. **Generation is deterministic** — perturbed text is a function of
+`(record text, perturbation type, seed)` alone.
+*Now — recall@k, defined here and owned here.* `recall_at_k` is the **fraction of
+perturbed queries whose original `RecordRef` appears among the top `k`
+candidates** ranked by similarity. Queries are the perturbed records; candidates
+are the index population, which contains the originals. **Identity is `RecordRef`
+throughout and never a positional index.** A **duplicate `RecordRef` in the index
+raises**, a silent deduplication being a silent change of denominator. A **`k`
+exceeding the candidate population raises**, matching Task 14's treatment of a
+`k` wider than the roster. The baseline is **one seeded random ranking of the
+candidate population**, drawn in exactly one draw with the seed recorded — the
+discipline D34 fixed for the stratified baseline, and the reason D34 declined to
+invent a retrieval baseline in Task 14. **The metric lives in
+`ml/training/experiments/dedup.py`, and Task 14's prohibition on `recall_at_k` in
+`ml/training/metrics.py` is unchanged**, because this definition is
+retrieval-specific and has no meaning for a classifier.
+*Now — Task 18 writes no embedder artifact, and D18's artifact clause is
+deferred.* Task 18 publishes a benchmark report, not a model. **The benchmark
+report is authoritative** for the embedding provenance and the observed
+dimension. **D18 is clarified, not weakened: its requirement that
+`embedding_dimension`, `embedding_model_id` and the ONNX SHA256 appear in
+*artifact* metadata is deferred to the first serving embedder artifact, which
+Phase 3 creates when it wires the winning embedder behind `DedupIndex`.** D18's
+core discipline remains fully binding on Task 18: the dimension is **observed,
+recorded and validated, and never assumed from a checkpoint-family stereotype**.
+`ml/training/artifacts.py` is not modified, `_ARTIFACT_PRODUCED_SPECS` does not
+grow, and what `feature_spec` and `build_features` mean for an embedder artifact
+stays undefined — D35 deferred that question here, and this decision answers it
+by deciding that Phase 2 writes no such artifact. The report is returned as a
+frozen object and serialized to a caller-supplied path; nothing is written inside
+the repository by default.
+*Now — provenance, recorded per arm.* The benchmark report records, for each arm:
+| Field | MiniLM | TF-IDF |
+|---|---|---|
+| `embedding_model_id` | `sentence-transformers/all-MiniLM-L6-v2` | `tfidf_char_wb_3_5_v1` |
+| `embedding_model_sha256` | the ONNX digest above | `null` |
+| `tokenizer_sha256` | the tokenizer digest above | `null` |
+| `embedding_dimension` | observed at run time | observed at run time |
+The two nulls are a decision, not an omission: a vectoriser fitted at run time
+has no model file to digest, and **TF-IDF's provenance is its frozen
+configuration together with the `corpus_id` it was fitted on**. `tokenizer_sha256`
+is a field of the benchmark report and not of any artifact, so D35's closed
+metadata schema is untouched by it.
+*Now — model versions.* `model_version` is **`all_minilm_l6_v2_onnx_v1`** for the
+MiniLM arm and **`tfidf_char_wb_3_5_v1`** for the TF-IDF arm. Each names what
+would have to change for the number to mean something different: a differently
+produced export, or a different frozen vectoriser recipe.
+*Now — the `TextEmbedder` protocol.* It declares exactly
+`embed(texts: Sequence[str]) -> np.ndarray`, `model_version: str`,
+`embedding_dimension: int` and `embedding_model_id: str`. **numpy stays
+`TYPE_CHECKING`-only in `ml/base.py`**, so the module Django imports at startup
+still imports nothing heavy at run time. **The protocol has no `fit`**: each arm
+is constructed already fitted — TF-IDF through `fit_tfidf(train_texts, config)`,
+MiniLM through `load_minilm(...)` — so an unfitted embedder is not a state that
+can exist, and there is no embed-before-fit path to define. `embed` accepts
+**non-empty strings only**: an empty or whitespace-only string raises
+`ValueError`, and a non-string element raises `ValueError`. Output is **dense
+`float32`, one row per input, in input order, L2-normalised**, and
+`embedding_dimension` is read from that output.
+*Now — reproducibility, claimed exactly as far as it holds.* Given identical
+**model bytes, tokenizer bytes, dependency versions, execution provider,
+configuration and inputs**, the benchmark reproduces: the same embeddings, the
+same rankings, the same recall figures. **No claim of bitwise identity across
+arbitrary machines is made** — plan §R already declines that claim for
+BLAS-backed operations, and ONNX Runtime is subject to the same reality. Those
+six conditions are recorded in the benchmark report, so a discrepancy can be
+attributed rather than argued about.
+*Now — dimension validation.* The index records the dimension it was built with,
+and every subsequent embedding is validated against it. A mismatch raises
+**`EmbeddingDimensionMismatch`**. There is no broadcasting, no truncation, no
+padding, no warn-and-continue and no silent comparison of vectors of different
+widths (D18).
+*Now — boundaries, tests and CI.* **`ml/embedders/` joins `ingest/` and
+`ml/training/` in the Django-independence assertion** of
+`tests/test_import_boundaries.py`; it is already forbidden to serving, and the
+missing half of that guard is closed here. **Every Task 18 test is marked `ml`**,
+so CI's existing ML job selects them and **no CI workflow is modified**.
+**`tokenizers==0.23.2` is the only new dependency and it enters
+`requirements/ml.txt` alone**; `base.txt` is untouched, so the production runtime
+budget is unaffected in Phase 2.
+*Why:* §5.3's comparison is worth running only if the single difference between
+the arms is the representation, and that is a property of values, not of prose.
+Freezing every constant in one shared object — and generating the perturbations
+once, outside both arms — makes divergence require editing the thing both arms
+read, which is what plan §N asked for. Pinning the checkpoint together with its
+tokenizer, by digest, keeps a published number traceable to exact bytes while
+keeping a large binary out of a public repository and out of every ordinary test.
+Naming the three sequence limits separately prevents the quiet failure this
+investigation actually found: a packaged tokenizer that would have truncated at
+128 while the decision said 256. Declining to write an artifact keeps D35's
+closed schema and its closed spec tuple untouched by a task that has no model to
+serve, and leaves the embedder-artifact question to the phase that serves one.
+*Scope:* Task 18 only. D1–D37 are unaltered; D18 is clarified as to where its
+fields are recorded in Phase 2 and is otherwise unchanged, its dimension
+discipline remaining binding. Unchanged and untouched: `ml/registry.py`,
+`ml/null.py`, `Match`, `DedupIndex` and every serving path; `ml/training/metrics.py`
+and `tests/ml/training/test_metrics.py`; `ml/training/artifacts.py`; Task 16's
+`triage.py` and its tests; Task 17's `risk.py`, `ingest/storage.py`,
+`ingest/manifest.py`, `ingest/cli.py` and their tests. The only changes outside
+Task 18's plan file list are the single `tokenizers==0.23.2` line in
+`requirements/ml.txt`, the one-tuple addition in `tests/test_import_boundaries.py`,
+and one `.gitignore` line excluding `tokenizer.json` under the external MiniLM
+asset directory. No other dependency is added and no CI workflow changes.
