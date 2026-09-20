@@ -18,7 +18,13 @@ never an order read from the model object.
 **The load guard.** Loading checks every stored feature name against what this
 environment can produce, through Task 12's public `build_features`, and raises
 `FeatureSpecMismatch` naming every name it cannot — before the model is
-unpickled. The artifact binds the spec but never aggregate values: a spec naming
+unpickled. One closed exception exists (D36): `TRIAGE_TFIDF_V1` names ordered
+text *blocks* whose fitted vectorisers travel inside the artifact, so Task 12 is
+never consulted for it and the artifact's own model rebuilds them through
+``build_feature_blocks(texts)``, in the representation it produced. That spec is a
+constant, not a registry, and a spec may not mix its names with Task 12's.
+
+The artifact binds the spec but never aggregate values: a spec naming
 Task 11's aggregate columns needs the caller to pass ``aggregates`` to
 `LoadedArtifact.build_features`, and without them Task 12 raises
 `FeatureUnavailable` (the "primary artifact cannot score CFPB" case, plan Task 19).
@@ -64,7 +70,6 @@ from types import MappingProxyType
 from typing import Any
 
 import joblib
-import numpy as np
 
 from ingest.schema import CorpusRecord
 from ml.training import features
@@ -104,6 +109,35 @@ _OPTIONAL_FIELDS = (
 )
 """Plan §P's embedder and experiment fields: absent, or present and valid."""
 
+TRIAGE_TFIDF_V1 = features.FeatureSpec(
+    names=("tfidf_word_1_2", "tfidf_char_3_5"),
+    version="triage_tfidf_v1",
+)
+"""D36: the one artifact-produced spec. Its names are ordered feature *blocks*, not
+columns, and the fitted vectorisers that produce them travel inside ``model.joblib``
+rather than being computable from a corpus record by Task 12."""
+
+_ARTIFACT_PRODUCED_SPECS = (TRIAGE_TFIDF_V1,)
+"""Deliberately a closed tuple. D36 forbids turning this into a registry of
+arbitrary feature builders, so growing it is a spec decision, not a code change."""
+
+_TEXT_BLOCK_NAMES = frozenset(name for spec in _ARTIFACT_PRODUCED_SPECS for name in spec.names)
+
+_BLOCK_PROTOCOL = "build_feature_blocks"
+"""What an artifact-produced spec asks of its own model: ``(texts) -> matrix``."""
+
+
+def _artifact_produced(spec: features.FeatureSpec) -> bool:
+    """Whether the artifact's own model builds this spec, rather than Task 12.
+
+    The **complete** spec must match. `FeatureSpec` is frozen, so equality already
+    means the same names in the same order under the same version, and the names
+    alone are deliberately not enough: a document declaring the text blocks under
+    some other version would otherwise enter this path while its metadata said it
+    was something else (D36).
+    """
+    return any(spec == known for known in _ARTIFACT_PRODUCED_SPECS)
+
 
 class ArtifactSchemaError(ValueError):
     """An artifact's metadata or location breaks the schema D35 fixes."""
@@ -127,12 +161,22 @@ class LoadedArtifact:
         self,
         records: Sequence[CorpusRecord],
         aggregates: AggregateColumns | None = None,
-    ) -> np.ndarray:
-        """Task 12's feature matrix for this artifact's spec, and no other.
+    ) -> Any:
+        """The feature matrix for this artifact's spec, and no other.
 
         ``aggregates`` are the caller's out-of-fold or frozen training aggregates;
-        the artifact never stores them.
+        the artifact never stores them. For an artifact-produced spec (D36) the
+        matrix comes from the artifact's own model and is returned in whatever
+        representation that model produced -- sparse stays sparse -- while every
+        other spec is built by Task 12 exactly as before.
         """
+        if _artifact_produced(self.feature_spec):
+            if aggregates is not None:
+                raise ValueError(
+                    f"{self.feature_spec.version} is a text spec and uses no aggregates; "
+                    "pass aggregates=None (D36)"
+                )
+            return self.model.build_feature_blocks([record.text for record in records])
         return features.build_features(records, aggregates, self.feature_spec)
 
 
@@ -201,16 +245,30 @@ def load_artifact(path: str | os.PathLike[str]) -> LoadedArtifact:
     model_file = target / _MODEL_FILENAME
     if not model_file.is_file():
         raise FileNotFoundError(f"{model_file} does not exist")
-    return LoadedArtifact(
-        model=joblib.load(model_file), metadata=_read_only(document), feature_spec=spec
-    )
+    model = joblib.load(model_file)
+    # An artifact-produced spec is only honest if the model can actually rebuild it.
+    # This is the one check that must follow the unpickle, because it is a question
+    # about the model object rather than about the environment.
+    if _artifact_produced(spec) and not callable(getattr(model, _BLOCK_PROTOCOL, None)):
+        raise FeatureSpecMismatch(
+            f"the artifact declares {spec.version}, whose features its own model must "
+            f"produce, but the model exposes no {_BLOCK_PROTOCOL}(texts) method"
+        )
+    return LoadedArtifact(model=model, metadata=_read_only(document), feature_spec=spec)
 
 
 # --- the feature guard ---------------------------------------------------------------
 
 
 def _require_producible(spec: features.FeatureSpec) -> None:
-    """Every stored name must be buildable here, asked of Task 12 one name at a time."""
+    """Every stored name must be buildable here, asked of Task 12 one name at a time.
+
+    An artifact-produced spec (D36) is exempt and Task 12 is never consulted for it:
+    its features come from the fitted objects inside this artifact, so there is
+    nothing in the environment that could be missing.
+    """
+    if _artifact_produced(spec):
+        return
     no_rows = AggregateColumns(category_mean_resolution_hours=(), category_breach_rate=())
     unavailable = []
     for name in spec.names:
@@ -310,6 +368,26 @@ def _validate(document: Mapping[str, Any]) -> None:
             if document[field] is None:
                 raise ArtifactSchemaError(f"{field} must not be null when present")
             _CHECKS[field](field, document[field])
+    _require_whole_text_spec(document)
+
+
+def _require_whole_text_spec(document: Mapping[str, Any]) -> None:
+    """A text-block spec carries its own version; the pair is the spec (D36).
+
+    Checked here rather than in `_feature_names` because no single-field checker
+    sees both fields, and checked at all because the names alone decide which
+    builder an artifact gets: written without this, a document naming the blocks
+    under another version would be publishable and then fail only at load.
+    """
+    names = tuple(document["feature_spec"])
+    version = document["feature_spec_version"]
+    for spec in _ARTIFACT_PRODUCED_SPECS:
+        if names == spec.names and version != spec.version:
+            raise ArtifactSchemaError(
+                f"feature_spec names the {spec.version} text blocks but "
+                f"feature_spec_version is {version!r}; the names and the version are "
+                f"one spec, and only {spec.version!r} names these blocks"
+            )
 
 
 def _non_empty_string(field: str, value: Any) -> None:
@@ -347,6 +425,20 @@ def _feature_names(field: str, value: Any) -> None:
             raise ArtifactSchemaError(f"{field} holds {name!r}, which is not a non-empty string")
     if len(set(value)) != len(value):
         raise ArtifactSchemaError(f"{field} repeats a feature name: {value!r}")
+    blocks = [name for name in value if name in _TEXT_BLOCK_NAMES]
+    if not blocks:
+        return
+    if len(blocks) != len(value):
+        raise ArtifactSchemaError(
+            f"{field} mixes the text blocks {blocks!r} with feature names Task 12 "
+            "builds; a spec is wholly artifact-produced or wholly environment-produced"
+        )
+    if not any(tuple(value) == spec.names for spec in _ARTIFACT_PRODUCED_SPECS):
+        known = [list(spec.names) for spec in _ARTIFACT_PRODUCED_SPECS]
+        raise ArtifactSchemaError(
+            f"{field} is {value!r}, which is not a complete text-block spec; the "
+            f"only ones are {known!r}, in that order"
+        )
 
 
 def _presence_only(field: str, value: Any) -> None:

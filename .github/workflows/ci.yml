@@ -40,28 +40,11 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements/train.txt -r requirements/dev.txt
+      # Task 16 gave the 'ml' marker its first users, so the exit-code-5
+      # tolerance that stood here is gone: an empty selection now means a
+      # mis-typed marker, and the job must fail on it like any other error.
       - name: ML tests
-        run: |
-          set +e
-          pytest -m ml
-          rc=$?
-          set -e
-
-          # 5 = NO_TESTS_COLLECTED. The ml marker has no users until the first
-          # model-artifact tests land (plan Task 16), so an empty selection is
-          # the correct state today rather than a failure. Every other exit code
-          # propagates: 1 for test failures, 2 for interruption, 3 and 4 for
-          # internal and usage errors. This is an explicit return-code check,
-          # never a blanket suppression of failure.
-          #
-          # REMOVE THIS TOLERANCE AT TASK 16. Once ml-marked tests exist, an
-          # empty selection means a mis-typed marker, and the job must fail.
-          if [ "$rc" -eq 5 ]; then
-            echo "::notice::No ml-marked tests yet (expected before Task 16)."
-            exit 0
-          fi
-
-          exit "$rc"
+        run: pytest -m ml
 
       # The corpus storage and manifest tests need pyarrow, which lives in
       # requirements/train.txt. They are deliberately NOT marked 'ml': that

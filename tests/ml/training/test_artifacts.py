@@ -22,6 +22,7 @@ import pytest
 np = pytest.importorskip("numpy", reason="numpy lives in requirements/ml.txt")
 pytest.importorskip("joblib", reason="joblib lives in requirements/ml.txt")
 linear_model = pytest.importorskip("sklearn.linear_model", reason="scikit-learn is in ml.txt")
+sparse = pytest.importorskip("scipy.sparse", reason="scipy arrives with scikit-learn")
 
 from ingest.schema import CorpusRecord  # noqa: E402
 from ml.training import artifacts  # noqa: E402
@@ -796,3 +797,234 @@ def test_the_serving_registry_does_not_use_artifacts():
     }
     assert not any(name.startswith("ml.training") for name in imported)
     assert "load_artifact" not in (root / "ml" / "registry.py").read_text(encoding="utf-8")
+
+
+# --- the D36 triage compatibility seam ---------------------------------------------------
+#
+# RED until the seam exists. D36 authorises exactly one additive extension to this
+# module: the two Task 16 text-block names validate at load and rebuild through
+# `LoadedArtifact.build_features`, with Task 12's vocabulary and behaviour untouched.
+# Everything above this line is the Task 15 contract and must keep passing unchanged.
+
+TRIAGE_NAMES = ["tfidf_word_1_2", "tfidf_char_3_5"]
+
+
+class TriageBlockModel:
+    """A picklable stand-in for Task 16's pipeline: it rebuilds its own blocks.
+
+    The seam asks the artifact's own model for its design matrix, because a text
+    model's features travel inside ``model.joblib`` rather than being computable
+    from a corpus record by Task 12.
+    """
+
+    def build_feature_blocks(self, texts):
+        return np.array([[float(len(text)), float(text.count("x")), 1.0] for text in texts])
+
+    def predict(self, X):
+        return X[:, 0]
+
+
+class SparseBlockModel:
+    """A block model whose blocks are sparse, as a fitted `TfidfVectorizer`'s are."""
+
+    def build_feature_blocks(self, texts):
+        return sparse.csr_matrix(
+            np.array([[float(len(text)), 0.0, float(text.count("x"))] for text in texts])
+        )
+
+    def predict(self, X):
+        return np.asarray(X.sum(axis=1)).ravel()
+
+
+class ModelWithoutTheProtocol:
+    """A model that declares text blocks but cannot produce them."""
+
+    def predict(self, X):
+        return X[:, 0]
+
+
+def triage_metadata(**overrides):
+    document = metadata(feature_spec=list(TRIAGE_NAMES), feature_spec_version="triage_tfidf_v1")
+    document.update(overrides)
+    return document
+
+
+def test_the_triage_spec_constant_names_the_two_blocks_in_order():
+    """D36 fixes the names, their order and the version string."""
+    spec = artifacts.TRIAGE_TFIDF_V1
+    assert spec.names == ("tfidf_word_1_2", "tfidf_char_3_5")
+    assert spec.version == "triage_tfidf_v1"
+
+
+def test_a_risk_spec_still_loads_and_builds_exactly_as_before(tmp_path):
+    """Regression: the seam must not alter Task 12's path. Mutation: route all specs."""
+    document = metadata(
+        feature_spec=list(RISK_FEATURES_V1.names), feature_spec_version="risk_features_v1"
+    )
+    loaded = load_artifact(write(tmp_path, document))
+    aggregates = AggregateColumns((1.0, 2.0, 3.0, 4.0), (0.1, 0.2, 0.3, 0.4))
+    built = loaded.build_features(records(), aggregates)
+    assert np.array_equal(built, build_features(records(), aggregates, RISK_FEATURES_V1))
+
+
+def test_a_transfer_spec_still_loads_and_builds_exactly_as_before(tmp_path):
+    """Regression: the three-feature probe spec is untouched by the seam."""
+    document = metadata(
+        feature_spec=list(TRANSFER_FEATURES_V1.names),
+        feature_spec_version=TRANSFER_FEATURES_V1.version,
+    )
+    loaded = load_artifact(write(tmp_path, document))
+    assert loaded.feature_spec == TRANSFER_FEATURES_V1
+    assert np.array_equal(
+        loaded.build_features(records()), build_features(records(), None, TRANSFER_FEATURES_V1)
+    )
+
+
+def test_an_unknown_feature_name_still_raises_naming_it(tmp_path):
+    """The seam is a closed set, not an open door. Mutation: skip the guard entirely."""
+    path = write(tmp_path, metadata(feature_spec=["submitted_hour", "invented_feature"]))
+    with pytest.raises(FeatureSpecMismatch, match="invented_feature"):
+        load_artifact(path)
+
+
+def test_queue_depth_still_fails_to_load_after_the_seam(tmp_path):
+    """Plan Task 15's acceptance fixture must survive Task 16 unchanged."""
+    path = write(tmp_path, metadata(feature_spec=["submitted_hour", "queue_depth"]))
+    with pytest.raises(FeatureSpecMismatch, match="queue_depth"):
+        load_artifact(path)
+
+
+def test_a_triage_spec_loads_without_consulting_task_twelve(tmp_path, monkeypatch):
+    """The text blocks are produced by the artifact, so Task 12 is never asked.
+
+    Mutation: probe the triage names through ``features.build_features``, which
+    would raise `FeatureUnavailable` for both of them.
+    """
+    path = write(tmp_path, triage_metadata(), model=TriageBlockModel())
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Task 12 feature assembly was consulted for a text spec")
+
+    monkeypatch.setattr(artifacts.features, "build_features", forbidden)
+    loaded = load_artifact(path)
+    assert loaded.feature_spec.names == tuple(TRIAGE_NAMES)
+
+
+def test_a_triage_artifact_rebuilds_its_blocks_through_its_own_model(tmp_path):
+    """`build_features` routes to the stored model. Mutation: return an empty matrix."""
+    model = TriageBlockModel()
+    loaded = load_artifact(write(tmp_path, triage_metadata(), model=model))
+    built = loaded.build_features(records())
+    expected = model.build_feature_blocks([record.text for record in records()])
+    assert np.array_equal(np.asarray(built), expected)
+
+
+def test_a_spec_mixing_a_text_block_with_a_task_twelve_name_is_refused(tmp_path):
+    """A spec is wholly artifact-produced or wholly environment-produced, never both."""
+    document = triage_metadata(feature_spec=["tfidf_word_1_2", "text_length"])
+    with pytest.raises(ArtifactSchemaError, match="tfidf_word_1_2"):
+        write_artifact(TriageBlockModel(), document, tmp_path / "nyc311" / "probe" / "v1")
+
+
+def test_a_partial_text_block_spec_is_refused(tmp_path):
+    """Naming one block without the other would describe a matrix that never existed."""
+    document = triage_metadata(feature_spec=["tfidf_word_1_2"])
+    with pytest.raises(ArtifactSchemaError, match="tfidf_char_3_5"):
+        write_artifact(TriageBlockModel(), document, tmp_path / "nyc311" / "probe" / "v1")
+
+
+def test_a_triage_model_without_the_block_protocol_fails_loudly_at_load(tmp_path):
+    """An artifact that cannot rebuild its declared features is refused, not half-loaded."""
+    path = write(tmp_path, triage_metadata(), model=ModelWithoutTheProtocol())
+    with pytest.raises(FeatureSpecMismatch, match="build_feature_blocks"):
+        load_artifact(path)
+
+
+def test_passing_aggregates_to_a_text_spec_raises_rather_than_being_ignored(tmp_path):
+    """D36: a text artifact refuses aggregates; it never discards them quietly."""
+    loaded = load_artifact(write(tmp_path, triage_metadata(), model=TriageBlockModel()))
+    aggregates = AggregateColumns((1.0, 2.0, 3.0, 4.0), (0.1, 0.2, 0.3, 0.4))
+    with pytest.raises(ValueError, match="aggregates"):
+        loaded.build_features(records(), aggregates)
+    # The control: without aggregates the same call succeeds, so the refusal above
+    # is about the argument rather than about text specs being unbuildable.
+    assert loaded.build_features(records(), None).shape[0] == len(records())
+
+
+def test_the_seam_returns_a_sparse_block_matrix_unchanged(tmp_path):
+    """D36: the representation sklearn produced survives the artifact round trip.
+
+    Mutation: ``np.asarray(...)`` or ``.toarray()`` inside the seam, which would
+    turn a narrow sparse design matrix into a dense corpus-by-vocabulary one.
+    """
+    model = SparseBlockModel()
+    loaded = load_artifact(write(tmp_path, triage_metadata(), model=model))
+    built = loaded.build_features(records())
+    assert sparse.issparse(built)
+    expected = model.build_feature_blocks([record.text for record in records()])
+    assert built.shape == expected.shape
+    assert (built != expected).nnz == 0
+
+
+# --- the text spec is its names AND its version (D36) ---------------------------------------
+
+
+def test_the_complete_triage_spec_loads_and_routes_to_its_own_model(tmp_path):
+    """The seam recognises the whole spec, so the loaded value equals the constant."""
+    loaded = load_artifact(write(tmp_path, triage_metadata(), model=TriageBlockModel()))
+    assert loaded.feature_spec == artifacts.TRIAGE_TFIDF_V1
+    assert loaded.feature_spec.names == artifacts.TRIAGE_TFIDF_V1.names
+    assert loaded.feature_spec.version == "triage_tfidf_v1"
+    built = loaded.build_features(records())
+    expected = TriageBlockModel().build_feature_blocks([record.text for record in records()])
+    assert np.array_equal(np.asarray(built), expected)
+
+
+@pytest.mark.parametrize(
+    "version", ["triage_tfidf_v999", "triage_tfidf_v2", "risk_features_v1", "tfidf"]
+)
+def test_the_text_block_names_under_another_version_are_refused_at_write(tmp_path, version):
+    """D36: the names alone must not be enough to enter the artifact-produced path.
+
+    Mutation: compare only ``spec.names`` in the seam, which would let this
+    document be published and then quietly use the text builder anyway.
+    """
+    path = tmp_path / "nyc311" / "probe" / "v1"
+    with pytest.raises(ArtifactSchemaError, match=version):
+        write_artifact(TriageBlockModel(), triage_metadata(feature_spec_version=version), path)
+    assert not path.exists() or not any(path.iterdir())
+
+
+def test_the_text_block_names_under_another_version_are_refused_at_load(tmp_path):
+    """The hand-edited file is the realistic case, so the loader refuses it too."""
+    path = write(tmp_path, triage_metadata(), model=TriageBlockModel())
+    rewrite_metadata(path, json.dumps(triage_metadata(feature_spec_version="triage_tfidf_v999")))
+    with pytest.raises(ArtifactSchemaError, match="triage_tfidf_v999") as caught:
+        load_artifact(path)
+    assert "triage_tfidf_v1" in str(caught.value), "the message must name the one valid version"
+
+
+def test_a_version_mismatch_is_refused_before_the_model_is_unpickled(tmp_path):
+    """Nothing about the model is consulted: the pair is wrong on its face."""
+    path = write(tmp_path, triage_metadata(), model=UnpicklesLoudly())
+    rewrite_metadata(path, json.dumps(triage_metadata(feature_spec_version="other_v1")))
+    with pytest.raises(ArtifactSchemaError, match="other_v1"):
+        load_artifact(path)
+
+
+def test_the_task_twelve_specs_are_untouched_by_the_version_rule(tmp_path):
+    """The paired check applies only to text blocks; risk and transfer are unaffected.
+
+    A risk spec under an unusual version string still loads and still builds through
+    Task 12, because no text-block name appears in it.
+    """
+    document = metadata(
+        feature_spec=list(RISK_FEATURES_V1.names), feature_spec_version="risk_features_v7"
+    )
+    loaded = load_artifact(write(tmp_path, document))
+    assert loaded.feature_spec.version == "risk_features_v7"
+    aggregates = AggregateColumns((1.0, 2.0, 3.0, 4.0), (0.1, 0.2, 0.3, 0.4))
+    assert np.array_equal(
+        loaded.build_features(records(), aggregates),
+        build_features(records(), aggregates, loaded.feature_spec),
+    )
