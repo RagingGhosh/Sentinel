@@ -2122,3 +2122,229 @@ frozen aggregate paths where D31 put them.
 and nothing is wired into serving; triage and embedder feature semantics are
 deferred to Tasks 16 and 18; the one CI test-path line is the only change outside
 `ml/training/` and its tests; D1–D34 are unaltered.
+**D36 — Task 16 CFPB triage: TF-IDF blocks declared in the artifact, argmax
+metrics beside a separate abstention rate, a derived alphabetical roster order and
+frozen hyperparameters (§1, §1.1, §5.1, §5.2, §6.1, §6.2, D12, D34, D35, plan §M,
+plan §P, plan §R, plan Task 16).**
+*Was:* plan §M fixed the recipe — word and character TF-IDF fitted on train text
+only, into `LogisticRegression` wrapped in `CalibratedClassifierCV`, against the
+derived roster, with macro-F1 as the headline and an abstention threshold tuned on
+validation. D35 deferred what `feature_spec` means for a text artifact, and plan
+Task 16 simultaneously required an artifact per §P and forbade changing the
+artifact module — which together were unsatisfiable, because Task 15's load guard
+probes every stored feature name through Task 12's five-name vocabulary and would
+refuse any name a TF-IDF model could honestly declare. Left open besides: what
+quantity abstention thresholds and how an abstained record enters a metric; where
+the fitted threshold is recorded; the artifact's name, version and experiment
+label; the roster's order, which D34 makes decisive for five published figures;
+whether class weighting or resampling applies to a 77%-majority target; every
+estimator hyperparameter except the two n-gram ranges; and where the fixture
+corpus is generated.
+*Now — the text feature contract.* The triage artifact declares
+`feature_spec = ["tfidf_word_1_2", "tfidf_char_3_5"]` with
+`feature_spec_version = "triage_tfidf_v1"`, the word block before the character
+block. These names denote ordered **feature blocks**, not columns: a triage
+spec describes the design matrix's block structure and its order, where Task 12's
+names each denote exactly one column. That difference is the contract, not an
+accident of width, and it is why a triage spec is two names long while its matrix
+is not two columns wide.
+*Now — the compatibility seam.* A minimal additive extension to
+`ml/training/artifacts.py` is authorised, so that those two names validate under
+`load_artifact` and rebuild through `LoadedArtifact.build_features`. It is bounded
+in four directions: the recognised text-block spec is a **closed constant**, never
+a generic registry of arbitrary feature builders; Task 12's vocabulary, ordering
+and `FeatureUnavailable` behaviour are unchanged, and a risk or transfer spec
+still resolves exactly as it does today; no artifact file, metadata field or
+filename is added, so D35's schema and layout stand unaltered; and nothing is
+wired into `ml/registry.py` or any serving path. This supersedes plan Task 16's
+"must not change: metrics or artifact modules" **only** to the extent of this
+seam. `ml/training/metrics.py` is not changed at all.
+*Now — abstention, and what it does not touch.* Confidence is the maximum
+calibrated class probability, and a record is abstained when that confidence is
+strictly below the fitted threshold. Task 14's classification metrics are computed
+over the **complete** evaluation population from the argmax class prediction:
+macro-F1, the per-class report, the confusion matrix and top-3 accuracy all see
+every record, abstained or not. No `abstain` label joins the roster, and no
+abstention sentinel is ever passed to a metric function — both would make the
+published macro-F1 describe a different population than the one the model scored.
+Top-3 accuracy is computed from the calibrated score matrix, whose columns follow
+the roster order below. The abstention rate is reported as its own figure beside
+the metrics, never folded into one.
+*Now — the abstention objective is deferred, not chosen.* The threshold is tuned
+on validation and applied unchanged to test (§6.2), but the tuning procedure
+itself is **explicitly unresolved**: the candidate grid, the objective being
+optimised, whether abstained records are excluded from that objective, any minimum
+coverage requirement, and the deterministic tie-break among equal-scoring
+candidates. No implementation may select any of these; until they are decided
+here, Task 16's threshold fitting has no specification.
+*Now — threshold metadata.* The fitted value is recorded in the existing nullable
+`thresholds` object as `{"abstention": {"value": <threshold>, "quantity":
+"max_calibrated_probability"}}`. No new top-level artifact field is introduced,
+and D35's closed schema therefore still refuses every unknown key.
+*Now — artifact identity.* `model_name` is `"cfpb_triage_tfidf"`, `model_version`
+is `"v1"`, and `experiment_label` is `"cfpb triage tfidf logistic regression"`.
+The version directory is consequently `.../cfpb_triage_tfidf/v1/`, which is what
+D35's lexical directory check compares against.
+*Now — roster order, derived.* The CFPB label list is never transcribed into code
+(§1.1). The order is derived at runtime as `tuple(sorted(manifest.label_roster))`
+and that one order governs everything D34 says it must: the classifier's class
+ordering, the per-class report, the confusion matrix's rows and columns, macro-F1,
+the top-k score columns, top-k tie-breaking, majority-baseline tie-breaking, and
+the `label_roster` written to metadata.
+*Now — class imbalance.* `class_weight=None` and no resampling of any period. The
+~77% majority class is reported beside its majority-class and stratified-random
+baselines (§5.1), which is what §1.1 means by accepting residual imbalance rather
+than engineering it away.
+*Now — hyperparameters, frozen rather than tuned.* The word vectoriser is
+`analyzer="word"`, `ngram_range=(1, 2)`; the character vectoriser is
+`analyzer="char"`, `ngram_range=(3, 5)`; the word block is combined before the
+character block. `LogisticRegression` takes `C=1.0`, `solver="lbfgs"`,
+`max_iter=1000`, `class_weight=None` and an explicit `random_state`.
+`CalibratedClassifierCV` takes `method="sigmoid"`, `cv=5` and `ensemble=True`.
+There is **no hyperparameter search**: the only quantity tuned in Task 16 is the
+abstention threshold. Every parameter not named here takes the pinned
+scikit-learn default, and `dependency_versions` records the versions that supplied
+those defaults, so a default that moves between releases is visible in the
+artifact rather than silent.
+*Now — determinism, stated accurately.* The pinned scikit-learn 1.9.0 exposes no
+`random_state` on `CalibratedClassifierCV`; its parameters are `estimator`,
+`method`, `cv`, `n_jobs` and `ensemble`. An integer `cv` selects a non-shuffled
+`StratifiedKFold`, so calibration is already deterministic given a fixed input
+order, which plan §R's deterministic corpus ordering supplies. `lbfgs` is likewise
+deterministic, so `LogisticRegression`'s `random_state` is recorded for
+provenance rather than because it changes a result. The seeds actually governing a
+published figure — the estimator seed and the stratified baseline's required seed
+— are recorded in `seeds`. Plan §R's cross-platform caveat is unchanged.
+*Now — `warmup_row_count`.* `null` for this artifact. Warm-up is a property of
+forward-chaining out-of-fold aggregate construction (§6.3, D30), and triage has no
+target-derived feature, so there is no warm-up prefix to count. This is exactly
+D35's "not applicable to this kind of artifact" case.
+*Now — the fixture corpus.* Task 16 adds no fixture-generator module. The
+controlled corpus is generated inside
+`tests/ml/training/test_triage_experiment.py` into a temporary directory, written
+through the ordinary corpus path so `load_corpus` verifies it, and no generated
+data is committed.
+*Now — CI.* Task 16 removes the exit-code-5 tolerance from the `ml` job, restoring
+the step to a plain `pytest -m ml`. The marker gains its first users here, so an
+empty selection now means a mis-typed marker rather than an expected state. No
+other CI change is made; the triage tests are selected by the marker and need no
+path entry.
+*Why:* every clause here fixes a number or a name that a later reader would
+otherwise have to reverse-engineer from code. Declaring blocks rather than columns
+keeps `feature_spec` an honest description of what the model consumes while
+leaving D12's guarantee intact — a text artifact still cannot be handed a matrix
+it was not trained on. Keeping metrics over the complete population makes the
+headline comparable with every other model in this project and keeps abstention a
+reported operating choice rather than a quiet population filter, which is the
+mechanism by which a coverage policy would otherwise flatter a macro-F1. Deriving
+the roster order from the manifest keeps §1.1's prohibition on transcribed label
+lists true in the one place where an order, not just a membership, is published.
+Freezing the hyperparameters keeps Task 16 an experiment whose result is
+attributable to the recipe rather than to a search nobody recorded.
+*Scope:* Task 16 only, and the abstention tuning objective remains open within it.
+Tasks 9–15 keep their behaviour; `ml/training/metrics.py` is untouched; Task 12's
+feature vocabulary is untouched; the authorised change to
+`ml/training/artifacts.py` is limited to the compatibility seam above; no
+dependency is added; `ml/registry.py`, serving, Django and the database schema are
+untouched; the one CI tolerance removal is the only change outside `ml/training/`
+and its tests; and D1–D35 are unaltered.
+*Now — the abstention threshold, completed. This clause supersedes the paragraph
+above beginning "the abstention objective is deferred, not chosen", and discharges
+the caveat in the scope line above; D36 is no longer open in any part.* Confidence
+remains the maximum calibrated class probability, and a record is abstained when
+that confidence is strictly below the threshold. The threshold is selected on the
+validation period alone, as follows.
+The **candidate grid is fixed** at `0.00, 0.05, 0.10, …, 0.95` — twenty candidates,
+arithmetic, inclusive of `0.00` and stopping at `0.95`. It is not derived from the
+data, so the search space cannot drift with the corpus.
+Each candidate is evaluated on the **validation period only**. A candidate retains
+the validation records whose confidence is greater than or equal to it, and a
+candidate is **feasible** when its retained set covers at least **70% of
+validation records**. A candidate whose retained set is empty is invalid, never
+merely unfeasible.
+**The 70% minimum retained coverage is a Sentinel project design constant
+introduced here by D36.** It is not derived from §5, §6, plan §M or any measured
+quantity, and it must not be attributed to an earlier source. Without it the
+selection is degenerate: the highest thresholds retain only the handful of
+most-confident records and score near-perfectly on them.
+Among feasible candidates the selected threshold **maximises macro-F1 on the
+retained, non-abstained validation subset**, computed through Task 14 with the
+**complete project label roster** supplied in the established deterministic roster
+order — `tuple(sorted(manifest.label_roster))` — so that a class emptied by
+filtering still enters the macro average at D34's explicit `0.0` rather than
+disappearing from the denominator. Where two or more feasible candidates score an
+identical retained macro-F1, the **lowest** threshold is selected, which is the one
+retaining the most records. That tie-break is not decorative: on a small corpus
+adjacent grid points frequently retain the identical record set.
+The selected value is the fitted abstention threshold, recorded in `thresholds` as
+already specified, and is **applied unchanged to the test period** (§6.2).
+This objective is an **internal validation-selection criterion, not a published
+Task 14 metric.** The retained-subset macro-F1 is never reported as the model's
+macro-F1, and it is not added to the artifact's `metrics`. Published evaluation is
+exactly what Task 14 and §5.2 already fix: macro-F1, per-class
+precision/recall/F1/support, the confusion matrix, top-3 accuracy, each beside its
+required baselines, **all computed over the complete test population using argmax
+class predictions**. Abstention adds no label, removes no row from a published test
+metric, and does not alter the label roster.
+Everything else already decided in D36 stands unchanged: the two-name
+`feature_spec` and its `triage_tfidf_v1` version, `model_name`
+`"cfpb_triage_tfidf"`, `model_version` `"v1"`, `experiment_label` `"cfpb triage
+tfidf logistic regression"`, the alphabetically derived roster order,
+`class_weight=None` with no resampling, the frozen hyperparameters, a `null`
+`warmup_row_count`, the fixture corpus generated inside the test module, and the
+bounded artifact compatibility seam. The determinism correction stands too: the
+pinned scikit-learn 1.9.0 accepts no `random_state` on `CalibratedClassifierCV`,
+`cv=5` is used as specified and yields the deterministic non-shuffled
+`StratifiedKFold`, and `LogisticRegression` receives its explicit `random_state`.
+*Scope of this clause:* Task 16's abstention threshold only. No published metric,
+metric function, roster, artifact field or earlier decision changes; Tasks 9–15
+keep their behaviour; and D1–D35 remain unaltered.
+*Now — four details closed before implementation, surfaced by the Task 16 RED
+tests. This is a further completion of D36, not a new decision.*
+**The abstention selector's signature.** Threshold selection is a separable
+function whose shape is fixed here:
+
+```
+select_abstention_threshold(confidences, y_true, y_pred, roster, *, train_labels, seed)
+```
+
+The first four parameters are positional; `train_labels` and `seed` are
+keyword-only. The two extra parameters are not convenience: D36's objective scores
+each retained subset **through Task 14**, and `macro_f1` structurally requires a
+`majority` and a `stratified` baseline. D34 fixes both priors to **training labels
+only**, and the stratified baseline requires an explicit seed and a draw whose
+count matches the candidate's retained size, so a fresh draw is made per candidate
+from that one seed. The selector therefore **must not infer a prior from validation
+or test labels**; passing no training labels is an error rather than an invitation
+to fall back on the evaluation population.
+**The text feature blocks stay in their natural representation.** A fitted
+`TfidfVectorizer` produces a SciPy sparse matrix, and the fitted classifier
+consumes one directly. `build_feature_blocks(texts)` therefore returns exactly what
+the two fitted vectorisers produce, horizontally stacked with the **word block
+first and the character block second**, and **no densification is performed merely
+to satisfy a type annotation**. The compatibility seam passes that representation
+through the existing public artifact API unchanged. Densifying a TF-IDF matrix for
+appearance's sake would turn a narrow, sparse design matrix into a dense one whose
+size is the product of the corpus and the vocabulary, which is a real cost paid for
+nothing.
+**Aggregates are refused, never ignored.** A triage artifact is text-only.
+`LoadedArtifact.build_features(records, aggregates=...)` with a non-`None`
+`aggregates` raises `ValueError`, and the message names `aggregates`. Silently
+discarding a supplied argument is the defect class this project refuses
+everywhere else, and it would let a caller believe an aggregate influenced a
+score that never saw it.
+**`abstention_rate` is ancillary, and lives inside `metrics`.** D35's schema is
+closed and D36 fixes `thresholds` to exactly the abstention-threshold object, so
+the rate is recorded under the existing `metrics` object at the period it
+describes, in a field named `abstention_rate`. No new top-level metadata field is
+created. It is **not** a member of the Task 14 metric set, **not** the headline,
+and it neither replaces nor alters macro-F1, the per-class report, the confusion
+matrix or top-3 accuracy — all four of which remain computed over the complete
+evaluation population from argmax predictions, exactly as this decision already
+fixed. It is computed **after** the frozen, validation-selected threshold has been
+applied, as the share of that period's records whose confidence falls below it, and
+it carries no baseline because it is a description of the operating point rather
+than a score to beat.
+*Scope of this clause:* Task 16 implementation detail only. No metric function,
+roster, published figure, artifact field or earlier decision changes; Tasks 9–15
+keep their behaviour; and D1–D35 remain unaltered.
