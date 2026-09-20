@@ -6,7 +6,7 @@ neither pandas nor pyarrow.
 """
 
 import ast
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -235,3 +235,251 @@ def test_only_the_manifest_module_imports_the_partition_reader():
 
     assert Path("ingest/manifest.py") in importers, "the guard must see the legitimate import"
     assert importers - allowed == set(), sorted(str(p) for p in importers - allowed)
+
+
+# --- D37.1 / D37.17: the outcome sidecar ---------------------------------------------
+#
+# RED until the sidecar exists. Imported late so this module still collects and the
+# record-storage tests above keep running.
+
+
+def nyc311_record(external_id: str, when: datetime, label: str = "Noise") -> CorpusRecord:
+    """A 311 record: the sidecar is NYC 311-specific, so its tests must be too."""
+    return CorpusRecord(
+        source="nyc311",
+        external_id=external_id,
+        text=f"descriptor {external_id}",
+        label=label,
+        submitted_at=when,
+    )
+
+
+def outcome(external_id: str, hours: float | None, closed: datetime | None = None):
+    """A 311 outcome. Resolved rows carry a real close timestamp (D37 correction)."""
+    from ingest.schema import NYC311Outcome
+
+    if hours is not None and closed is None:
+        closed = datetime(2024, 5, 1, tzinfo=UTC) + timedelta(hours=hours)
+    return NYC311Outcome(external_id=external_id, closed_at=closed, resolution_hours=hours)
+
+
+def storage():
+    from ingest import storage as module
+
+    return module
+
+
+def test_an_outcome_partition_is_written_under_the_outcomes_subtree(tmp_path):
+    """D37.17: `outcomes/year=YYYY/`, beside the record tree and never inside it."""
+    path = storage().write_outcome_partition(
+        [outcome("1", 12.0), outcome("2", None)], "nyc311", 2024, 0, root=tmp_path
+    )
+    relative = path.relative_to(tmp_path).as_posix()
+    assert relative == f"nyc311/v{SCHEMA_VERSION}/outcomes/year=2024/part-0000.parquet"
+    assert path.is_file()
+
+
+def test_record_partitions_keep_their_existing_location(tmp_path):
+    """D37.17: records do not move. Mutation: relocate them under `records/`."""
+    record_path = write_partition(
+        [nyc311_record("1", datetime(2024, 1, 1, tzinfo=UTC))], "nyc311", 2024, 0, root=tmp_path
+    )
+    storage().write_outcome_partition([outcome("1", 1.0)], "nyc311", 2024, 0, root=tmp_path)
+    assert record_path.relative_to(tmp_path).as_posix() == (
+        f"nyc311/v{SCHEMA_VERSION}/year=2024/part-0000.parquet"
+    )
+    assert record_path == partition_path(tmp_path, "nyc311", 2024, 0)
+
+
+def test_the_outcome_schema_carries_all_three_fields(tmp_path):
+    """D37 as corrected: `external_id`, `resolution_hours` and `closed_at`.
+
+    Two columns would have forced the loader to invent the third, and the only
+    value available -- `None` -- means "still open" in §2.1, which contradicts a
+    resolved row.
+    """
+    schema = storage().OUTCOME_ARROW_SCHEMA
+    assert schema.names == ["external_id", "resolution_hours", "closed_at"]
+    assert not schema.field("external_id").nullable
+    assert schema.field("resolution_hours").nullable
+    assert schema.field("closed_at").nullable
+
+    closed = datetime(2024, 5, 2, 3, tzinfo=UTC)
+    path = storage().write_outcome_partition(
+        [outcome("1", 12.0, closed), outcome("2", None)], "nyc311", 2024, 0, root=tmp_path
+    )
+    table = pq.read_table(path)
+    assert table.schema.names == ["external_id", "resolution_hours", "closed_at"]
+    assert table.column("resolution_hours").to_pylist() == [12.0, None]
+    assert table.column("closed_at").to_pylist() == [closed, None]
+
+
+def test_a_resolved_outcome_round_trips_with_every_field_populated(tmp_path):
+    """D37: a resolved row carries all three, and the loader returns a real instance."""
+    from ingest.schema import NYC311Outcome
+
+    closed = datetime(2024, 5, 3, 7, 30, tzinfo=UTC)
+    path = storage().write_outcome_partition(
+        [outcome("1", 30.5, closed)], "nyc311", 2024, 0, root=tmp_path
+    )
+    (loaded,) = list(storage().read_outcome_parts([path]))
+    assert isinstance(loaded, NYC311Outcome)
+    assert loaded.external_id == "1"
+    assert loaded.resolution_hours == pytest.approx(30.5)
+    assert loaded.closed_at == closed
+
+
+def test_an_open_outcome_round_trips_with_both_nullable_fields_none(tmp_path):
+    """D37: an open request has no close time and no resolution time."""
+    path = storage().write_outcome_partition([outcome("2", None)], "nyc311", 2024, 0, root=tmp_path)
+    (loaded,) = list(storage().read_outcome_parts([path]))
+    assert loaded.external_id == "2"
+    assert loaded.resolution_hours is None
+    assert loaded.closed_at is None
+
+
+def test_closed_at_is_preserved_and_never_reconstructed(tmp_path):
+    """D37: the source's own close timestamp survives.
+
+    The stored `closed_at` here deliberately disagrees with
+    `submitted_at + resolution_hours`, so a loader deriving it would return a
+    different instant. Mutation: compute `closed_at` instead of reading it.
+    """
+    from ingest.schema import NYC311Outcome
+
+    stored = NYC311Outcome(
+        external_id="1",
+        closed_at=datetime(2029, 1, 1, tzinfo=UTC),
+        resolution_hours=1.0,
+    )
+    path = storage().write_outcome_partition([stored], "nyc311", 2024, 0, root=tmp_path)
+    (loaded,) = list(storage().read_outcome_parts([path]))
+    assert loaded.closed_at == datetime(2029, 1, 1, tzinfo=UTC)
+    assert loaded.resolution_hours == pytest.approx(1.0)
+
+
+def test_a_malformed_closed_at_fails_loudly(tmp_path):
+    """A close timestamp that is not a timestamp is refused, never coerced."""
+    import pyarrow as pa
+
+    path = storage().outcome_partition_path(tmp_path, "nyc311", 2024, 0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "external_id": ["1"],
+                "resolution_hours": [1.0],
+                "closed_at": ["not a timestamp"],
+            }
+        ),
+        path,
+    )
+    with pytest.raises(Exception):
+        list(storage().read_outcome_parts([path]))
+
+
+def test_a_naive_closed_at_is_refused(tmp_path):
+    """§2.1 keeps corpus timestamps aware; a naive close time is a defect."""
+    import pyarrow as pa
+
+    path = storage().outcome_partition_path(tmp_path, "nyc311", 2024, 0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table(
+            {
+                "external_id": ["1"],
+                "resolution_hours": [1.0],
+                "closed_at": pa.array([datetime(2024, 5, 1)], type=pa.timestamp("us")),
+            }
+        ),
+        path,
+    )
+    with pytest.raises(Exception):
+        list(storage().read_outcome_parts([path]))
+
+
+def test_an_outcome_partition_round_trips_exactly(tmp_path):
+    """Identity and the nullable hour survive the write. Mutation: coerce None to 0.0."""
+    written = [outcome("b", None), outcome("a", 3.5)]
+    path = storage().write_outcome_partition(written, "nyc311", 2024, 0, root=tmp_path)
+    loaded = list(storage().read_outcome_parts([path]))
+    assert [(o.external_id, o.resolution_hours) for o in loaded] == [("a", 3.5), ("b", None)]
+
+
+def test_outcome_read_order_is_deterministic_and_identity_sorted(tmp_path):
+    """An outcome carries no timestamp, so identity is the only stable order."""
+    path = storage().write_outcome_partition(
+        [outcome("10", 1.0), outcome("2", 2.0), outcome("1", 3.0)],
+        "nyc311",
+        2024,
+        0,
+        root=tmp_path,
+    )
+    first = [o.external_id for o in storage().read_outcome_parts([path])]
+    second = [o.external_id for o in storage().read_outcome_parts([path])]
+    assert first == second == ["1", "10", "2"]
+
+
+def test_outcome_part_discovery_is_separate_from_record_part_discovery(tmp_path):
+    """D37.17: two subtrees, two scanners; neither sees the other's files."""
+    write_partition(
+        [nyc311_record("1", datetime(2024, 1, 1, tzinfo=UTC))], "nyc311", 2024, 0, root=tmp_path
+    )
+    storage().write_outcome_partition([outcome("1", 1.0)], "nyc311", 2024, 0, root=tmp_path)
+
+    records_found = iter_part_files("nyc311", root=tmp_path)
+    outcomes_found = storage().iter_outcome_part_files("nyc311", root=tmp_path)
+    assert len(records_found) == len(outcomes_found) == 1
+    assert set(records_found) & set(outcomes_found) == set()
+    assert "outcomes" not in records_found[0].relative_to(tmp_path).parts
+    assert "outcomes" in outcomes_found[0].relative_to(tmp_path).parts
+
+
+def test_outcome_part_discovery_filters_by_year(tmp_path):
+    storage().write_outcome_partition([outcome("1", 1.0)], "nyc311", 2024, 0, root=tmp_path)
+    storage().write_outcome_partition([outcome("2", 2.0)], "nyc311", 2025, 0, root=tmp_path)
+    assert len(storage().iter_outcome_part_files("nyc311", root=tmp_path)) == 2
+    only = storage().iter_outcome_part_files("nyc311", [2025], root=tmp_path)
+    assert len(only) == 1
+    assert "year=2025" in only[0].relative_to(tmp_path).parts
+
+
+def test_a_malformed_outcome_part_fails_loudly(tmp_path):
+    """D37.1: no silent skip. Mutation: swallow the read error and yield nothing."""
+    path = storage().write_outcome_partition([outcome("1", 1.0)], "nyc311", 2024, 0, root=tmp_path)
+    path.write_bytes(b"not a parquet file")
+    with pytest.raises(Exception) as caught:
+        list(storage().read_outcome_parts([path]))
+    assert not isinstance(caught.value, StopIteration)
+
+
+def test_an_outcome_part_missing_a_column_fails_loudly(tmp_path):
+    """A structurally wrong sidecar is refused rather than partially read."""
+    import pyarrow as pa
+
+    path = storage().outcome_partition_path(tmp_path, "nyc311", 2024, 0)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table({"external_id": ["1"]}), path)
+    with pytest.raises(Exception):
+        list(storage().read_outcome_parts([path]))
+
+
+def test_removing_a_source_tree_removes_records_and_outcomes_together(tmp_path):
+    """D37.17: both subtrees live under the versioned root, so one removal covers them."""
+    write_partition(
+        [nyc311_record("1", datetime(2024, 1, 1, tzinfo=UTC))], "nyc311", 2024, 0, root=tmp_path
+    )
+    outcome_path = storage().write_outcome_partition(
+        [outcome("1", 1.0)], "nyc311", 2024, 0, root=tmp_path
+    )
+    assert outcome_path.is_file()
+    remove_source_tree("nyc311", root=tmp_path)
+    assert not outcome_path.exists()
+    assert not (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}").exists()
+
+
+def test_removing_one_source_leaves_another_sources_outcomes_alone(tmp_path):
+    storage().write_outcome_partition([outcome("1", 1.0)], "nyc311", 2024, 0, root=tmp_path)
+    kept = storage().write_outcome_partition([outcome("9", 9.0)], "cfpb", 2024, 0, root=tmp_path)
+    remove_source_tree("nyc311", root=tmp_path)
+    assert kept.is_file()

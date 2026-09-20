@@ -29,16 +29,18 @@ import os
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ingest.schema import SCHEMA_VERSION, CorpusRecord
+from ingest.schema import SCHEMA_VERSION, CorpusRecord, NYC311Outcome
 from ingest.storage import (
     CORPUS_ROOT,
+    iter_outcome_part_files,
     iter_part_files,
     read_corpus,
+    read_outcome_parts,
     read_parts,
     remove_source_tree,
     source_root,
@@ -47,7 +49,15 @@ from ingest.storage import (
 MANIFEST_NAME = "manifest.json"
 _CHECKSUM_CHUNK = 1 << 20
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
+"""Version 2 adds `outcome_part_files` (D37.16).
+
+Only the manifest document changed, so `schema_version` stays 1 and every
+record partition stays exactly where it is: plan section G separates the two
+numbers for precisely this case. A v1 manifest still reads, its absent
+`outcome_part_files` becoming an empty mapping with nothing else
+reinterpreted. That compatibility is read-only; every new write emits 2.
+"""
 """The manifest document's own shape (plan §G).
 
 Deliberately **not** `SCHEMA_VERSION`. That one versions `CorpusRecord` and is
@@ -68,6 +78,15 @@ class ManifestNotFound(CorpusIntegrityError):
 
 class ChecksumMismatch(CorpusIntegrityError):
     """A part file is missing, or its bytes differ from the recorded digest."""
+
+
+class OutcomeSidecarNotFound(CorpusIntegrityError):
+    """The corpus is valid, but it declares no outcome sidecar (D37.16).
+
+    Raised only for absence. A tampered, missing or unlisted outcome part is
+    an integrity failure and keeps its own error, because "there is no
+    sidecar" and "the sidecar is damaged" call for different responses.
+    """
 
 
 class UnlistedPartFile(CorpusIntegrityError):
@@ -120,6 +139,14 @@ class CorpusManifest:
     in plan §G, and it is held as a plain mapping so that adding a metric to the
     diagnostic does not require a change in this file."""
 
+    outcome_part_files: dict[str, str] = field(default_factory=dict)
+    """Corpus-root-relative POSIX path -> SHA256 for the outcome sidecar (D37.17).
+
+    Kept apart from `part_files` so a reader can tell which bytes are records
+    and which are outcomes without parsing a path, and last in the field order
+    because it is the only field carrying a default, which is what lets a v1
+    manifest written before the sidecar existed still be read."""
+
 
 def sha256_file(path: Path) -> str:
     """Digest a file's bytes, read in chunks so a large part file is not loaded."""
@@ -166,6 +193,10 @@ def build_manifest(
         path.relative_to(root).as_posix(): sha256_file(path)
         for path in iter_part_files(source, root=root)
     }
+    outcome_checksums = {
+        path.relative_to(root).as_posix(): sha256_file(path)
+        for path in iter_outcome_part_files(source, root=root)
+    }
 
     per_year: Counter[int] = Counter()
     labels: Counter[str] = Counter()
@@ -186,8 +217,13 @@ def build_manifest(
         per_year_counts=dict(sorted(per_year.items())),
         label_roster=dict(sorted(labels.items())),
         part_files=dict(sorted(part_checksums.items())),
+        outcome_part_files=dict(sorted(outcome_checksums.items())),
         source_api_version=source_api_version,
-        corpus_id=compute_corpus_id(part_checksums),
+        # Merged at the call site; `compute_corpus_id` itself is unchanged. An
+        # empty outcome set contributes nothing, so a record-only corpus keeps
+        # the identity it already published, while a corpus holding sidecar
+        # bytes gets one that covers them (D37.17).
+        corpus_id=compute_corpus_id({**part_checksums, **outcome_checksums}),
         limit=limit,
         timestamp_diagnostic=timestamp_diagnostic,
     )
@@ -241,6 +277,9 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
         per_year_counts={int(year): n for year, n in payload["per_year_counts"].items()},
         label_roster=dict(payload["label_roster"]),
         part_files=dict(payload["part_files"]),
+        # The one field with a silent default, granted to it by D37.16 so a v1
+        # manifest stays readable. Every other key keeps its strict lookup.
+        outcome_part_files=dict(payload.get("outcome_part_files", {})),
         source_api_version=payload["source_api_version"],
         corpus_id=payload["corpus_id"],
         limit=payload["limit"],
@@ -255,7 +294,9 @@ def verify_manifest(manifest: CorpusManifest, root: Path = CORPUS_ROOT) -> None:
     changed" is not actionable, "this part file changed" is.
     """
     root = Path(root)
-    for relative, expected in sorted(manifest.part_files.items()):
+    # Both declared sets: the record partitions and the outcome sidecar (D37.16).
+    declared = {**manifest.part_files, **manifest.outcome_part_files}
+    for relative, expected in sorted(declared.items()):
         path = root / relative
         if not path.is_file():
             raise ChecksumMismatch(f"part file recorded in the manifest is missing: {relative}")
@@ -316,3 +357,50 @@ def load_corpus(
     wanted = set(iter_part_files(source, years, root=root))
     listed = [root / relative for relative in sorted(manifest.part_files)]
     return manifest, read_parts(path for path in listed if path in wanted)
+
+
+def load_outcomes(
+    source: str,
+    years: Iterable[int] | None = None,
+    root: Path = CORPUS_ROOT,
+) -> tuple[CorpusManifest, Iterator[NYC311Outcome]]:
+    """The outcome sidecar, validated against its manifest (D37).
+
+    The mirror of `load_corpus` for the stream the 311 risk model is built on,
+    and gated the same way: the manifest decides which files exist, every
+    listed file's bytes are verified before a single outcome is yielded, and
+    the raw cache is never consulted. Real `NYC311Outcome` instances come back,
+    carrying the source's own `closed_at` rather than one derived from
+    `submitted_at + resolution_hours`, which is what lets Task 11 and Task 13
+    accept them with no adapter.
+
+    Raises `OutcomeSidecarNotFound` when the manifest declares no sidecar: an
+    absence, never an empty iterator, since a caller looping over nothing would
+    read "no outcomes" as "no breaches". A damaged sidecar keeps its own error,
+    `UnlistedPartFile` for a file the manifest does not list and
+    `ChecksumMismatch` for one whose bytes moved.
+    """
+    root = Path(root)
+    manifest = read_manifest(source, root=root)
+    if not manifest.outcome_part_files:
+        raise OutcomeSidecarNotFound(
+            f"{source}: the manifest declares no outcome sidecar. The corpus is "
+            "valid for record-only consumers, but an outcome-dependent one "
+            "cannot proceed; re-ingest the source to persist its outcome stream."
+        )
+
+    on_disk = {
+        path.relative_to(root).as_posix() for path in iter_outcome_part_files(source, root=root)
+    }
+    unlisted = sorted(on_disk - set(manifest.outcome_part_files))
+    if unlisted:
+        raise UnlistedPartFile(
+            f"{source}: outcome part files on disk that the manifest does not "
+            f"list: {', '.join(unlisted)}"
+        )
+
+    verify_manifest(manifest, root=root)
+
+    wanted = set(iter_outcome_part_files(source, years, root=root))
+    listed = [root / relative for relative in sorted(manifest.outcome_part_files)]
+    return manifest, read_outcome_parts(path for path in listed if path in wanted)

@@ -47,7 +47,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ingest.schema import SCHEMA_VERSION, CorpusRecord
+from ingest.schema import SCHEMA_VERSION, CorpusRecord, NYC311Outcome
 
 CORPUS_ROOT = Path("data") / "corpus"
 """Default location. Gitignored: no corpus record is ever committed."""
@@ -71,6 +71,27 @@ ARROW_SCHEMA = pa.schema(
     ]
 )
 
+OUTCOMES_DIR = "outcomes"
+"""The sidecar's subtree, beside the year partitions rather than inside them.
+
+Record partitions do not move (D37): `iter_part_files` matches `year=YYYY`
+directories only, so this sibling is invisible to it and every existing manifest
+keeps describing exactly the files it always did.
+"""
+
+OUTCOME_ARROW_SCHEMA = pa.schema(
+    [
+        pa.field("external_id", pa.string(), nullable=False),
+        pa.field("resolution_hours", pa.float64(), nullable=True),
+        # The source's own normalised close instant, never
+        # `submitted_at + resolution_hours`: a derived value would quietly become
+        # authoritative the moment the two disagreed (D37).
+        pa.field("closed_at", pa.timestamp("us", tz="UTC"), nullable=True),
+    ]
+)
+"""NYC 311 outcomes only. A future source's sidecar defines its own schema in the
+task that first consumes it, so nothing here is generalised across sources."""
+
 
 def _sort_key(record: CorpusRecord) -> tuple[datetime, str]:
     return (record.submitted_at, record.external_id)
@@ -84,6 +105,18 @@ def source_root(root: Path, source: str) -> Path:
 def partition_path(root: Path, source: str, year: int, part_index: int) -> Path:
     """Where one part file lives. Pure: no filesystem access, no side effects."""
     return source_root(root, source) / f"year={year}" / f"part-{part_index:0{PART_DIGITS}d}.parquet"
+
+
+def outcomes_root(root: Path, source: str) -> Path:
+    """The sidecar subtree, inside the same versioned root as the records (D37)."""
+    return source_root(root, source) / OUTCOMES_DIR
+
+
+def outcome_partition_path(root: Path, source: str, year: int, part_index: int) -> Path:
+    """Where one outcome part file lives. Pure, like `partition_path`."""
+    return (
+        outcomes_root(root, source) / f"year={year}" / f"part-{part_index:0{PART_DIGITS}d}.parquet"
+    )
 
 
 def write_partition(
@@ -137,6 +170,54 @@ def write_partition(
     return path
 
 
+def write_outcome_partition(
+    outcomes: Sequence[NYC311Outcome],
+    source: str,
+    year: int,
+    part_index: int,
+    root: Path = CORPUS_ROOT,
+) -> Path:
+    """Write one outcome part file, sorted by `external_id`.
+
+    An outcome carries no timestamp of its own, so identity is the only stable
+    order; sorting on write is what makes a reread deterministic. The D37 pairing
+    is enforced here rather than trusted: a resolved request has both a close time
+    and a resolution time, an open one has neither, and a row carrying exactly one
+    of them describes a request that was and was not closed.
+    """
+    for outcome in outcomes:
+        if not isinstance(outcome, NYC311Outcome):
+            raise ValueError(f"outcome {outcome!r} is {type(outcome).__name__}, not NYC311Outcome")
+        resolved = outcome.resolution_hours is not None
+        closed = outcome.closed_at is not None
+        if resolved != closed:
+            raise ValueError(
+                f"outcome {outcome.external_id!r} has resolution_hours="
+                f"{outcome.resolution_hours!r} and closed_at={outcome.closed_at!r}; "
+                "a resolved request carries both and an open request neither (D37)"
+            )
+        if outcome.closed_at is not None and outcome.closed_at.tzinfo is None:
+            raise ValueError(
+                f"outcome {outcome.external_id!r} has a naive closed_at; "
+                "corpus timestamps are timezone-aware"
+            )
+
+    ordered = sorted(outcomes, key=lambda outcome: outcome.external_id)
+    table = pa.Table.from_pydict(
+        {
+            "external_id": [o.external_id for o in ordered],
+            "resolution_hours": [o.resolution_hours for o in ordered],
+            "closed_at": [o.closed_at for o in ordered],
+        },
+        schema=OUTCOME_ARROW_SCHEMA,
+    )
+
+    path = outcome_partition_path(root, source, year, part_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path, compression="zstd")
+    return path
+
+
 def remove_source_tree(source: str, root: Path = CORPUS_ROOT) -> None:
     """Delete one source's versioned tree, and nothing else (D27).
 
@@ -179,6 +260,78 @@ def iter_part_files(
             sorted(p for p in year_dir.iterdir() if p.is_file() and _PART_NAME.match(p.name))
         )
     return found
+
+
+def iter_outcome_part_files(
+    source: str,
+    years: Iterable[int] | None = None,
+    root: Path = CORPUS_ROOT,
+) -> list[Path]:
+    """Every outcome part file for a source, in deterministic `(year, part)` order.
+
+    Deliberately a separate scanner from `iter_part_files`: two subtrees, two
+    listings, so neither can ever pick up the other's files (D37).
+    """
+    wanted = None if years is None else set(years)
+    base = outcomes_root(Path(root), source)
+    if not base.is_dir():
+        return []
+
+    found: list[Path] = []
+    for year_dir in sorted(base.iterdir()):
+        match = _YEAR_DIR.match(year_dir.name)
+        if not (year_dir.is_dir() and match):
+            continue
+        if wanted is not None and int(match.group(1)) not in wanted:
+            continue
+        found.extend(
+            sorted(p for p in year_dir.iterdir() if p.is_file() and _PART_NAME.match(p.name))
+        )
+    return found
+
+
+def _stream_outcome_part(path: Path) -> Iterator[NYC311Outcome]:
+    """Yield one outcome part's rows in stored order, a batch at a time.
+
+    The file's own schema is checked against `OUTCOME_ARROW_SCHEMA` first, so a
+    string where a timestamp belongs, a naive timestamp, or a missing column is a
+    loud failure rather than a silently mistyped outcome.
+    """
+    parquet_file = pq.ParquetFile(path)
+    try:
+        stored = parquet_file.schema_arrow
+        for field in OUTCOME_ARROW_SCHEMA:
+            if field.name not in stored.names:
+                raise ValueError(f"{path} has no {field.name!r} column")
+            actual = stored.field(field.name).type
+            if actual != field.type:
+                raise ValueError(f"{path} stores {field.name!r} as {actual}, not {field.type}")
+
+        batches = parquet_file.iter_batches(
+            batch_size=READ_BATCH_SIZE, columns=OUTCOME_ARROW_SCHEMA.names
+        )
+        for batch in batches:
+            for row in batch.to_pylist():
+                yield NYC311Outcome(
+                    external_id=row["external_id"],
+                    closed_at=row["closed_at"],
+                    resolution_hours=row["resolution_hours"],
+                )
+    finally:
+        parquet_file.close()
+
+
+def read_outcome_parts(paths: Iterable[Path]) -> Iterator[NYC311Outcome]:
+    """Merge the given outcome part files in `external_id` order.
+
+    Each part is already identity-sorted, so a lazy k-way merge produces globally
+    sorted output while holding at most one batch per file -- the same bound
+    `read_parts` gives the records.
+    """
+    return heapq.merge(
+        *(_stream_outcome_part(path) for path in paths),
+        key=lambda outcome: outcome.external_id,
+    )
 
 
 def _stream_part(path: Path) -> Iterator[CorpusRecord]:

@@ -7,7 +7,7 @@ be a lie.
 
 import json
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -288,7 +288,7 @@ def test_manifest_carries_no_operational_complaint_data(tmp_path):
 
 def test_the_manifest_carries_the_three_contract_fields(tmp_path):
     m = a_corpus(tmp_path, limit=500)
-    assert m.manifest_version == MANIFEST_VERSION == 1
+    assert m.manifest_version == MANIFEST_VERSION == 2
     assert m.limit == 500
     assert m.timestamp_diagnostic == DIAGNOSTIC
 
@@ -345,7 +345,7 @@ def test_write_manifest_emits_the_three_new_keys(tmp_path):
     write_manifest(m, root=tmp_path)
     raw = (tmp_path / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").read_text(encoding="utf-8")
     payload = json.loads(raw)
-    assert payload["manifest_version"] == 1
+    assert payload["manifest_version"] == 2
     assert payload["limit"] == 250
     assert payload["timestamp_diagnostic"] == DIAGNOSTIC
 
@@ -355,7 +355,7 @@ def test_read_manifest_reconstructs_the_new_fields_exactly(tmp_path):
     write_manifest(m, root=tmp_path)
     back = read_manifest("cfpb", root=tmp_path)
     assert back == m
-    assert back.manifest_version == 1
+    assert back.manifest_version == 2
     assert back.limit == 7
     assert back.timestamp_diagnostic == DIAGNOSTIC
 
@@ -706,3 +706,345 @@ def test_the_manifest_module_computes_no_verdict():
         "median_delta",
     ):
         assert forbidden not in haystack, f"{forbidden} is Task 8's, not the manifest's"
+
+
+# --- D37.16 / D37.17: the outcome sidecar --------------------------------------------
+#
+# RED until the sidecar exists. The record corpus above is unchanged by any of it:
+# record partitions stay at `year=YYYY/`, `part_files` keeps its meaning, and
+# `load_corpus` keeps returning records and only records.
+
+OUTCOMES = "outcomes"
+
+
+def absence_error():
+    """The typed absence error, imported late so this file collects without it."""
+    from ingest.manifest import OutcomeSidecarNotFound
+
+    return OutcomeSidecarNotFound
+
+
+def outcome(external_id: str, hours: float | None):
+    """Resolved rows carry a real close timestamp; open rows carry neither (D37)."""
+    from ingest.schema import NYC311Outcome
+
+    closed = None if hours is None else datetime(2024, 6, 1, tzinfo=UTC) + timedelta(hours=hours)
+    return NYC311Outcome(external_id=external_id, closed_at=closed, resolution_hours=hours)
+
+
+def a_311_corpus(root, *, with_sidecar=True, hours=(12.0, None)):
+    """A 311 corpus, optionally with its outcome sidecar. Returns the manifest."""
+    from ingest.storage import write_outcome_partition
+
+    records = [
+        CorpusRecord(
+            source="nyc311",
+            external_id=str(index + 1),
+            text=f"descriptor {index + 1}",
+            label="Noise",
+            submitted_at=datetime(2024, 1, index + 1, tzinfo=UTC),
+        )
+        for index in range(len(hours))
+    ]
+    write_partition(records, "nyc311", 2024, 0, root=root)
+    if with_sidecar:
+        write_outcome_partition(
+            [outcome(r.external_id, h) for r, h in zip(records, hours, strict=True)],
+            "nyc311",
+            2024,
+            0,
+            root=root,
+        )
+    manifest = build_manifest(
+        source="nyc311",
+        window_start=datetime(2024, 1, 1, tzinfo=UTC),
+        window_end=datetime(2025, 12, 31, tzinfo=UTC),
+        source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
+        root=root,
+    )
+    # Written, not merely built: every consumer below loads it back from disk.
+    write_manifest(manifest, root=root)
+    return manifest
+
+
+def test_the_manifest_keeps_record_and_outcome_checksums_apart(tmp_path):
+    """D37.17. Mutation: merge them into one map, losing which bytes are which."""
+    manifest = a_311_corpus(tmp_path)
+    assert manifest.part_files, "record parts must still be listed"
+    assert manifest.outcome_part_files, "outcome parts must be listed separately"
+    assert set(manifest.part_files) & set(manifest.outcome_part_files) == set()
+    assert all(f"/{OUTCOMES}/" in path for path in manifest.outcome_part_files)
+    assert all(f"/{OUTCOMES}/" not in path for path in manifest.part_files)
+
+
+def test_record_partitions_do_not_move_when_a_sidecar_is_added(tmp_path):
+    """D37.17: existing corpora stay valid. Mutation: relocate records under records/."""
+    with_side = a_311_corpus(tmp_path / "a")
+    without = a_311_corpus(tmp_path / "b", with_sidecar=False)
+    assert set(with_side.part_files) == set(without.part_files)
+    assert all(path.startswith(f"nyc311/v{SCHEMA_VERSION}/year=") for path in with_side.part_files)
+
+
+def test_a_record_only_corpus_keeps_the_identity_it_already_had(tmp_path):
+    """D37.17: merging an empty outcome set changes nothing.
+
+    Computed independently from the record checksums alone, so it cannot agree
+    with the implementation by construction.
+    """
+    manifest = a_311_corpus(tmp_path, with_sidecar=False)
+    assert manifest.outcome_part_files == {}
+    expected = compute_corpus_id(
+        {
+            path.relative_to(tmp_path).as_posix(): sha256_file(path)
+            for path in iter_part_files("nyc311", root=tmp_path)
+        }
+    )
+    assert manifest.corpus_id == expected
+
+
+def test_corpus_identity_binds_the_outcome_bytes(tmp_path):
+    """D37.1. Mutation: checksum records only, leaving the sidecar uncited."""
+    first = a_311_corpus(tmp_path / "a", hours=(12.0, None))
+    second = a_311_corpus(tmp_path / "b", hours=(999.0, None))
+    assert set(first.part_files.values()) == set(second.part_files.values()), (
+        "the records must be identical, so only the outcome bytes differ"
+    )
+    assert first.corpus_id != second.corpus_id
+
+
+def test_verification_fails_when_an_outcome_part_is_altered(tmp_path):
+    """D37.16: declared outcome parts are verified. Mutation: verify part_files only."""
+    manifest = a_311_corpus(tmp_path)
+    relative = next(iter(manifest.outcome_part_files))
+    target = tmp_path / relative
+    target.write_bytes(target.read_bytes() + b"tampered")
+    with pytest.raises(ChecksumMismatch, match=OUTCOMES):
+        verify_manifest(manifest, root=tmp_path)
+
+
+def test_verification_fails_when_an_outcome_part_is_missing(tmp_path):
+    manifest = a_311_corpus(tmp_path)
+    (tmp_path / next(iter(manifest.outcome_part_files))).unlink()
+    with pytest.raises(ChecksumMismatch):
+        verify_manifest(manifest, root=tmp_path)
+
+
+# --- load_outcomes -------------------------------------------------------------------
+
+
+def test_load_outcomes_yields_the_persisted_outcomes_in_identity_order(tmp_path):
+    """D37.1: `external_id` is preserved and `resolution_hours` survives, nullable."""
+    from ingest.manifest import load_outcomes
+    from ingest.schema import NYC311Outcome
+
+    a_311_corpus(tmp_path, hours=(12.5, None))
+    manifest, stream = load_outcomes("nyc311", root=tmp_path)
+    loaded = list(stream)
+    assert all(isinstance(item, NYC311Outcome) for item in loaded)
+    assert [item.external_id for item in loaded] == ["1", "2"]
+    assert [item.resolution_hours for item in loaded] == [12.5, None]
+    assert loaded[0].closed_at == datetime(2024, 6, 1, tzinfo=UTC) + timedelta(hours=12.5)
+    assert loaded[1].closed_at is None, "an open request has no close time"
+    assert manifest.corpus_id
+
+
+def test_load_outcomes_returns_real_nyc311_outcome_instances(tmp_path):
+    """D37: the Task 11 and Task 13 guards check the type, so no adapter may stand in."""
+    from ingest.manifest import load_outcomes
+    from ingest.schema import NYC311Outcome
+    from ml.training.aggregates import _validated_pairs
+
+    a_311_corpus(tmp_path, hours=(12.5, None))
+    _, records = load_corpus("nyc311", root=tmp_path)
+    _, outcomes = load_outcomes("nyc311", root=tmp_path)
+    records, outcomes = list(records), list(outcomes)
+    assert all(type(item) is NYC311Outcome for item in outcomes)
+    # Raises for a non-311 outcome or a misaligned pair; silence is the assertion.
+    _validated_pairs(records, outcomes)
+
+
+def test_load_outcomes_verifies_checksums_before_yielding_anything(tmp_path):
+    """D37.17. Mutation: verify lazily, so a caller sees rows from a tampered file."""
+    from ingest.manifest import load_outcomes
+
+    manifest = a_311_corpus(tmp_path)
+    target = tmp_path / next(iter(manifest.outcome_part_files))
+    target.write_bytes(target.read_bytes() + b"tampered")
+    with pytest.raises(ChecksumMismatch):
+        load_outcomes("nyc311", root=tmp_path)
+
+
+def test_load_outcomes_rejects_an_outcome_file_the_manifest_does_not_list(tmp_path):
+    """D37.17. Mutation: glob the directory instead of reading the manifest."""
+    from ingest.manifest import load_outcomes
+
+    manifest = a_311_corpus(tmp_path)
+    listed = tmp_path / next(iter(manifest.outcome_part_files))
+    (listed.parent / "part-0099.parquet").write_bytes(listed.read_bytes())
+    with pytest.raises(UnlistedPartFile, match="part-0099"):
+        load_outcomes("nyc311", root=tmp_path)
+
+
+def test_load_outcomes_reads_only_manifest_declared_files(tmp_path):
+    """A part file present on disk but dropped from the manifest is not read."""
+    from ingest.manifest import load_outcomes
+
+    manifest = a_311_corpus(tmp_path)
+    trimmed = CorpusManifest(**{**manifest.__dict__, "outcome_part_files": {}})
+    write_manifest(trimmed, root=tmp_path)
+    with pytest.raises(absence_error()):
+        load_outcomes("nyc311", root=tmp_path)
+
+
+def test_load_outcomes_raises_the_typed_absence_error_without_a_sidecar(tmp_path):
+    """D37.16: absence is not emptiness.
+
+    Mutation: return an empty iterator, which every downstream loop would accept
+    silently and which would surface much later as an unrelated failure.
+    """
+    from ingest.manifest import load_outcomes
+
+    a_311_corpus(tmp_path, with_sidecar=False)
+    with pytest.raises(absence_error()):
+        load_outcomes("nyc311", root=tmp_path)
+    assert issubclass(absence_error(), CorpusIntegrityError)
+
+
+def test_the_absence_error_is_not_used_for_integrity_failures(tmp_path):
+    """D37: a tampered or unlisted part is an integrity failure, never an absence."""
+    from ingest.manifest import load_outcomes
+
+    manifest = a_311_corpus(tmp_path)
+    target = tmp_path / next(iter(manifest.outcome_part_files))
+    target.write_bytes(b"not parquet at all")
+    with pytest.raises(ChecksumMismatch):
+        load_outcomes("nyc311", root=tmp_path)
+
+
+def test_load_outcomes_never_reads_the_raw_cache(tmp_path, monkeypatch):
+    """D37.1. Mutation: fall back to `data/raw/` when the sidecar is missing."""
+    from ingest.manifest import load_outcomes
+
+    a_311_corpus(tmp_path)
+    opened: list[str] = []
+    real_open = Path.open
+
+    def watched(self, *args, **kwargs):
+        opened.append(str(self))
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", watched)
+    list(load_outcomes("nyc311", root=tmp_path)[1])
+    assert not any("raw" in Path(path).parts for path in opened)
+
+
+def test_load_corpus_is_unaffected_by_the_sidecar(tmp_path):
+    """D37.16: `load_corpus` loads record parts and only record parts."""
+    a_311_corpus(tmp_path)
+    manifest, stream = load_corpus("nyc311", root=tmp_path)
+    loaded = list(stream)
+    assert [r.external_id for r in loaded] == ["1", "2"]
+    assert all(isinstance(r, CorpusRecord) for r in loaded)
+
+
+def test_a_record_only_corpus_still_loads_through_load_corpus(tmp_path):
+    """D37.1: a corpus without a sidecar stays valid for record-only consumers."""
+    a_311_corpus(tmp_path, with_sidecar=False)
+    _, stream = load_corpus("nyc311", root=tmp_path)
+    assert len(list(stream)) == 2
+
+
+# --- manifest v1 compatibility (D37.16) ----------------------------------------------
+
+
+def test_a_version_one_manifest_without_the_new_field_still_reads(tmp_path):
+    """D37.16: the absent field becomes `{}` and nothing else is reinterpreted."""
+    manifest = a_311_corpus(tmp_path, with_sidecar=False)
+    path = write_manifest(manifest, root=tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["manifest_version"] = 1
+    del payload["outcome_part_files"]
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+    back = read_manifest("nyc311", root=tmp_path)
+    assert back.manifest_version == 1
+    assert back.outcome_part_files == {}
+    assert back.part_files == manifest.part_files
+    assert back.schema_version == SCHEMA_VERSION == 1
+    assert back.corpus_id == manifest.corpus_id
+
+
+def test_a_version_one_manifest_is_read_only_compatibility(tmp_path):
+    """D37.16: reading v1 is supported; every new write emits v2."""
+    manifest = a_311_corpus(tmp_path, with_sidecar=False)
+    assert manifest.manifest_version == 2
+    write_manifest(manifest, root=tmp_path)
+    payload = json.loads(
+        (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert payload["manifest_version"] == 2
+    assert "outcome_part_files" in payload
+
+
+def test_a_source_with_no_outcome_stream_writes_an_empty_outcome_map(tmp_path):
+    """D37.16: v2 carries the field, which may legitimately be empty."""
+    manifest = a_corpus(tmp_path)
+    assert manifest.manifest_version == 2
+    assert manifest.outcome_part_files == {}
+
+
+def test_the_record_schema_version_is_untouched_by_the_manifest_bump(tmp_path):
+    """D37.16: the two version numbers version different things (§G)."""
+    manifest = a_311_corpus(tmp_path)
+    assert manifest.schema_version == SCHEMA_VERSION == 1
+    assert manifest.manifest_version == 2
+
+
+def test_outcome_part_files_has_a_default_and_is_not_a_strict_required_key(tmp_path):
+    """D37.16 grants the silent default to this one field and no other."""
+    manifest = a_311_corpus(tmp_path, with_sidecar=False)
+    path = write_manifest(manifest, root=tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    del payload["outcome_part_files"]
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    assert read_manifest("nyc311", root=tmp_path).outcome_part_files == {}
+
+
+# --- tree semantics (D37.17) ----------------------------------------------------------
+
+
+def test_clearing_a_corpus_removes_the_sidecar_with_the_records(tmp_path):
+    """D37.17: the sidecar lives under the versioned root, so D27 covers it."""
+    manifest = a_311_corpus(tmp_path)
+    outcome_dir = (tmp_path / next(iter(manifest.outcome_part_files))).parent
+    assert outcome_dir.is_dir()
+    clear_corpus("nyc311", root=tmp_path)
+    assert not outcome_dir.exists()
+    assert not (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}").exists()
+
+
+def test_a_stale_outcome_partition_cannot_survive_a_replacement(tmp_path):
+    """D37.17. Mutation: remove only the record tree, leaving old outcomes behind."""
+    manifest = a_311_corpus(tmp_path, hours=(12.0, None))
+    stale = tmp_path / next(iter(manifest.outcome_part_files))
+    stale_name = stale.name
+    clear_corpus("nyc311", root=tmp_path)
+    replacement = a_311_corpus(tmp_path, hours=(5.0,))
+    survivors = [
+        path
+        for path in (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}" / OUTCOMES).rglob("*.parquet")
+        if path.relative_to(tmp_path).as_posix() not in replacement.outcome_part_files
+    ]
+    assert survivors == [], f"stale outcome parts survived: {survivors} ({stale_name})"
+
+
+def test_the_manifest_remains_the_validity_boundary_for_outcomes(tmp_path):
+    """D27: without a manifest there is no corpus, sidecar or not."""
+    from ingest.manifest import load_outcomes
+
+    a_311_corpus(tmp_path)
+    (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}" / "manifest.json").unlink(missing_ok=True)
+    with pytest.raises(ManifestNotFound):
+        load_outcomes("nyc311", root=tmp_path)

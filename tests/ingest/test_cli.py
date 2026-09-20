@@ -1954,3 +1954,186 @@ def test_the_311_day_is_not_a_utc_slice(tmp_path):
 
     assert not (utc_start <= late <= utc_end)
     assert ny_start <= late <= ny_end
+
+
+# --- D37.1: the ingest run persists the outcome stream --------------------------------
+#
+# RED until the sidecar exists. `ingest/cli.py` currently normalises `(record,
+# outcome)` pairs and then keeps the records alone, so the outcome stream the 311
+# risk model is built on reaches no consumer at all.
+
+
+def nyc311_resolved(
+    external_id, *, created="2024-03-15T09:00:00.000", closed=None, complaint_type="Noise"
+):
+    """A 311 row that may carry a `closed_date`, and so a resolution time."""
+    row = nyc311_row(external_id, created=created, complaint_type=complaint_type)
+    if closed is not None:
+        row["closed_date"] = closed
+    return row
+
+
+def a_311_run(tmp_path, rows, *, raw="raw", **kwargs):
+    """Ingest one 311 page. ``raw`` names the cache, so a replacement run can be
+    given a fresh one -- the cache is resumable by design, and a second run
+    sharing it would legitimately re-ingest the first run's rows too."""
+    fetcher = StubFetcher([rows])
+    manifest = ingest(
+        source="nyc311",
+        start=date(2024, 1, 1),
+        end=date(2025, 12, 31),
+        limit=kwargs.pop("limit", None),
+        fetcher=fetcher,
+        corpus_root=tmp_path / "corpus",
+        raw_root=tmp_path / raw,
+        **kwargs,
+    )
+    return manifest, fetcher
+
+
+def loaded_outcomes(tmp_path):
+    from ingest.manifest import load_outcomes
+
+    _, stream = load_outcomes("nyc311", root=tmp_path / "corpus")
+    return list(stream)
+
+
+def test_a_311_run_persists_the_outcome_stream(tmp_path):
+    """D37.1. Mutation: keep `cli.py`'s `records = [record for record, _ in kept]`."""
+    a_311_run(
+        tmp_path,
+        [
+            nyc311_resolved("1", closed="2024-03-15T21:00:00.000"),
+            nyc311_resolved("2"),
+        ],
+    )
+    outcomes = loaded_outcomes(tmp_path)
+    assert [o.external_id for o in outcomes] == ["1", "2"]
+    assert outcomes[0].resolution_hours == 12.0
+    assert outcomes[1].resolution_hours is None
+    # D37: the source's own normalised close timestamp, not a derived one.
+    assert outcomes[0].closed_at == datetime(2024, 3, 16, 1, 0, tzinfo=UTC)
+    assert outcomes[1].closed_at is None
+
+
+def test_a_311_run_preserves_the_normalised_close_timestamp(tmp_path):
+    """D37: `closed_at` comes from `closed_date`, through the existing normaliser."""
+    a_311_run(tmp_path, [nyc311_resolved("1", closed="2024-03-20T17:30:00.000")])
+    (loaded,) = loaded_outcomes(tmp_path)
+    assert loaded.closed_at == datetime(2024, 3, 20, 21, 30, tzinfo=UTC)
+    assert loaded.resolution_hours is not None
+
+
+def test_the_311_ingest_change_creates_no_cfpb_outcome_schema(tmp_path):
+    """D37's corrective scope: CFPB outcome persistence belongs to Task 19, not here.
+
+    Mutation: generalise the sidecar to every source, which would invent a CFPB
+    schema this task never defined and Task 19 would then be stuck with.
+    """
+    from ingest import storage as storage_module
+
+    a_cfpb_run(tmp_path, [[cfpb_row("1"), cfpb_row("2")]])
+    manifest = read_manifest("cfpb", root=tmp_path / "corpus")
+    assert manifest.outcome_part_files == {}
+    root = tmp_path / "corpus" / "cfpb" / f"v{SCHEMA_VERSION}"
+    assert not (root / "outcomes").exists()
+    assert not hasattr(storage_module, "CFPB_OUTCOME_ARROW_SCHEMA")
+
+
+def test_a_cfpb_corpus_declares_no_outcome_sidecar_to_load(tmp_path):
+    """The typed absence error is the correct answer for a source with no sidecar."""
+    from ingest.manifest import OutcomeSidecarNotFound, load_outcomes
+
+    a_cfpb_run(tmp_path, [[cfpb_row("1")]])
+    with pytest.raises(OutcomeSidecarNotFound):
+        load_outcomes("cfpb", root=tmp_path / "corpus")
+
+
+def test_records_and_outcomes_are_written_by_the_same_run(tmp_path):
+    """One run, one manifest, both streams. Mutation: a second pass for outcomes."""
+    manifest, _ = a_311_run(
+        tmp_path, [nyc311_resolved(str(i), closed="2024-03-15T21:00:00.000") for i in range(1, 4)]
+    )
+    assert manifest.record_count == 3
+    assert manifest.part_files and manifest.outcome_part_files
+    _, records = load_corpus("nyc311", root=tmp_path / "corpus")
+    assert len(list(records)) == 3
+    assert len(loaded_outcomes(tmp_path)) == 3
+
+
+def test_the_run_manifest_binds_both_streams(tmp_path):
+    """D37.17: the two checksum maps are both populated and disjoint."""
+    manifest, _ = a_311_run(tmp_path, [nyc311_resolved("1", closed="2024-03-15T21:00:00.000")])
+    assert set(manifest.part_files) & set(manifest.outcome_part_files) == set()
+    assert all("/outcomes/" in path for path in manifest.outcome_part_files)
+    assert manifest.manifest_version == 2
+
+
+def test_corpus_identity_binds_the_outcome_bytes_end_to_end(tmp_path):
+    """D37.1: two runs whose records match but whose outcomes differ get different ids."""
+    first, _ = a_311_run(tmp_path / "a", [nyc311_resolved("1", closed="2024-03-15T21:00:00.000")])
+    second, _ = a_311_run(tmp_path / "b", [nyc311_resolved("1", closed="2024-03-16T09:00:00.000")])
+    assert set(first.part_files.values()) == set(second.part_files.values())
+    assert first.corpus_id != second.corpus_id
+
+
+def test_a_replacement_run_leaves_no_stale_outcome_partition(tmp_path):
+    """D27 + D37.17: the whole versioned tree goes, sidecar included."""
+    first, _ = a_311_run(
+        tmp_path,
+        [nyc311_resolved(str(i), closed="2024-03-15T21:00:00.000") for i in range(1, 6)],
+        raw="raw-first",
+    )
+    assert len(first.outcome_part_files) == 1
+    manifest, _ = a_311_run(
+        tmp_path,
+        [nyc311_resolved("1", closed="2024-03-15T21:00:00.000")],
+        raw="raw-second",
+    )
+    assert manifest.record_count == 1
+    outcomes = loaded_outcomes(tmp_path)
+    assert [o.external_id for o in outcomes] == ["1"]
+    # Nothing from the five-record run may remain on disk under the sidecar.
+    survivors = sorted(
+        path.relative_to(tmp_path / "corpus").as_posix()
+        for path in (tmp_path / "corpus" / "nyc311" / f"v{SCHEMA_VERSION}" / "outcomes").rglob(
+            "*.parquet"
+        )
+    )
+    assert survivors == sorted(manifest.outcome_part_files)
+
+
+def test_every_persisted_record_has_exactly_one_persisted_outcome(tmp_path):
+    """D37.1: the sidecar is written from the same truncated set as the records."""
+    manifest, _ = a_311_run(
+        tmp_path,
+        [nyc311_resolved(str(i), closed="2024-03-15T21:00:00.000") for i in range(1, 8)],
+        limit=4,
+    )
+    _, records = load_corpus("nyc311", root=tmp_path / "corpus")
+    record_ids = [r.external_id for r in records]
+    outcome_ids = [o.external_id for o in loaded_outcomes(tmp_path)]
+    assert manifest.record_count == 4
+    assert sorted(record_ids) == sorted(outcome_ids)
+    assert len(set(outcome_ids)) == len(outcome_ids)
+
+
+def test_a_cfpb_run_still_behaves_exactly_as_before(tmp_path):
+    """D37.15: nothing about the existing CFPB path changes.
+
+    CFPB has an outcome stream of its own, but D37.1 fixes a sidecar schema for
+    NYC 311 only, so this pins the status quo rather than inventing one.
+    """
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row("1"), cfpb_row("2")]])
+    assert manifest.record_count == 2
+    assert manifest.part_files
+    _, records = load_corpus("cfpb", root=tmp_path / "corpus")
+    assert [r.external_id for r in records] == ["1", "2"]
+
+
+def test_a_cfpb_corpus_remains_loadable_without_a_311_sidecar(tmp_path):
+    """A record-only corpus is still a corpus for every record-only consumer."""
+    a_cfpb_run(tmp_path, [[cfpb_row("1")]])
+    manifest = read_manifest("cfpb", root=tmp_path / "corpus")
+    assert manifest.schema_version == SCHEMA_VERSION == 1
+    assert manifest.manifest_version == 2
