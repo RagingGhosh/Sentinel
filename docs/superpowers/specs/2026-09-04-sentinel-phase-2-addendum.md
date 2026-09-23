@@ -2780,6 +2780,42 @@ so CI's existing ML job selects them and **no CI workflow is modified**.
 **`tokenizers==0.23.2` is the only new dependency and it enters
 `requirements/ml.txt` alone**; `base.txt` is untouched, so the production runtime
 budget is unaffected in Phase 2.
+*Now — the implementation API surface is frozen with the RED tests.* Task 18's
+tests name the production surface, so those names are part of this decision
+rather than an implementation detail: `TextEmbedder`, the protocol in
+`ml/base.py`; `fit_tfidf(train_texts, config)` and `load_minilm(...)`, the two
+construction seams; `asset_dir()`, the MiniLM asset-location surface that honours
+`SENTINEL_MINILM_DIR`; and, owned by `ml/training/experiments/dedup.py`,
+`BENCHMARK_CONFIG`, `index_population`, `query_population`,
+`build_perturbations`, `build_index`, `recall_at_k`, `random_ranking_baseline`
+and `run_benchmark`. `BENCHMARK_CONFIG` is the single frozen `BenchmarkConfig`
+instance both arms receive. **Renaming any of these requires amending this
+decision and the tests together**; renaming in code alone is a silent contract
+change. These names are Task 18's Phase 2 experiment surface and nothing more.
+They are not a serving API: `ml/registry.py`, `Match` and `DedupIndex` are
+unchanged, and Phase 3 still owns wiring the winning embedder behind
+`DedupIndex`.
+*Now — what the benchmark report records.* Per arm: `model_version`,
+`embedding_model_id`, `embedding_model_sha256`, `tokenizer_sha256`, the observed
+`embedding_dimension`, the configuration the arm was run under, and recall@k for
+every reported `k` under every perturbation type, each beside its baseline. Once
+for the run: the seed, the `corpus_id` of the manifest the benchmark loaded
+through `load_corpus`, and — for the MiniLM arm — the count of truncated inputs.
+Nothing further is added here: a report field that no clause of this decision
+requires is not part of the contract, and adding one is an amendment rather than
+an implementation choice.
+*Now — the report names the tests read.* Five names on the report are fixed,
+because Task 18's tests read them to prove the clauses above rather than to
+inspect an implementation: `label`, which identifies the run as the **synthetic
+duplicate-retrieval benchmark** §5.3 requires it to be labelled; `arms`, the two
+representation arms, keyed `tfidf` and `minilm`; `candidate_refs`, which exposes
+the shared retrieval population so both arms can be shown to have searched the
+same candidates; and `queries`, which exposes the shared perturbed-query sets by
+perturbation type so the single generation can be asserted by identity rather
+than by equality. Nothing else about the report or the embedders is fixed here:
+how an arm tokenizes, counts its truncated inputs, reaches its ONNX session or
+holds its fitted vectoriser is implementation mechanics, and those accessors are
+deliberately not named.
 *Why:* §5.3's comparison is worth running only if the single difference between
 the arms is the representation, and that is a property of values, not of prose.
 Freezing every constant in one shared object — and generating the perturbations
