@@ -14,6 +14,12 @@ numpy==2.5.2
 scikit-learn==1.9.0
 onnxruntime==1.29.0
 
+# The MiniLM benchmark arm reads the checkpoint's own tokenizer.json. onnxruntime
+# consumes token ids and cannot produce them, and a hand-written word-piece
+# tokenizer that disagreed with the checkpoint by one token would make the
+# embeddings wrong in a way no test of ours would catch (D38).
+tokenizers==0.23.2
+
 # transitive
 scipy==1.18.1
 joblib==1.6.0
@@ -22,3 +28,19 @@ cloudpickle==3.1.2
 narwhals==2.25.0
 flatbuffers==25.12.19
 protobuf==7.36.1
+
+# transitive, via tokenizers. Sentinel imports none of these: tokenization is
+# tokenizers.Tokenizer.from_file over the pinned local tokenizer.json, so the hub
+# client is installed and never called. huggingface-hub is held at 0.36.2 because
+# the 1.x line replaces requests -- which base.txt already carries -- with an httpx
+# stack nothing else here needs. colorama is tqdm's Windows-only dependency and
+# stays pinned in dev.txt alone: a Phase 1 package must live in exactly one tier.
+huggingface-hub==0.36.2
+filelock==4.0.1
+fsspec==2026.9.0
+PyYAML==6.0.3
+tqdm==4.70.1
+# Conditional upstream, so conditional here: huggingface-hub 0.36.2 asks for
+# hf-xet only on these machines, and pinning it unconditionally would install it
+# where pip would not.
+hf-xet==1.6.0; platform_machine == "x86_64" or platform_machine == "amd64" or platform_machine == "arm64" or platform_machine == "aarch64"

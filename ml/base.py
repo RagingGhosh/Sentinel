@@ -4,8 +4,18 @@ Every result object is frozen and carries the model_version that produced it,
 so a prediction can always be traced to a specific artifact.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    # Django imports this module at startup, so numpy must never follow it here.
+    # Annotations are strings under the future import above, so nothing below
+    # needs these at run time (D38).
+    from collections.abc import Sequence
+
+    import numpy as np
 
 
 @dataclass(frozen=True)
@@ -61,3 +71,25 @@ class DedupIndex(Protocol):
 
 class RiskModel(Protocol):
     def predict(self, features: RiskFeatures) -> RiskScore: ...
+
+
+class TextEmbedder(Protocol):
+    """Text in, vector out, plus enough to say what produced it (§2.2, D38).
+
+    Benchmarked in Phase 2, not served by it: the duplicate-retrieval benchmark
+    measures embedders over corpus records, while `DedupIndex` keeps returning
+    `Match` over live complaints and is unchanged. Phase 3 wires the winning
+    embedder behind it.
+
+    There is deliberately no `fit`. Each implementation is constructed already
+    fitted, so an unfitted embedder is not a state a caller can reach, and the
+    training text an implementation saw is decided at construction rather than
+    at call time. `embedding_dimension` is read from the implementation's own
+    output and is never a constant.
+    """
+
+    model_version: str
+    embedding_dimension: int
+    embedding_model_id: str
+
+    def embed(self, texts: Sequence[str]) -> np.ndarray: ...

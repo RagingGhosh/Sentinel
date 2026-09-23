@@ -14,6 +14,9 @@ data/
 # artifact can report its own measured metrics without shipping the weights.
 ml/artifacts/**/*.onnx
 ml/artifacts/**/*.joblib
+# The MiniLM tokenizer is pinned by digest and travels with those weights: an
+# external asset obtained once, not source (D38).
+ml/artifacts/embedders/all_minilm_l6_v2/v1/tokenizer.json
 
 # collectstatic output — a build artifact, not source
 staticfiles/
