@@ -421,6 +421,38 @@ def test_the_truncated_input_count_is_observable(assets):
     assert embedder.truncated_input_count == 1
 
 
+def test_a_second_embedder_does_not_inherit_the_first_one_s_count(assets):
+    """D38 scopes the count to a run: a later run reports its own number, not an
+    earlier one's. The counter is per instance and carries no shared state, so a
+    benchmark that loads its own arm is run-local by construction."""
+    module = minilm()
+    first = module.load_minilm()
+    first.embed(["short text", "long text " + "padding words " * 2000])
+    assert first.truncated_input_count == 1
+
+    second = module.load_minilm()
+    assert second.truncated_input_count == 0, "a freshly loaded arm starts at zero"
+    second.embed(["a short text only"])
+    assert second.truncated_input_count == 0
+    assert first.truncated_input_count == 1, "the first embedder's count was disturbed"
+
+
+def test_the_count_can_be_scoped_to_a_run_by_difference(assets):
+    """The other way a run stays run-local: one reused embedder, counted across
+    the run rather than from its lifetime. Both readings must give the run's own
+    number, so the counter only ever moves by what that scope truncated."""
+    embedder = minilm().load_minilm()
+    embedder.embed(["long text " + "padding words " * 2000])
+
+    before = embedder.truncated_input_count
+    embedder.embed(["short text", "another long one " + "padding words " * 2000])
+    assert embedder.truncated_input_count - before == 1
+
+    before = embedder.truncated_input_count
+    embedder.embed(["nothing truncated here"])
+    assert embedder.truncated_input_count - before == 0
+
+
 def test_padding_does_not_change_the_pooled_vector(assets):
     """Pooling is mask-weighted, so a batch's padding cannot move a vector."""
     embedder = minilm().load_minilm()

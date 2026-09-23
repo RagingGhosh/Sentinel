@@ -2777,9 +2777,24 @@ widths (D18).
 `tests/test_import_boundaries.py`; it is already forbidden to serving, and the
 missing half of that guard is closed here. **Every Task 18 test is marked `ml`**,
 so CI's existing ML job selects them and **no CI workflow is modified**.
-**`tokenizers==0.23.2` is the only new dependency and it enters
-`requirements/ml.txt` alone**; `base.txt` is untouched, so the production runtime
-budget is unaffected in Phase 2.
+**`tokenizers==0.23.2` is the only new *direct* dependency Task 18 introduces.**
+It is not dependency-free: `tokenizers` declares a mandatory dependency on
+`huggingface-hub`, so that package and its own mandatory closure — `filelock`,
+`fsspec`, `hf-xet`, `PyYAML` and `tqdm` — are **pinned explicitly in
+`requirements/ml.txt`**, as this project pins every transitive. They are
+transitive installation dependencies, not Sentinel dependencies:
+**Sentinel imports none of `huggingface_hub`, `fsspec`, `filelock`, `tqdm`,
+`PyYAML` or `hf_xet`.** Tokenization is `tokenizers.Tokenizer.from_file` over the
+pinned local `tokenizer.json`; `from_pretrained`, `hf_hub_download` and
+`snapshot_download` are never called, and no hub cache or download path is
+reached — which is what keeps the no-network rule above true of the
+implementation and not merely of the tests. `huggingface-hub` is held at `0.36.2`
+deliberately: the 1.x line replaces `requests`, which `base.txt` already carries,
+with an `httpx` stack nothing else here needs. `hf-xet` carries upstream's own
+platform marker rather than being installed unconditionally, and `colorama`,
+which `tqdm` needs on Windows alone, stays pinned in `dev.txt` only, a Phase 1
+package belonging to exactly one tier. `base.txt` is untouched, so the production
+runtime budget is unaffected in Phase 2.
 *Now — the implementation API surface is frozen with the RED tests.* Task 18's
 tests name the production surface, so those names are part of this decision
 rather than an implementation detail: `TextEmbedder`, the protocol in
@@ -2804,6 +2819,15 @@ through `load_corpus`, and — for the MiniLM arm — the count of truncated inp
 Nothing further is added here: a report field that no clause of this decision
 requires is not part of the contract, and adding one is an amendment rather than
 an implementation choice.
+*Now — what the truncation count counts.* For each `run_benchmark` invocation,
+the MiniLM truncation count is the total number of input texts processed by that
+benchmark's MiniLM arm that were right-truncated to Sentinel's 256-token limit.
+It is a run-level quantity, not a cross-run persistent statistic. Reusing an
+embedder in a different benchmark run must not cause the earlier run's count to
+appear in the later report. The embedder's counter is per instance and starts at
+zero, carrying no shared or class-level state, so a run satisfies this either by
+loading its own arm or by recording the difference across the run; the report
+carries that run's number and no other's.
 *Now — the report names the tests read.* Five names on the report are fixed,
 because Task 18's tests read them to prove the clauses above rather than to
 inspect an implementation: `label`, which identifies the run as the **synthetic
