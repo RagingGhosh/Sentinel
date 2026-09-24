@@ -2681,9 +2681,17 @@ dimensionality reduction, stemming, stop-word list or tuned parameter is added.
 *Now — one frozen `BenchmarkConfig`, with its values.* The corpus is **CFPB**,
 loaded through `load_corpus`; the window is the one its manifest records; the
 split is §6.1's at **`DEFAULT_FRACTIONS`, 70 / 15 / 15**. The **index
-population** is every in-window record whose `submitted_at` falls at or before
-the end of the test period — never a record later than the query period (§6.2,
-evaluation-index construction). The **query population** is **500 test-period
+population** is every record whose `submitted_at` falls at or before the
+**evaluation window's end** — the `window_end` the corpus manifest recorded at
+ingest. Records later than that boundary are excluded (§6.2,
+evaluation-index construction), and the boundary is deliberately independent of
+both the records loaded and the queries sampled: derived from the records it
+would be circular, since the split partitions the very records handed in and
+the newest of them is always inside it; derived from the sampled queries it
+would make the candidate population depend on which 500 records were drawn and
+would drop legitimate candidates from later in the same period. Both arms
+search the one bounded population that results, and its `candidate_refs` are
+the same for each. The **query population** is **500 test-period
 records**, drawn deterministically. The **seed is 18**. **`k` is 10** and is the
 headline; **recall@1, recall@5 and recall@10** are reported, the same set for
 both arms. Similarity is **cosine over L2-normalised vectors**. The **tuning
@@ -2709,8 +2717,12 @@ are the index population, which contains the originals. **Identity is `RecordRef
 throughout and never a positional index.** A **duplicate `RecordRef` in the index
 raises**, a silent deduplication being a silent change of denominator. A **`k`
 exceeding the candidate population raises**, matching Task 14's treatment of a
-`k` wider than the roster. The baseline is **one seeded random ranking of the
-candidate population**, drawn in exactly one draw with the seed recorded — the
+`k` wider than the roster. The baseline is **a seeded random ranking**: for each
+evaluation query it produces one random ranking of the candidate population,
+drawn from a single seeded `numpy.random.default_rng(seed)` stream per
+invocation. Exactly one ranking per query, no repeated Monte Carlo rounds and
+no averaging over generated baseline rounds; the seed is recorded and the same
+recall@k definition scores it. No analytic k/N stand-in is used — the same
 discipline D34 fixed for the stratified baseline, and the reason D34 declined to
 invent a retrieval baseline in Task 14. **The metric lives in
 `ml/training/experiments/dedup.py`, and Task 14's prohibition on `recall_at_k` in
