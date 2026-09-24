@@ -34,11 +34,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ingest.schema import SCHEMA_VERSION, CorpusRecord, NYC311Outcome
+from ingest.schema import SCHEMA_VERSION, CFPBOutcome, CorpusRecord, NYC311Outcome
+
+# The slug rather than a second literal: one source of truth for the name, and
+# the adapter is pure, so this adds no weight and no cycle.
+from ingest.sources.cfpb import SOURCE_SLUG as CFPB_SOURCE
 from ingest.storage import (
     CORPUS_ROOT,
     iter_outcome_part_files,
     iter_part_files,
+    read_cfpb_outcome_parts,
     read_corpus,
     read_outcome_parts,
     read_parts,
@@ -404,3 +409,52 @@ def load_outcomes(
     wanted = set(iter_outcome_part_files(source, years, root=root))
     listed = [root / relative for relative in sorted(manifest.outcome_part_files)]
     return manifest, read_outcome_parts(path for path in listed if path in wanted)
+
+
+def load_cfpb_outcomes(
+    years: Iterable[int] | None = None,
+    root: Path = CORPUS_ROOT,
+) -> tuple[CorpusManifest, Iterator[CFPBOutcome]]:
+    """The CFPB outcome sidecar, validated against its manifest (Task 19, O1).
+
+    The mirror of `load_outcomes` for the stream Task 19's evaluation target
+    derives from, gated identically: the manifest decides which files exist,
+    every listed file's bytes are verified before a single outcome is yielded,
+    and the raw cache is never consulted. Real `CFPBOutcome` instances come back,
+    carrying `sent_to_company_at` from the persisted `date_sent_to_company`.
+
+    Source-specific rather than generic over outcome types, so NYC 311's loader
+    keeps its own name, signature and return type (O1). The integrity machinery
+    is the shared one: this adds no second implementation of it.
+
+    Raises `OutcomeSidecarNotFound` when the manifest declares no sidecar -- an
+    absence, never an empty iterator, since a caller looping over nothing would
+    read "no outcomes" as "every company replied in time". A damaged sidecar
+    keeps its own error, `UnlistedPartFile` for a file the manifest does not list
+    and `ChecksumMismatch` for one whose bytes moved.
+    """
+    root = Path(root)
+    source = CFPB_SOURCE
+    manifest = read_manifest(source, root=root)
+    if not manifest.outcome_part_files:
+        raise OutcomeSidecarNotFound(
+            f"{source}: the manifest declares no outcome sidecar. The corpus is "
+            "valid for record-only consumers, but an outcome-dependent one "
+            "cannot proceed; re-ingest the source to persist its outcome stream."
+        )
+
+    on_disk = {
+        path.relative_to(root).as_posix() for path in iter_outcome_part_files(source, root=root)
+    }
+    unlisted = sorted(on_disk - set(manifest.outcome_part_files))
+    if unlisted:
+        raise UnlistedPartFile(
+            f"{source}: outcome part files on disk that the manifest does not "
+            f"list: {', '.join(unlisted)}"
+        )
+
+    verify_manifest(manifest, root=root)
+
+    wanted = set(iter_outcome_part_files(source, years, root=root))
+    listed = [root / relative for relative in sorted(manifest.outcome_part_files)]
+    return manifest, read_cfpb_outcome_parts(path for path in listed if path in wanted)

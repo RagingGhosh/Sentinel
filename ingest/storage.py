@@ -47,7 +47,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ingest.schema import SCHEMA_VERSION, CorpusRecord, NYC311Outcome
+from ingest.schema import SCHEMA_VERSION, CFPBOutcome, CorpusRecord, NYC311Outcome
 
 CORPUS_ROOT = Path("data") / "corpus"
 """Default location. Gitignored: no corpus record is ever committed."""
@@ -91,6 +91,23 @@ OUTCOME_ARROW_SCHEMA = pa.schema(
 )
 """NYC 311 outcomes only. A future source's sidecar defines its own schema in the
 task that first consumes it, so nothing here is generalised across sources."""
+
+CFPB_OUTCOME_ARROW_SCHEMA = pa.schema(
+    [
+        pa.field("external_id", pa.string(), nullable=False),
+        # The evaluation target Task 19 scores against. Not nullable: normalisation
+        # already refuses a row whose `timely` is neither Yes nor No, so an absent
+        # target cannot reach persistence and a null here would be a fabricated one.
+        pa.field("timely_response", pa.bool_(), nullable=False),
+        # Provenance evidence only -- never a feature and never a target, as
+        # `CFPBOutcome` says. Named after CFPB's own column; it carries
+        # `CFPBOutcome.sent_to_company_at`, and CFPB does not always publish it.
+        pa.field("date_sent_to_company", pa.timestamp("us", tz="UTC"), nullable=True),
+    ]
+)
+"""CFPB outcomes only (Task 19, O1). A separate schema from NYC 311's rather than
+a widened shared one: the two sources record different facts, and §4.3 forbids
+combining their targets under a single name."""
 
 
 def _sort_key(record: CorpusRecord) -> tuple[datetime, str]:
@@ -218,6 +235,55 @@ def write_outcome_partition(
     return path
 
 
+def write_cfpb_outcome_partition(
+    outcomes: Sequence[CFPBOutcome],
+    source: str,
+    year: int,
+    part_index: int,
+    root: Path = CORPUS_ROOT,
+) -> Path:
+    """Write one CFPB outcome part file, sorted by `external_id` (Task 19, O1).
+
+    The mirror of `write_outcome_partition` for the stream Task 19's evaluation
+    target derives from, and identity-sorted for the same reason: an outcome
+    carries no timestamp of its own, so sorting on write is what makes a reread
+    deterministic.
+
+    The pairing rule NYC 311 enforces has no analogue here. `timely_response` is
+    a definite boolean for every persisted record, and `date_sent_to_company` is
+    provenance that CFPB does not always publish, so the two are independent.
+    """
+    for outcome in outcomes:
+        if not isinstance(outcome, CFPBOutcome):
+            raise ValueError(f"outcome {outcome!r} is {type(outcome).__name__}, not CFPBOutcome")
+        if not isinstance(outcome.timely_response, bool):
+            raise ValueError(
+                f"outcome {outcome.external_id!r} has timely_response="
+                f"{outcome.timely_response!r}; the target is a definite boolean"
+            )
+        sent = outcome.sent_to_company_at
+        if sent is not None and sent.tzinfo is None:
+            raise ValueError(
+                f"outcome {outcome.external_id!r} has a naive sent_to_company_at; "
+                "corpus timestamps are timezone-aware"
+            )
+
+    ordered = sorted(outcomes, key=lambda outcome: outcome.external_id)
+    table = pa.Table.from_pydict(
+        {
+            "external_id": [o.external_id for o in ordered],
+            "timely_response": [o.timely_response for o in ordered],
+            "date_sent_to_company": [o.sent_to_company_at for o in ordered],
+        },
+        schema=CFPB_OUTCOME_ARROW_SCHEMA,
+    )
+
+    path = outcome_partition_path(root, source, year, part_index)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path, compression="zstd")
+    return path
+
+
 def remove_source_tree(source: str, root: Path = CORPUS_ROOT) -> None:
     """Delete one source's versioned tree, and nothing else (D27).
 
@@ -330,6 +396,51 @@ def read_outcome_parts(paths: Iterable[Path]) -> Iterator[NYC311Outcome]:
     """
     return heapq.merge(
         *(_stream_outcome_part(path) for path in paths),
+        key=lambda outcome: outcome.external_id,
+    )
+
+
+def _stream_cfpb_outcome_part(path: Path) -> Iterator[CFPBOutcome]:
+    """Yield one CFPB outcome part's rows in stored order, a batch at a time.
+
+    The file's own schema is checked against `CFPB_OUTCOME_ARROW_SCHEMA` first,
+    so a string where a boolean belongs, a naive timestamp, or a missing column
+    is a loud failure rather than a silently mistyped outcome. Reading an NYC 311
+    part through here therefore refuses rather than mis-parsing.
+    """
+    parquet_file = pq.ParquetFile(path)
+    try:
+        stored = parquet_file.schema_arrow
+        for field in CFPB_OUTCOME_ARROW_SCHEMA:
+            if field.name not in stored.names:
+                raise ValueError(f"{path} has no {field.name!r} column")
+            actual = stored.field(field.name).type
+            if actual != field.type:
+                raise ValueError(f"{path} stores {field.name!r} as {actual}, not {field.type}")
+
+        batches = parquet_file.iter_batches(
+            batch_size=READ_BATCH_SIZE, columns=CFPB_OUTCOME_ARROW_SCHEMA.names
+        )
+        for batch in batches:
+            for row in batch.to_pylist():
+                yield CFPBOutcome(
+                    external_id=row["external_id"],
+                    timely_response=row["timely_response"],
+                    sent_to_company_at=row["date_sent_to_company"],
+                )
+    finally:
+        parquet_file.close()
+
+
+def read_cfpb_outcome_parts(paths: Iterable[Path]) -> Iterator[CFPBOutcome]:
+    """Merge the given CFPB outcome part files in `external_id` order.
+
+    Each part is already identity-sorted, so a lazy k-way merge produces globally
+    sorted output while holding at most one batch per file -- the bound
+    `read_outcome_parts` gives NYC 311's.
+    """
+    return heapq.merge(
+        *(_stream_cfpb_outcome_part(path) for path in paths),
         key=lambda outcome: outcome.external_id,
     )
 

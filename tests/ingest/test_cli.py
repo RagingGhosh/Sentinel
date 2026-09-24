@@ -2024,29 +2024,49 @@ def test_a_311_run_preserves_the_normalised_close_timestamp(tmp_path):
     assert loaded.resolution_hours is not None
 
 
-def test_the_311_ingest_change_creates_no_cfpb_outcome_schema(tmp_path):
-    """D37's corrective scope: CFPB outcome persistence belongs to Task 19, not here.
+def test_a_cfpb_run_persists_its_own_outcome_sidecar(tmp_path):
+    """Task 19's O1 supersedes D37's scope: CFPB now persists its own sidecar.
 
-    Mutation: generalise the sidecar to every source, which would invent a CFPB
-    schema this task never defined and Task 19 would then be stuck with.
+    This test previously asserted the opposite. D37 deferred the CFPB schema to
+    "the task that first consumes it"; Task 19 is that task, so the assertion is
+    inverted rather than deleted and the same property stays pinned here.
+
+    Mutation: leave `cli.py` gating outcome persistence on `source == "nyc311"`,
+    which would discard the evaluation target the probe is scored against.
     """
     from ingest import storage as storage_module
 
     a_cfpb_run(tmp_path, [[cfpb_row("1"), cfpb_row("2")]])
     manifest = read_manifest("cfpb", root=tmp_path / "corpus")
-    assert manifest.outcome_part_files == {}
+    assert manifest.outcome_part_files, "the run declared no CFPB outcome sidecar"
     root = tmp_path / "corpus" / "cfpb" / f"v{SCHEMA_VERSION}"
-    assert not (root / "outcomes").exists()
-    assert not hasattr(storage_module, "CFPB_OUTCOME_ARROW_SCHEMA")
+    assert (root / "outcomes").is_dir()
+    assert tuple(storage_module.CFPB_OUTCOME_ARROW_SCHEMA.names) == (
+        "external_id",
+        "timely_response",
+        "date_sent_to_company",
+    )
 
 
-def test_a_cfpb_corpus_declares_no_outcome_sidecar_to_load(tmp_path):
-    """The typed absence error is the correct answer for a source with no sidecar."""
-    from ingest.manifest import OutcomeSidecarNotFound, load_outcomes
+def test_the_nyc311_loader_never_deserialises_a_cfpb_sidecar(tmp_path):
+    """Fail closed across sources: the typed schema check refuses those bytes.
+
+    The other half of the inversion. A CFPB sidecar now exists, so the typed
+    absence error is no longer the right answer for this corpus; what must hold
+    instead is that NYC 311's loader never turns CFPB rows into `NYC311Outcome`.
+    The property asserted is failure and non-deserialisation, not a particular
+    exception class -- no contract fixes one for a cross-source read.
+    """
+    from ingest.manifest import load_outcomes
+    from ingest.schema import NYC311Outcome
 
     a_cfpb_run(tmp_path, [[cfpb_row("1")]])
-    with pytest.raises(OutcomeSidecarNotFound):
-        load_outcomes("cfpb", root=tmp_path / "corpus")
+    produced: list[object] = []
+    with pytest.raises(Exception):
+        _, outcomes = load_outcomes("cfpb", root=tmp_path / "corpus")
+        produced.extend(outcomes)
+    assert produced == [], "CFPB rows were deserialised before the refusal"
+    assert not any(isinstance(item, NYC311Outcome) for item in produced)
 
 
 def test_records_and_outcomes_are_written_by_the_same_run(tmp_path):

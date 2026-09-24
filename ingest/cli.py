@@ -73,7 +73,12 @@ from ingest.roster import assert_roster, derive_roster
 from ingest.schema import CFPBOutcome, CorpusRecord, NYC311Outcome
 from ingest.sources import cfpb, nyc311
 from ingest.sources.base import SourcePage
-from ingest.storage import CORPUS_ROOT, write_outcome_partition, write_partition
+from ingest.storage import (
+    CORPUS_ROOT,
+    write_cfpb_outcome_partition,
+    write_outcome_partition,
+    write_partition,
+)
 
 RAW_ROOT = Path("data") / "raw"
 """Gitignored, like the corpus. Holds the fetched pages a rerun reuses."""
@@ -552,13 +557,17 @@ def ingest(
 
     # D37: NYC 311's outcome stream is persisted beside its records rather than
     # discarded here, because the risk model's entire target derives from it.
-    # Deliberately scoped to this one source: a future source's sidecar schema
-    # belongs to the task that first consumes it, not to this one.
+    # Task 19's O1 does the same for CFPB, whose `timely_response` is the probe's
+    # evaluation target. Two sources, two sidecar schemas: each is written by its
+    # own writer, and neither accepts the other's rows.
     outcomes_by_partition: dict[int, list[NYC311Outcome]] = {}
-    if source == "nyc311":
-        for record, outcome in kept:
-            assert isinstance(outcome, NYC311Outcome)
-            outcomes_by_partition.setdefault(record.submitted_at.year, []).append(outcome)
+    cfpb_outcomes_by_partition: dict[int, list[CFPBOutcome]] = {}
+    for record, outcome in kept:
+        year = record.submitted_at.year
+        if isinstance(outcome, NYC311Outcome):
+            outcomes_by_partition.setdefault(year, []).append(outcome)
+        else:
+            cfpb_outcomes_by_partition.setdefault(year, []).append(outcome)
 
     local = _local_hour_source(source)
     diagnostic = build_diagnostic(
@@ -580,6 +589,8 @@ def ingest(
         write_partition(partition, source, year, 0, root=corpus_root)
     for year, outcome_partition in sorted(outcomes_by_partition.items()):
         write_outcome_partition(outcome_partition, source, year, 0, root=corpus_root)
+    for year, cfpb_partition in sorted(cfpb_outcomes_by_partition.items()):
+        write_cfpb_outcome_partition(cfpb_partition, source, year, 0, root=corpus_root)
 
     manifest = build_manifest(
         source=source,
