@@ -25,6 +25,7 @@ Task 18 owns the retrieval definition instead.
 import dataclasses
 import hashlib
 import importlib
+import itertools
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -157,6 +158,100 @@ def build_fixture_corpus(root: Path) -> None:
     write_manifest(manifest, root=root)
 
 
+#: A corpus where every record carries a unique pair drawn from a small shared
+#: marker vocabulary. The pair makes each record's text unique, while the markers
+#: themselves recur often enough to survive `min_df=2` and to be **established in
+#: the training period** -- a token seen only after the training cut is not in the
+#: fitted vocabulary at all, so it could not distinguish anything. None of the
+#: words appears in `SYNONYM_TABLE`, so the synonym perturbation is a no-op here
+#: and each query is byte-identical to its original.
+DISTINCTIVE_COUNT = 20
+MARKERS = tuple(f"w{index:02d}" for index in range(7))
+MARKER_PAIRS = tuple(itertools.combinations(MARKERS, 2))[:DISTINCTIVE_COUNT]
+
+
+def distinctive_records() -> list[CorpusRecord]:
+    return [
+        CorpusRecord(
+            source=SOURCE,
+            external_id=f"d{index:04d}",
+            text=(f"{first} {second} shared filler phrase kept beyond the truncation boundary"),
+            label="Billing" if index % 2 else "Mortgage",
+            submitted_at=CORPUS_START + timedelta(hours=index),
+        )
+        for index, (first, second) in enumerate(MARKER_PAIRS)
+    ]
+
+
+def build_distinctive_corpus(root: Path) -> None:
+    records = distinctive_records()
+    write_partition(records, SOURCE, 2024, 0, root=root)
+    write_manifest(
+        build_manifest(
+            SOURCE,
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            source_api_version="fixture-v1",
+            limit=None,
+            timestamp_diagnostic=TIMESTAMP_DIAGNOSTIC,
+            root=root,
+            ingested_at=datetime(2026, 9, 23, 12, 0, tzinfo=UTC),
+        ),
+        root=root,
+    )
+
+
+#: A corpus whose test period holds narratives far past Sentinel's 256-token
+#: MiniLM limit, so the benchmark's MiniLM arm must truncate. Everything earlier
+#: is short, which makes the expected count derivable rather than observed: the
+#: arm embeds the candidate population once, then one query batch per
+#: perturbation type, and only the long records truncate.
+LONG_RECORD_COUNT = 3
+LONG_CORPUS_SIZE = 20
+LONG_NARRATIVE = "consumer narrative sentence about a billing dispute " * 400
+
+#: Each long record is embedded once as a candidate and once per perturbation
+#: type as a query. Truncation keeps 60% of a 2,800-word text and the typo and
+#: synonym perturbations preserve length, so every perturbed copy is still past
+#: the limit.
+EXPECTED_LONG_TRUNCATIONS = LONG_RECORD_COUNT * (1 + len(PERTURBATION_TYPES))
+
+
+def long_records() -> list[CorpusRecord]:
+    records = []
+    for index in range(LONG_CORPUS_SIZE):
+        text = f"billing statement dispute case {index:04d} filler words for length"
+        if index >= LONG_CORPUS_SIZE - LONG_RECORD_COUNT:
+            text = f"{text} {LONG_NARRATIVE}"
+        records.append(
+            CorpusRecord(
+                source=SOURCE,
+                external_id=f"{index:04d}",
+                text=text,
+                label="Billing" if index % 2 else "Mortgage",
+                submitted_at=CORPUS_START + timedelta(hours=index),
+            )
+        )
+    return records
+
+
+def build_long_corpus(root: Path) -> None:
+    write_partition(long_records(), SOURCE, 2024, 0, root=root)
+    write_manifest(
+        build_manifest(
+            SOURCE,
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            source_api_version="fixture-v1",
+            limit=None,
+            timestamp_diagnostic=TIMESTAMP_DIAGNOSTIC,
+            root=root,
+            ingested_at=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
+        ),
+        root=root,
+    )
+
+
 @pytest.fixture
 def corpus_root(tmp_path) -> Path:
     root = tmp_path / "corpus"
@@ -237,16 +332,74 @@ def test_the_tuning_budget_is_zero_for_the_whole_benchmark():
 # --- temporal boundaries and leakage (§6.2) -----------------------------------------
 
 
-def test_the_index_holds_no_record_later_than_the_query_period(records, split):
-    """Leakage path 6: an index over all periods lets a test query retrieve the future."""
-    population = dedup().index_population(records, split)
-    latest_test = max(
-        record.submitted_at
-        for record in records
-        if split.period_of(record.submitted_at) is Period.TEST
+def after_the_window(hours: int = 48) -> CorpusRecord:
+    """A record dated past the evaluation window's end, by construction."""
+    return CorpusRecord(
+        source=SOURCE,
+        external_id="late",
+        text="a record submitted after the evaluation window closed",
+        label="Billing",
+        submitted_at=WINDOW_END + timedelta(hours=hours),
     )
+
+
+def test_the_index_holds_no_record_later_than_the_evaluation_window(records, split):
+    """Leakage path 6, bounded by the window rather than by the records themselves.
+
+    The boundary cannot come from the records: `temporal_split` partitions the very
+    records handed in, so the newest of them is always inside the test period and a
+    records-derived rule could never exclude anything. The window end is the
+    independent value, so this assertion is about the contract rather than about
+    arithmetic that is true by construction.
+    """
+    module = dedup()
+    late = after_the_window()
+    population = module.index_population([*records, late], split, evaluation_end=WINDOW_END)
     assert population, "the index population is empty"
-    assert max(record.submitted_at for record in population) <= latest_test
+    assert late not in population, "a record after the evaluation window became a candidate"
+    assert max(record.submitted_at for record in population) <= WINDOW_END
+    assert len(population) == len(records)
+
+
+def test_a_record_after_the_window_cannot_reach_the_index(records, split):
+    """Excluded from the population means excluded from what is searchable."""
+    module = dedup()
+    late = after_the_window()
+    population = module.index_population([*records, late], split, evaluation_end=WINDOW_END)
+    index = module.build_index(
+        [make_ref(record) for record in population],
+        unit_vectors(len(population), 6),
+    )
+    assert make_ref(late) not in index.refs
+
+
+def test_the_boundary_is_not_the_newest_record(records, split):
+    """Guard the guard: the late record must be genuinely newer, or this is vacuous."""
+    late = after_the_window()
+    assert late.submitted_at > max(record.submitted_at for record in records)
+    assert late.submitted_at > WINDOW_END
+    assert split.period_of(late.submitted_at) is Period.TEST, (
+        "the split classifies it as test period, which is exactly why the boundary "
+        "cannot be derived from the split"
+    )
+
+
+def test_an_evaluation_window_ending_before_the_test_period_is_refused(records, split):
+    """A window that closes inside validation leaves nothing to query for."""
+    with pytest.raises(ValueError):
+        dedup().index_population(records, split, evaluation_end=split.val_end)
+
+
+def test_both_arms_search_the_bounded_population(assets, corpus_root):
+    """The one bounded population, shared: same refs, none past the window."""
+    manifest, _ = load_corpus(SOURCE, root=corpus_root)
+    report = dedup().run_benchmark(corpus_root=corpus_root)
+    timestamps = {make_ref(record): record.submitted_at for record in fixture_records()}
+    for arm in ARMS:
+        assert report.arms[arm].candidate_refs == report.arms["tfidf"].candidate_refs
+        assert all(
+            timestamps[ref] <= manifest.window_end for ref in report.arms[arm].candidate_refs
+        )
 
 
 def test_every_query_record_comes_from_the_test_period(records, split):
@@ -260,7 +413,10 @@ def test_every_query_record_comes_from_the_test_period(records, split):
 def test_every_query_original_is_addressable_in_the_index(records, split):
     """Recall is undefined if the answer is not in the candidate population."""
     config = dedup().BENCHMARK_CONFIG
-    indexed = {make_ref(record) for record in dedup().index_population(records, split)}
+    indexed = {
+        make_ref(record)
+        for record in dedup().index_population(records, split, evaluation_end=WINDOW_END)
+    }
     for record in dedup().query_population(records, split, config):
         assert make_ref(record) in indexed
 
@@ -510,13 +666,54 @@ def test_the_baseline_is_a_single_seeded_random_ranking():
     assert first == second
 
 
-def test_the_baseline_changes_with_its_seed():
+def one_draw_rankings(candidates, query_count: int, seed: int) -> list[list[RecordRef]]:
+    """D38's baseline, recomputed here: one seeded stream, one ranking per query.
+
+    An independent oracle rather than a call into production, so the assertions
+    below compare the implementation against the contract instead of against
+    itself.
+    """
+    scores = np.random.default_rng(seed).random((query_count, len(candidates)))
+    return [
+        [candidates[position] for position in np.argsort(-row, kind="stable")] for row in scores
+    ]
+
+
+def one_draw_recall(candidates, expected, k: int, seed: int) -> float:
+    rankings = one_draw_rankings(candidates, len(expected), seed)
+    hits = sum(
+        1 for ranking, original in zip(rankings, expected, strict=True) if original in ranking[:k]
+    )
+    return hits / len(expected)
+
+
+def test_the_baseline_is_exactly_one_seeded_ranking_per_query():
+    """Not an average over draws: the value must be the single-draw one exactly.
+
+    Deliberately not "two seeds give different recall": recall@k over a small
+    population is coarse, and two distinct random streams legitimately land on
+    the same number, so that assertion would test arithmetic luck rather than
+    the contract.
+    """
     module = dedup()
-    candidates = refs(50)
-    expected = [candidates[7]] * 20
-    assert module.random_ranking_baseline(
-        expected, candidates, k=HEADLINE_K, seed=SEED
-    ) != module.random_ranking_baseline(expected, candidates, k=HEADLINE_K, seed=SEED + 1)
+    candidates = refs(40)
+    expected = [candidates[index % len(candidates)] for index in range(25)]
+    for seed in (SEED, SEED + 1):
+        for k in REPORTED_KS:
+            assert module.random_ranking_baseline(
+                expected, candidates, k=k, seed=seed
+            ) == pytest.approx(one_draw_recall(candidates, expected, k, seed)), (seed, k)
+
+
+def test_the_seed_controls_the_ranking_the_baseline_draws():
+    """The seed must actually steer the draw, asserted where that is structural.
+
+    The rankings differ wholesale between seeds; the recall scalar they produce
+    may or may not, which is why the equality above is what binds production to
+    the contract.
+    """
+    candidates = refs(40)
+    assert one_draw_rankings(candidates, 25, SEED) != one_draw_rankings(candidates, 25, SEED + 1)
 
 
 def test_the_baseline_requires_its_seed():
@@ -540,6 +737,54 @@ def test_the_benchmark_fails_closed_without_the_minilm_assets(corpus_root, tmp_p
     minilm = importlib.import_module("ml.embedders.minilm")
     with pytest.raises(minilm.ModelAssetUnavailable):
         dedup().run_benchmark(corpus_root=corpus_root)
+
+
+def test_the_benchmark_fits_tfidf_on_training_text_only(assets, corpus_root, records, monkeypatch):
+    """Leakage path 2, asserted of the benchmark's own wiring.
+
+    `test_tfidf.py` proves `fit_tfidf` honours the texts it is given; this proves
+    the benchmark gives it the training period and nothing else. Both are needed:
+    a correct fitter called with the whole corpus leaks just as thoroughly.
+    """
+    module = dedup()
+    captured: list[list[str]] = []
+    real = module.fit_tfidf
+
+    def spy(train_texts, config):
+        captured.append(list(train_texts))
+        return real(train_texts, config)
+
+    monkeypatch.setattr(module, "fit_tfidf", spy)
+    module.run_benchmark(corpus_root=corpus_root)
+
+    split = temporal_split([record.submitted_at for record in records])
+    training = [
+        record.text for record in records if split.period_of(record.submitted_at) is Period.TRAIN
+    ]
+    assert captured == [training], "the arm was not fitted on exactly the training texts"
+    assert not any(TEST_SENTINEL in text for text in captured[0])
+
+
+def test_a_query_identical_to_its_original_retrieves_that_original(assets, tmp_path):
+    """M15 guard: an actual recall value, not the shape of one.
+
+    These records carry no token the substitution table knows, so the synonym
+    perturbation returns each text unchanged and every query *is* its original.
+    An identical text must therefore rank its own record first -- for any
+    representation, since a vector's cosine with itself is the maximum. Anything
+    below 1.0 means the benchmark scored against the wrong target.
+    """
+    root = tmp_path / "distinctive"
+    build_distinctive_corpus(root)
+    report = dedup().run_benchmark(corpus_root=root)
+
+    texts = {make_ref(record): record.text for record in distinctive_records()}
+    for query in report.arms["tfidf"].queries["synonym"]:
+        assert query.text == texts[query.ref], "the fixture must leave these texts unperturbed"
+
+    for arm in ARMS:
+        assert report.arms[arm].recall["synonym"][1] == pytest.approx(1.0), arm
+        assert report.arms[arm].recall["synonym"][HEADLINE_K] == pytest.approx(1.0), arm
 
 
 def test_both_arms_receive_the_same_config_object(assets, corpus_root):
@@ -633,6 +878,59 @@ def test_each_arm_records_its_observed_dimension(assets, corpus_root):
     for arm in ARMS:
         assert isinstance(report.arms[arm].embedding_dimension, int)
         assert report.arms[arm].embedding_dimension > 0
+
+
+def test_the_report_counts_the_inputs_this_run_truncated(assets, tmp_path):
+    """The MiniLM arm's truncation count must be the run's own, and non-zero here.
+
+    This is report wiring, not embedder behaviour: reading the counter as an
+    argument to the call that does the embedding takes the difference before a
+    single input has been embedded, and every run then reports zero however much
+    it truncated. The expectation is derived from the fixture's shape, and
+    cross-checked against a separately loaded embedder fed the same texts.
+    """
+    root = tmp_path / "long"
+    build_long_corpus(root)
+    report = dedup().run_benchmark(corpus_root=root)
+    reported = report.arms["minilm"].truncated_input_count
+
+    assert reported > 0, "the arm truncated inputs but the report says it did not"
+    assert reported == EXPECTED_LONG_TRUNCATIONS
+
+    # Independent of the report: a fresh embedder fed exactly what the arm was fed.
+    independent = importlib.import_module("ml.embedders.minilm").load_minilm()
+    independent.embed([record.text for record in long_records()])
+    for kind in PERTURBATION_TYPES:
+        independent.embed([query.text for query in report.arms["minilm"].queries[kind]])
+    assert reported == independent.truncated_input_count
+
+
+def test_a_short_corpus_reports_no_truncation(assets, corpus_root):
+    """The other half of the claim: the count is a measurement, not a constant."""
+    report = dedup().run_benchmark(corpus_root=corpus_root)
+    assert report.arms["minilm"].truncated_input_count == 0
+
+
+def test_the_dimension_probe_does_not_enter_the_count(assets, tmp_path):
+    """`load_minilm` embeds a probe to observe the width; it must not be counted.
+
+    Two runs over the same corpus each load their own arm, so an equal count on
+    both proves the probe contributes nothing and that no earlier run leaks in.
+    """
+    root = tmp_path / "long-twice"
+    build_long_corpus(root)
+    first = dedup().run_benchmark(corpus_root=root)
+    second = dedup().run_benchmark(corpus_root=root)
+    assert first.arms["minilm"].truncated_input_count == EXPECTED_LONG_TRUNCATIONS
+    assert second.arms["minilm"].truncated_input_count == EXPECTED_LONG_TRUNCATIONS
+
+
+def test_the_tfidf_arm_reports_no_truncation_count(assets, tmp_path):
+    """Truncation is not a concept the lexical arm has, so it records none."""
+    root = tmp_path / "long-tfidf"
+    build_long_corpus(root)
+    report = dedup().run_benchmark(corpus_root=root)
+    assert report.arms["tfidf"].truncated_input_count is None
 
 
 def test_the_benchmark_writes_no_artifact(assets, corpus_root, tmp_path):
