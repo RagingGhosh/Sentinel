@@ -17,8 +17,8 @@ first embedder artifact when it wires the winner behind `DedupIndex`.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +29,12 @@ from ingest.manifest import load_corpus
 from ingest.schema import CorpusRecord
 from ml.embedders.minilm import EmbeddingDimensionMismatch, load_minilm
 from ml.embedders.tfidf import TFIDF_CONFIG, fit_tfidf
+from ml.training.index import (
+    RetrievalIndex,
+    _require_record_refs,
+    build_index,
+    cosine_similarity,
+)
 from ml.training.splits import DEFAULT_FRACTIONS, Period, TemporalSplit, temporal_split
 
 __all__ = [
@@ -117,15 +123,6 @@ source: a downloaded lexicon would make the benchmark irreproducible in exactly
 the way §5.3 exists to prevent, and would need a dependency D38 does not allow."""
 
 
-def cosine_similarity(queries: np.ndarray, candidates: np.ndarray) -> np.ndarray:
-    """Cosine over L2-normalised vectors, which on unit rows is the dot product.
-
-    Both arms produce normalised rows by contract, so no renormalisation happens
-    here: silently rescaling would hide an arm that stopped normalising.
-    """
-    return np.asarray(queries, dtype=np.float32) @ np.asarray(candidates, dtype=np.float32).T
-
-
 @dataclass(frozen=True)
 class BenchmarkConfig:
     """Everything held constant across the arms (§5.3's table).
@@ -169,78 +166,6 @@ class PerturbedQuery:
 
     ref: RecordRef
     text: str
-
-
-# --- the retrieval index ---------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class RetrievalIndex:
-    """Candidate embeddings, addressed by `RecordRef` and by nothing else.
-
-    The width the index was built with is recorded, and every query is checked
-    against it: comparing vectors of different widths is either a crash in the
-    wrong place or, worse, a broadcast that quietly scores nonsense (D18).
-    """
-
-    refs: tuple[RecordRef, ...]
-    vectors: np.ndarray
-    dimension: int
-    similarity: Callable[[np.ndarray, np.ndarray], np.ndarray] = field(default=cosine_similarity)
-
-    def rank(self, vector: np.ndarray) -> tuple[RecordRef, ...]:
-        """Every candidate, most similar first, as references."""
-        query = np.asarray(vector, dtype=np.float32).reshape(1, -1)
-        if query.shape[1] != self.dimension:
-            raise EmbeddingDimensionMismatch(
-                f"this index was built with embeddings of width {self.dimension} "
-                f"but was queried with one of width {query.shape[1]}; widths are "
-                "never broadcast, truncated or padded to make a comparison work"
-            )
-        scores = np.asarray(self.similarity(query, self.vectors)).ravel()
-        order = np.argsort(-scores, kind="stable")
-        return tuple(self.refs[position] for position in order)
-
-
-def build_index(
-    refs: Sequence[RecordRef],
-    vectors: np.ndarray,
-    *,
-    similarity: Callable[[np.ndarray, np.ndarray], np.ndarray] = cosine_similarity,
-) -> RetrievalIndex:
-    """Bind references to embeddings, refusing a population that repeats one.
-
-    A duplicate reference is refused rather than de-duplicated: silently dropping
-    one would change the denominator every recall figure is computed against.
-
-    `similarity` is taken from the shared configuration by the benchmark, so the
-    function both arms rank with is one the config actually governs rather than a
-    default each index happens to hold.
-    """
-    references = tuple(refs)
-    matrix = np.asarray(vectors, dtype=np.float32)
-    if matrix.ndim != 2:
-        raise ValueError(f"expected a 2-D embedding matrix, got shape {matrix.shape}")
-    if len(references) != matrix.shape[0]:
-        raise ValueError(
-            f"{len(references)} references but {matrix.shape[0]} embeddings; "
-            "every candidate must carry exactly one vector"
-        )
-    _require_record_refs(references, "the candidate population")
-    seen: set[RecordRef] = set()
-    for ref in references:
-        if ref in seen:
-            raise ValueError(
-                f"{ref} appears more than once in the candidate population; "
-                "a repeated reference would change the recall denominator"
-            )
-        seen.add(ref)
-    return RetrievalIndex(
-        refs=references,
-        vectors=matrix,
-        dimension=int(matrix.shape[1]),
-        similarity=similarity,
-    )
 
 
 # --- the metric and its baseline -------------------------------------------------------
@@ -603,17 +528,3 @@ def _minilm_constant(name: str) -> str:
     import ml.embedders.minilm as module
 
     return str(getattr(module, name))
-
-
-def _require_record_refs(values: Iterable[object], what: str) -> None:
-    """Identity is a `RecordRef` throughout, never a position in some array.
-
-    A positional identity would silently collide across sources, which is exactly
-    what `ingest.identity` exists to prevent.
-    """
-    for value in values:
-        if not isinstance(value, RecordRef):
-            raise ValueError(
-                f"{what} must hold RecordRef values, got {type(value).__name__}; "
-                "a positional index is not an identity"
-            )
