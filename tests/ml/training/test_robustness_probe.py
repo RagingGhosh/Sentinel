@@ -33,11 +33,15 @@ np = pytest.importorskip("numpy", reason="numpy lives in requirements/ml.txt")
 pytest.importorskip("sklearn", reason="scikit-learn lives in requirements/ml.txt")
 pytest.importorskip("pyarrow", reason="pyarrow lives in requirements/train.txt")
 
+from sklearn.ensemble import HistGradientBoostingClassifier  # noqa: E402
+
 from ingest.manifest import build_manifest, write_manifest  # noqa: E402
 from ingest.schema import CFPBOutcome, CorpusRecord, NYC311Outcome  # noqa: E402
 from ingest.storage import write_outcome_partition, write_partition  # noqa: E402
-from ml.training.features import TRANSFER_FEATURES_V1  # noqa: E402
+from ml.training.features import TRANSFER_FEATURES_V1, build_features  # noqa: E402
+from ml.training.labels import apply_thresholds, fit_thresholds  # noqa: E402
 from ml.training.splits import DEFAULT_FRACTIONS, Period, temporal_split  # noqa: E402
+from ml.training.thresholds import MIN_ELIGIBLE_OBSERVATIONS  # noqa: E402
 
 pytestmark = pytest.mark.ml
 
@@ -104,8 +108,15 @@ def probe():
 #
 # NYC 311: 60 records inside the frozen window, one hour apart. At 70/15/15 that is
 # 42 train, 9 validation and 9 test. Nine are left open -- no resolution time -- so
-# "an open request never receives a fabricated label" is observable. Resolution
-# hours alternate around the per-type p75 so both classes exist in every period.
+# "an open request never receives a fabricated label" is observable.
+#
+# Every fifth request takes 900 hours and the rest take 4 to 6, so the frozen
+# training p75 lands among the short ones and the long tail is a genuine breach.
+# That tail has to stay under a quarter of the eligible observations: an earlier
+# fixture gave half the requests 400 hours and half 4, which made the p75 exactly
+# 400, and `is_breach` is *strictly* greater -- so every label came out False and
+# the probe could not run at all. `test_the_fixture_has_both_classes_...` now
+# asserts on the derived labels rather than on the hours behind them.
 #
 # CFPB: 40 records, a mix of timely and untimely, with narratives an order of
 # magnitude longer than the 311 descriptors so `text_length` shift is real.
@@ -147,7 +158,7 @@ def nyc_outcomes() -> list[NYC311Outcome]:
                 NYC311Outcome(external_id=f"n{index:04d}", closed_at=None, resolution_hours=None)
             )
             continue
-        hours = 4.0 if index % 2 else 400.0
+        hours = 900.0 if index % 5 == 0 else 4.0 + (index % 3)
         outcomes.append(
             NYC311Outcome(
                 external_id=f"n{index:04d}",
@@ -277,21 +288,52 @@ def cfpb_split():
     return temporal_split([record.submitted_at for record in cfpb_records()], DEFAULT_FRACTIONS)
 
 
+def nyc_labelled(period: Period) -> tuple[list[CorpusRecord], np.ndarray]:
+    """One 311 period's labelled population, derived the way Task 17 derives it.
+
+    Rebuilt here from the frozen machinery -- the window, `temporal_split`,
+    `fit_thresholds` on TRAIN only, then `apply_thresholds` -- so the expectation
+    is independent of `robustness_probe`'s arithmetic instead of a restatement of
+    it. Open requests carry no label and are absent from the result (O6).
+    """
+    split = nyc_split()
+    by_id = {outcome.external_id: outcome for outcome in nyc_outcomes()}
+    windowed = [
+        record for record in nyc_records() if WINDOW_START <= record.submitted_at <= WINDOW_END
+    ]
+    train = [record for record in windowed if split.period_of(record.submitted_at) is Period.TRAIN]
+    frozen = fit_thresholds(
+        train,
+        [by_id[record.external_id] for record in train],
+        min_eligible=MIN_ELIGIBLE_OBSERVATIONS,
+    )
+    resolved = [
+        record
+        for record in windowed
+        if split.period_of(record.submitted_at) is period
+        and by_id[record.external_id].resolution_hours is not None
+    ]
+    labels = apply_thresholds(frozen, resolved, [by_id[record.external_id] for record in resolved])
+    return resolved, labels
+
+
 # --- the fixture itself --------------------------------------------------------------
 
 
 def test_the_fixture_has_both_classes_in_every_labelled_311_period():
-    """Guard the guard: a one-class period would make PR-AUC raise by design (D34)."""
-    split = nyc_split()
-    hours = {o.external_id: o.resolution_hours for o in nyc_outcomes()}
-    for period in Period:
-        resolved = [
-            hours[record.external_id]
-            for record in nyc_records()
-            if split.period_of(record.submitted_at) is period
-            and hours[record.external_id] is not None
-        ]
-        assert len(set(resolved)) > 1, period
+    """Guard the guard: a one-class period would make PR-AUC raise by design (D34).
+
+    Asserted on the labels Task 13's frozen thresholds actually produce, not on
+    the distinct resolution hours behind them. Two distinct hour values can still
+    yield one class, and once did: with half the requests at 400 hours and half at
+    4, the training p75 *was* 400, `is_breach` is strictly greater, and every
+    label came out False while this guard still passed. TRAIN and TEST are the
+    required periods -- the validation period tunes nothing here (O5).
+    """
+    for period in (Period.TRAIN, Period.TEST):
+        records, labels = nyc_labelled(period)
+        assert records, period
+        assert {bool(value) for value in labels} == {False, True}, period
 
 
 def test_the_fixture_has_untimely_cfpb_records_in_the_test_period():
@@ -434,6 +476,126 @@ def test_only_records_with_a_persisted_outcome_are_evaluated(corpora, artifact_r
     assert set(report.cross_domain_evaluation_population["refs"]) <= persisted
 
 
+def test_a_cfpb_record_without_a_persisted_outcome_is_ineligible(tmp_path):
+    """Contract §3 restricts the evaluation population to persisted outcomes.
+
+    The fixture corpus persists an outcome for every CFPB record, so on its own it
+    cannot tell "restrict to the records the sidecar covers" apart from "take the
+    whole test period" -- both produce the same six rows. This drops the last
+    test-period outcome: the record must leave the evaluation population and be
+    counted there, rather than crashing the join or being scored against a target
+    that does not exist.
+    """
+    storage = importlib.import_module("ingest.storage")
+    root = build_corpora(tmp_path / "corpus")
+    dropped = f"c{CFPB_COUNT - 1:04d}"
+    write_corpus(
+        root,
+        EVALUATION_SOURCE,
+        cfpb_records(),
+        [outcome for outcome in cfpb_outcomes() if outcome.external_id != dropped],
+        storage.write_cfpb_outcome_partition,
+    )
+
+    report = probe().run_probe(
+        corpus_root=root,
+        artifact_root=tmp_path / "artifacts",
+        report_path=tmp_path / "report.json",
+    )
+
+    split = cfpb_split()
+    in_test_period = {
+        record.external_id
+        for record in cfpb_records()
+        if split.period_of(record.submitted_at) is Period.TEST
+    }
+    assert dropped in in_test_period, "the fixture must drop an outcome from the test period"
+    population = report.cross_domain_evaluation_population
+    assert set(population["refs"]) == in_test_period - {dropped}
+    assert population["without_persisted_outcome_count"] == 1
+
+
+def _rewrite_cfpb(root: Path, records, outcomes) -> None:
+    """Re-issue the CFPB corpus, its sidecar and its manifest under one year.
+
+    `write_corpus` buckets outcomes by looking each one's record up, so it cannot
+    write an outcome that matches no record; this writes both partitions directly.
+    Every CFPB fixture record is submitted in the same year, so one part each.
+    """
+    storage = importlib.import_module("ingest.storage")
+    write_partition(records, EVALUATION_SOURCE, CFPB_START.year, 0, root=root)
+    storage.write_cfpb_outcome_partition(outcomes, EVALUATION_SOURCE, CFPB_START.year, 0, root=root)
+    write_manifest(
+        build_manifest(
+            EVALUATION_SOURCE,
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+            source_api_version="fixture-v1",
+            limit=None,
+            timestamp_diagnostic=TIMESTAMP_DIAGNOSTIC,
+            root=root,
+            ingested_at=datetime(2026, 9, 24, 12, 0, tzinfo=UTC),
+        ),
+        root=root,
+    )
+
+
+@pytest.mark.parametrize(
+    "corruption,message",
+    (
+        ("duplicate_corpus_id", "corpus repeats an external_id"),
+        ("duplicate_sidecar_id", "outcome sidecar repeats external_id"),
+        ("orphan_sidecar_id", "match no record"),
+    ),
+)
+def test_an_impossible_cfpb_join_fails_closed(tmp_path, corruption, message):
+    """Contract §13: an impossible population join raises rather than inflating.
+
+    Each corruption is pinned to its own message, because each has a different
+    consequence and a bare `Exception` would let any of the three stand in for the
+    others. The duplicated **corpus record** is the case this was written for:
+    nothing in `ingest` enforces identity uniqueness within a corpus, so that row
+    joined twice to one outcome and entered the evaluation population twice,
+    carrying PR-AUC, ROC-AUC, the minority count and the base rate with it, while
+    the sidecar itself stayed perfectly consistent. The 311 side already refused
+    exactly this.
+    """
+    root = build_corpora(tmp_path / "corpus")
+    records = list(cfpb_records())
+    outcomes = list(cfpb_outcomes())
+    last = records[-1]
+
+    if corruption == "duplicate_corpus_id":
+        records.append(
+            CorpusRecord(
+                source=EVALUATION_SOURCE,
+                external_id=last.external_id,
+                text="a second narrative under one identity",
+                label=last.label,
+                submitted_at=last.submitted_at,
+            )
+        )
+    elif corruption == "duplicate_sidecar_id":
+        outcomes.append(outcomes[-1])
+    else:
+        outcomes.append(
+            CFPBOutcome(
+                external_id="c9999",
+                timely_response=False,
+                sent_to_company_at=last.submitted_at,
+            )
+        )
+
+    _rewrite_cfpb(root, records, outcomes)
+
+    with pytest.raises(ValueError, match=message):
+        probe().run_probe(
+            corpus_root=root,
+            artifact_root=tmp_path / "artifacts",
+            report_path=tmp_path / "report.json",
+        )
+
+
 def test_the_probe_never_fits_anything_on_cfpb(corpora, artifact_root, report_path):
     """One model, fitted once on 311 TRAIN (O5, contract §6)."""
     source = Path(probe().__file__).read_text(encoding="utf-8")
@@ -524,6 +686,83 @@ def test_the_estimator_is_a_histogram_gradient_boosting_classifier():
 
 def test_the_seed_is_seventeen():
     assert probe().SEED == SEED
+
+
+FIT_CALLS: list[tuple[np.ndarray, np.ndarray]] = []
+
+
+class _RecordingEstimator(HistGradientBoostingClassifier):
+    """Records the X and y actually handed to `fit`, then fits for real.
+
+    A subclass rather than a patched bound method, because the fitted model is
+    pickled into the artifact: `joblib` stores this class by name, and the
+    recording list is a module global rather than instance state, so nothing
+    unpicklable is attached to the estimator.
+    """
+
+    def fit(self, X, y, **kwargs):
+        FIT_CALLS.append((np.array(X, dtype=float), np.array(y)))
+        return super().fit(X, y, **kwargs)
+
+
+def test_fit_receives_exactly_the_labelled_311_train_rows(
+    monkeypatch, corpora, artifact_root, report_path
+):
+    """The leakage guard: what `fit` *received*, not what the report claims.
+
+    `source_training_population` is assembled separately from the matrix the
+    estimator is given, so a report saying "train only" proves nothing about the
+    fit -- a probe fitted on TRAIN + TEST publishes an identical population block
+    and a quietly better in-domain figure. This spies on the call instead: one
+    fit, whose X and y equal the labelled TRAIN matrix and labels exactly, in the
+    frozen feature order.
+
+    Every wrong population it could receive changes the row count as well as the
+    values -- TEST is 8 rows, TRAIN + validation 43, TRAIN + TEST 44, all three
+    periods 51, against TRAIN's 36 -- so no swap or union can satisfy this by
+    accident.
+    """
+    module = probe()
+    FIT_CALLS.clear()
+    build = module.build_estimator
+    monkeypatch.setattr(
+        module, "build_estimator", lambda seed: _RecordingEstimator(**build(seed).get_params())
+    )
+
+    report = run(corpora, artifact_root, report_path)
+
+    assert len(FIT_CALLS) == 1, "the probe fits exactly once (O5, contract §6)"
+    fitted_features, fitted_labels = FIT_CALLS[0]
+    records, labels = nyc_labelled(Period.TRAIN)
+    expected = build_features(records, None, TRANSFER_FEATURES_V1)
+
+    assert fitted_features.shape == (len(records), len(FEATURE_NAMES))
+    assert np.array_equal(fitted_features, expected)
+    assert np.array_equal(fitted_labels.astype(bool), np.asarray(labels, dtype=bool))
+    # And the population the report publishes is the one that was actually fitted.
+    assert fitted_features.shape[0] == len(report.source_training_population["refs"])
+
+
+def test_the_candidate_fit_populations_are_all_distinguishable():
+    """Make the leakage guard un-fakeable: every wrong population differs in size.
+
+    `test_fit_receives_exactly_the_labelled_311_train_rows` compares the fitted
+    matrix against TRAIN's exactly. This pins the fixture property that makes that
+    comparison decisive rather than lucky: TRAIN, TEST, TRAIN + validation,
+    TRAIN + TEST and all three periods together are five different row counts, so
+    no swap or union can match TRAIN's shape by accident.
+    """
+    sizes = {period: len(nyc_labelled(period)[0]) for period in Period}
+    train = sizes[Period.TRAIN]
+    candidates = {
+        "test": sizes[Period.TEST],
+        "train+validation": train + sizes[Period.VALIDATION],
+        "train+test": train + sizes[Period.TEST],
+        "all three periods": sum(sizes.values()),
+    }
+    assert train > 0
+    for name, count in candidates.items():
+        assert count != train, name
 
 
 def test_no_class_weighting_or_resampling_is_applied():
@@ -641,14 +880,53 @@ def test_roc_auc_is_secondary_not_the_headline(corpora, artifact_root, report_pa
     assert probe().HEADLINE == "pr_auc"
 
 
+COMPARATIVE_VOCABULARY = (
+    "improvement",
+    "delta",
+    "degradation",
+    "gain",
+    "loss",
+    "before_after",
+    "drop_from",
+)
+"""What a comparison between the two evaluations would be published as. Scoped to
+the metrics section by contract §7: the report also copies Task 8's provenance
+evidence verbatim, and that diagnostic's own field names are
+`median_delta_seconds`, `frac_delta_le_1min`, `count_delta_negative` and
+`delta_percentiles_seconds`. Those carry no comparison between the two
+evaluations, and a whole-document substring scan would force the evidence §9 and
+§11 require out of the report to satisfy itself."""
+
+
 def test_the_two_headline_figures_are_never_a_before_after_pair(
     corpora, artifact_root, report_path
 ):
     """§5.4: base rates differ ~27x, so a delta between them would be arithmetic."""
+    import json
+
     report = run(corpora, artifact_root, report_path)
-    serialized = report.as_json()
-    for banned in ("improvement", "delta", "before_after", "degradation", "drop_from"):
-        assert banned not in serialized
+    serialized = json.dumps(json.loads(report.as_json())["metrics"])
+    for banned in COMPARATIVE_VOCABULARY:
+        assert banned not in serialized, banned
+
+
+def test_the_provenance_evidence_survives_the_comparison_guard(corpora, artifact_root, report_path):
+    """The other half of that scope: the evidence is present, not scanned away.
+
+    Guarding the guard. If the comparative-vocabulary check ever widens back to
+    the whole document, the only way to satisfy it is to drop Task 8's delta
+    metrics, and contract §9 and §11 require them in the report. This fails first
+    and says why.
+    """
+    import json
+
+    report = run(corpora, artifact_root, report_path)
+    assert "deltas" in report.timestamp_diagnostic
+    assert "rule_thresholds" in report.timestamp_diagnostic
+
+    diagnostic = json.loads(report.as_json())["timestamp_diagnostic"]
+    assert diagnostic["deltas"] == TIMESTAMP_DIAGNOSTIC["deltas"]
+    assert diagnostic["rule_thresholds"] == TIMESTAMP_DIAGNOSTIC["rule_thresholds"]
 
 
 def test_the_base_rate_is_recorded_per_evaluation(corpora, artifact_root, report_path):
