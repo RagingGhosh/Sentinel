@@ -271,6 +271,22 @@ baseline**; both baselines and both base rates sit beside them.
 
 **No figure is ever published alone.**
 
+**The prohibition is on comparative presentation inside the metrics, not on a
+vocabulary anywhere in the document.** What is forbidden is publishing the two
+figures as one before/after pair: an `improvement`, `delta`, `degradation`,
+`gain` or `loss` field, or any equivalent framing, in the metrics the report
+publishes. The check therefore applies to the serialized `metrics` section.
+
+It is **not** a ban on those words appearing anywhere in the report. Task 8's
+provenance evidence, which §9 requires the report to copy, is itself built from
+field names such as `median_delta_seconds`, `frac_delta_le_1min`,
+`count_delta_negative` and `delta_percentiles_seconds`. Those names are that
+diagnostic's own vocabulary, they carry no comparison between the two
+evaluations, and they are explicitly permitted. A guard scanning the whole
+serialized report for the substring would be satisfiable only by dropping the
+evidence §9 and §11 require, so the scope is fixed here rather than left to a
+test to imply.
+
 ---
 
 ## 8. Distribution-shift diagnostics — FROZEN
@@ -378,7 +394,8 @@ The report contains, at minimum:
 - the six framing facts;
 - `result_classification`;
 - the CFPB `timestamp_diagnostic` verdict used to set it, with the delta metrics
-  and rule thresholds that produced it;
+  and rule thresholds that produced it, under the diagnostic's own field names
+  and exempt from §7's comparative-vocabulary check;
 - the interpretation limitations of §12.
 
 ---
@@ -579,8 +596,12 @@ the contract uses CFPB's column name for the persisted field.
    `timely_response` outcomes.
 8. The baseline prior is fitted on NYC 311 TRAIN labels and is identical across
    both evaluations.
-9. A test asserts the report never presents the two PR-AUCs as a single
-   before/after pair, and that no prohibited transfer wording appears.
+9. A test asserts the report's `metrics` section never presents the two PR-AUCs
+   as a single before/after pair — no `improvement`, `delta`, `degradation`,
+   `gain` or `loss` field — and that no prohibited transfer wording appears
+   anywhere in the report. A companion test asserts the copied provenance
+   evidence of §9 is still present, so the guard can never be satisfied by
+   removing it (§7).
 10. The artifact loads through `load_artifact` with `feature_spec` of exactly the
     three names and `model_version` `xdomain_xtarget_probe_v1`.
 11. D35's metadata schema is unchanged and carries no Task 19 diagnostic.
@@ -593,3 +614,11 @@ the contract uses CFPB's column name for the persisted field.
     ML job's path-selected command; the workflow is otherwise byte-identical.
 16. The only historical test change is the two inverted assertions in
     `tests/ingest/test_cli.py`; every other Task 16–18 test is byte-identical.
+17. A test observes the arguments `fit` actually receives and asserts they are
+    exactly the labelled NYC 311 TRAIN matrix and labels, in the frozen feature
+    order. This is how O5's "training uses NYC 311 TRAIN only" is proven:
+    the reported training population is assembled separately from the matrix the
+    estimator is given, so a report claiming train-only establishes nothing about
+    the fit. A fixture guard keeps TRAIN, TEST, TRAIN + validation, TRAIN + TEST
+    and all three periods at five distinct row counts, so no swap or union can
+    satisfy the assertion by accident.

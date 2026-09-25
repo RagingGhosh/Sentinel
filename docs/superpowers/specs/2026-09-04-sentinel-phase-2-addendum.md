@@ -2875,3 +2875,143 @@ Task 18's plan file list are the single `tokenizers==0.23.2` line in
 `requirements/ml.txt`, the one-tuple addition in `tests/test_import_boundaries.py`,
 and one `.gitignore` line excluding `tokenizer.json` under the external MiniLM
 asset directory. No other dependency is added and no CI workflow changes.
+
+**D39 — Task 19 the reduced-feature cross-domain cross-target robustness probe:
+CFPB outcomes persisted in their own sidecar, one model fitted once on 311 TRAIN
+and scored twice, one frozen source-training baseline for both evaluations, and
+Task 19's diagnostics in a standalone report rather than in D35's metadata (§4,
+§4.3, §5.4, D15, D16, D19, D20, D34, D35, D37, D38, plan Task 19).**
+*Was:* §5.4 fixed what the probe is and D19 made the transfer claim a defect
+rather than a matter of phrasing, but nothing said how it would run. Undecided on
+entry: where the CFPB target lives, since `normalize` produced
+`cfpb_timely_response` and nothing persisted it, which made the probe's
+evaluation target unreachable and D37's scope clause assigned the sidecar schema
+to whichever task first consumed it; the estimator and its preprocessing; the
+model version and artifact identity; which baseline scores two populations with
+two different targets, where D34 fixes priors to training labels; which 311
+period is the in-domain evaluation and what becomes of validation; how open 311
+requests behave in a probe that has no resolution times on one side; and whether
+the diagnostics D35's closed schema has no field for widen it or go elsewhere.
+*Now — O1, the CFPB target is persisted in a source-specific sidecar.* Exactly
+three fields per record: `external_id`, `timely_response`, and
+`date_sent_to_company`, which stays provenance evidence and is never a feature or
+a target. `timely_response` is **never** written into `CorpusRecord.label`, which
+remains the CFPB product taxonomy Task 16's roster consumes. The sidecar is
+manifest-backed and integrity-checked on Task 17's terms: the manifest decides
+which files exist and every listed file's bytes are verified before one outcome
+is yielded. NYC 311's `load_outcomes()` keeps its name, signature,
+`Iterator[NYC311Outcome]` return type and `OutcomeSidecarNotFound`, and Task 17's
+outcome schema is not redesigned; a CFPB-specific loader is added instead of
+making the established outcome type contract generic. The four public symbols are
+`CFPB_OUTCOME_ARROW_SCHEMA`, `write_cfpb_outcome_partition`,
+`read_cfpb_outcome_parts` and `load_cfpb_outcomes(years=None, root=)`, each
+mirroring its NYC 311 counterpart. No writer-level source-slug guard is added:
+`ingest/sources/__init__.py` keeps source names out of storage, so the writers
+work in terms of schema types only.
+*Now — O2, the estimator.* Task 17's exact configuration, taken as a decision
+here rather than inherited, because the probe is a distinct model and D37.10's
+scope is Task 17: `learning_rate=0.1`, `max_iter=100`, `max_leaf_nodes=31`,
+`max_depth=None`, `min_samples_leaf=20`, `l2_regularization=0`,
+`early_stopping=False`, `class_weight=None`, `random_state=17`. Every parameter
+not named takes the pinned scikit-learn default and the report records the
+version that supplied it. No hyperparameter search, no preprocessing, no
+sampling correction, no class weighting, no threshold selection and no banding:
+§5.4 requires the class imbalance to be reported, not engineered away.
+*Now — O3, the artifact identity.* `model_name` `xdomain_xtarget_probe`,
+`model_version` `xdomain_xtarget_probe_v1`, `experiment_label` "reduced-feature
+cross-domain cross-target robustness probe", `feature_spec` the three
+`transfer_features_v1` names, and `thresholds` null because the probe bands
+nothing. The naming is binding so the probe cannot be confused with the primary
+model at load time.
+*Now — O4, one frozen source-training baseline.* A majority/prior baseline
+derived from **NYC 311 TRAIN labels only**, the positive prior being the fraction
+of `True` breach labels in the training population, frozen before either
+evaluation and used unchanged for both. CFPB labels never fit a baseline, which
+is how the tension with D34 resolves: D34 fixes priors to training labels, and
+the probe's training labels are the 311 ones in both evaluations. Each evaluation
+publishes PR-AUC as the headline, ROC-AUC as secondary only, minority precision,
+recall and F1, the minority count and the base rate, each beside that baseline —
+no figure alone. The two headline figures are never presented as a before/after
+pair, an improvement, a degradation or a delta: base rates differ by roughly 27×,
+PR-AUC is base-rate dependent, and each figure is interpretable only as lift over
+its own baseline. That prohibition is on comparative presentation **inside the
+metrics**, not on a vocabulary anywhere in the document: Task 8's provenance
+evidence, which the report must copy, is built from field names such as
+`median_delta_seconds` and `frac_delta_le_1min`, and those are explicitly
+permitted.
+*Now — O5, the populations.* The source is NYC 311 through `load_corpus`, over
+Task 17's window `2024-01-01T00:00:00Z` to `2025-12-31T23:59:59Z` inclusive, cut
+by `temporal_split` at `DEFAULT_FRACTIONS`. The probe applies those frozen inputs
+rather than importing Task 17's module, and because the split is deterministic
+given the same timestamps and fractions it reproduces Task 17's cut dates
+exactly — which is what keeps the reduced-feature in-domain reference and the
+primary model's in-domain figure resting on the same data. Training uses the
+TRAIN period only. The validation period is produced and then left unused,
+because the probe tunes nothing and selects no threshold. The in-domain
+evaluation is that split's TEST period, scored once. The cross-domain evaluation
+is the CFPB Task 16 test population with persisted `timely_response` outcomes —
+the test period of `temporal_split` over the CFPB corpus at `DEFAULT_FRACTIONS`,
+restricted to records the sidecar holds an outcome for — scored once. No record
+that tuned Task 16's abstention threshold appears, because that threshold was
+selected on CFPB validation. Both period identifiers are recorded in the report.
+*Now — O6, open records keep their existing semantics.* An open NYC 311 request
+stays in the corpus and in split construction, receives no fabricated label,
+contributes no supervised training or evaluation label, and may still carry the
+three aggregate-free structural features. Nothing coerces an unresolved outcome
+to `False`, which is the refusal D33 built into `apply_thresholds`. No analogous
+"open" case is invented for CFPB: `ingest/sources/cfpb.py` already refuses any
+row whose `timely` is not exactly `Yes` or `No`, so every persisted CFPB record
+carries a definite outcome.
+*Now — O7, reporting.* D35's closed artifact metadata schema is **not** extended.
+`artifacts.py` refuses unknown top-level keys and no Task 19 diagnostic is added
+to it; `warmup_row_count` is null because the probe has no out-of-fold
+construction to count. A standalone Task 19 experiment report is persisted
+instead, following the convention D38 established: returned as a frozen object
+and serialized to a caller-supplied path, with nothing written inside the
+repository by default and no in-repository location invented. It carries the
+source training population, both evaluation populations, the exact feature names
+in order, the estimator and its version, the frozen baseline prior, the metrics
+for each evaluation beside that baseline, `feature_distribution_shift` with all
+nine quantiles per feature and both percentage-outside measures, the six framing
+facts, `result_classification`, the CFPB `timestamp_diagnostic` verdict with the
+delta metrics and rule thresholds that produced it, and §12's interpretation
+limits. The result classification follows Task 8's CFPB verdict alone and
+downgrades only: `strongly_suspicious_load_timestamp` gives
+"non-informative / diagnostic", `suspicious_insufficient_evidence` gives
+"substantive_with_stated_caveat", `supported_plausible_event_time` gives
+"substantive", and a missing or unknown verdict is a refusal with no fallback
+value. The distribution-shift block is evidence and context and can never
+upgrade that classification. The expected `text_length` finding — 311 descriptor
+medians against CFPB narrative medians an order of magnitude longer — is
+published, never normalised away.
+*Now — the two superseded Task 17 assertions.* Two `tests/ingest/test_cli.py`
+tests were written to stop Task 17 from pre-empting the schema O1 now defines:
+one asserted that CFPB ingest creates no outcome sidecar, the other that
+`load_outcomes("cfpb")` raises the typed absence error. Task 19 has arrived, so
+both describe a scope that no longer holds, and they are **inverted rather than
+deleted** so the same two properties stay pinned in the same place: CFPB
+ingestion declares and persists its sidecar, and NYC 311's `load_outcomes()`
+never successfully deserialises a CFPB sidecar as `NYC311Outcome`. The second
+property is failure and non-deserialisation, **not** a particular exception
+class: no existing contract fixes one for a cross-source read, and the typed
+schema rejection already in `ingest/storage.py` is sufficient fail-closed
+behaviour. NYC 311 production behaviour is unchanged by both.
+*Scope:* Task 19 only. D1–D38 are unaltered; D37's scope clause, which assigned a
+future source's sidecar schema to the task that first consumes it, is satisfied
+here rather than amended. The working contract these rulings ratify is
+`docs/superpowers/specs/2026-09-24-task-19-robustness-probe-contract.md`, and the
+two documents agree. Changed for Task 19: `ingest/storage.py`,
+`ingest/manifest.py` and `ingest/cli.py`, only as far as the source-specific
+sidecar requires; `ml/training/experiments/robustness_probe.py`, created; two
+assertions in `tests/ingest/test_cli.py`, inverted as above; and one path added
+to the ML job's existing path-selected command in `.github/workflows/ci.yml`, so
+that `tests/ingest/test_cfpb_outcomes.py` runs in the PyArrow-capable job rather
+than skipping silently in the application one. Unchanged and untouched:
+`ingest/schema.py`; NYC 311's outcome schema, `load_outcomes()` and their
+semantics; `ml/training/{metrics,artifacts,features,labels,thresholds,aggregates,splits}.py`;
+Task 16's `triage.py`, Task 17's `risk.py` and Task 18's `dedup.py` and the
+embedders, with their tests; `ml/base.py`, `ml/registry.py`, `ml/null.py` and
+every serving path; `requirements/`; `pyproject.toml`. No dependency is added:
+scikit-learn, numpy and pyarrow are already pinned. No migration, no `Prediction`
+row, no `Complaint.embedding` value and no change to the lifecycle or to
+authorization — the Phase 2 boundary holds.
