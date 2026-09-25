@@ -3015,3 +3015,140 @@ every serving path; `requirements/`; `pyproject.toml`. No dependency is added:
 scikit-learn, numpy and pyarrow are already pinned. No migration, no `Prediction`
 row, no `Complaint.embedding` value and no change to the lifecycle or to
 authorization — the Phase 2 boundary holds.
+
+**D40 — Task 20 inference-environment resource measurement: all five §S
+categories retained, the index primitives extracted so a pandas- and
+pyarrow-free environment can import them, peak RSS from the standard library, and
+artifact absence recorded rather than invented (plan §E, §S, §U Task 20, §10,
+D18, D27, D35, D38).**
+*Was:* plan §S fixed the five quantities and the `ml.txt`-only environment, and
+plan §U fixed the files, the inference-only guard and the acceptance rule, but
+nothing said how three of the five figures could be produced. Undecided on entry,
+and found by reconnaissance rather than assumed: the index primitives Task 20
+must time are coupled at module-import time to the ingest/Parquet stack, so they
+cannot be imported in the very environment the task mandates; peak RSS has no
+available measurement API, since `psutil` is in no tier and `tracemalloc` cannot
+see the ONNX runtime's native allocation; "artifact sizes on disk" has no input
+in a fresh clone, because artifacts are git-ignored and produced by runs; the
+vector population for the 10k and 50k figures was unspecified, and no corpus is
+loadable in the mandated environment; Task 20 rested on the plan alone with no
+decision-log entry, unlike every task since D36; and plan §P carried a forward
+reference assigning an artifact-compatibility test to Task 20.
+*Now — the five categories stand, and the coupling is extracted rather than the
+task narrowed.* All five §S categories are retained: MiniLM peak RSS during
+load; embedding throughput at batch sizes 1, 8 and 32; artifact sizes on disk;
+index build time **and** peak memory at 10,000 **and** 50,000 vectors; and
+single-query latency. Because `ml/training/experiments/dedup.py` imports
+`ingest.manifest`, which imports `ingest.storage`, which imports `pyarrow`, the
+index primitives cannot be imported where `pandas` and `pyarrow` are absent — and
+the harness is required to refuse to run where they are present. The resolution
+is a narrow, behaviour-preserving extraction: the pyarrow-free retrieval and
+index primitives Task 20 needs move to `ml/training/index.py`, importable without
+either package; Task 18's public benchmark behaviour is unchanged; `dedup.py`
+consumes and re-exports the extracted primitives rather than duplicating them;
+no index implementation is duplicated inside `measure.py`; the Task 18 benchmark
+contract, metric semantics and report semantics do not change; and regression
+coverage proves Task 18's behaviour is unchanged. **This is the only permitted
+exception to plan §U's "must not change experiment code", and the extraction
+exists solely to separate inference and index mechanics from corpus and Parquet
+I/O so that the mandated clean measurement environment can measure the actual
+Sentinel index rather than a copy of it.**
+*Now — peak RSS from the standard library.* No `psutil` and no other new runtime
+dependency: plan §E's four tiers stand, and `ml.txt` becomes a Phase 3 *runtime*
+tier, so a measurement-only package must not enter it. Peak process RSS is
+measured with platform-specific standard-library mechanisms — `ctypes` calling
+`GetProcessMemoryInfo` on Windows, `resource.getrusage` on POSIX — and the report
+identifies which backend produced each figure, because the two do not measure
+quite the same thing and differ in units by platform. `tracemalloc` is not used
+for these figures: it sees the Python heap, and the quantity of interest is
+dominated by native allocation it cannot observe. An unsupported platform is a
+refusal rather than a zero.
+*Now — artifact size, and absence as a first-class result.* No prior training run
+is required as hidden setup, and the harness triggers none. It receives a
+caller-supplied artifact root. Each expected artifact class that exists is
+measured for its actual on-disk byte size during the recorded run; each that does
+not exist is recorded as absent or unavailable, with no invented size, and
+absence is never reported as zero bytes. The report distinguishes measured sizes
+from absent artifacts structurally. Because D38 decided that Phase 2 writes no
+embedder artifact, that class is expected to be absent, and recording it as
+absent is the correct outcome rather than a gap.
+*Now — deterministic synthetic vectors, at the embedder's own width.* The 10k and
+50k index figures use deterministic synthetic `float32` vectors. Their dimension
+comes from the actual MiniLM embedder — `load_minilm().embedding_dimension`,
+which `ml/embedders/minilm.py` sets from an observed forward pass — and is never
+hard-coded, which keeps D18's discipline intact and keeps the literal `384` out
+of the harness as it is out of `ml/embedders/`. All benchmark vectors are
+generated before timing begins; index timing excludes vector generation and
+embedding generation; and deterministic synthetic `RecordRef` identities are used
+as the index API requires, distinct by construction because `build_index` refuses
+a repeated reference. The purpose is to measure Sentinel index construction and
+query cost rather than conflate it with embedding throughput. Synthetic vectors
+are used because the mandated environment cannot load a corpus, and because index
+cost as a function of population size is a property of the index rather than of
+any corpus.
+*Now — spec authority, and the report rule.* Task 20's requirements are frozen in
+`docs/superpowers/specs/2026-09-25-task-20-resource-measurement-contract.md`,
+which this decision ratifies, rather than resting on the plan alone. The
+environment is created and run from `requirements/ml.txt` only; `pandas` and
+`pyarrow` must not be importable; if either is, the harness refuses to write the
+report; and Python version, CPU model, core count and the relevant library
+versions are recorded with every figure. The report path is caller-supplied with
+no default in-repository location, following the convention D38 established;
+every numeric figure carries its environment provenance; every figure is produced
+by an actual measurement run; and no hand-entered measured value is published.
+*Now — the stale compatibility cross-reference is closed, not implemented twice.*
+Plan §P's sentence assigning the artifact compatibility-guard test to Task 20 is
+already satisfied by Task 15: `tests/ml/training/test_artifacts.py` carries the
+deliberately mismatched artifact fixture, whose docstring names it as plan Task
+15's acceptance, and asserts `FeatureSpecMismatch` naming the unproducible
+feature before the model is unpickled. Task 20 therefore adds no duplicate
+compatibility test and performs no implementation or test work for that sentence.
+*Scope:* Task 20 only. D1–D39 are unaltered; D18's dimension discipline, D27's
+whole-or-nothing write pattern, D35's closed artifact metadata schema and D38's
+no-embedder-artifact ruling are all applied here rather than amended. Changed for
+Task 20: `ml/training/measure.py` and `tests/ml/training/test_measure.py`,
+created; `docs/phase-2-resource-measurements.md`, created from a recorded run;
+`ml/training/index.py`, created by the extraction above; and
+`ml/training/experiments/dedup.py`, which receives the import and re-export of
+the extracted primitives and no other change. Unchanged and untouched:
+`tests/ml/training/test_dedup_benchmark.py`; Task 16's `triage.py`, Task 17's
+`risk.py` and Task 19's `robustness_probe.py` and their tests; `ml/embedders/*`
+and their tests;
+`ml/training/{metrics,artifacts,features,labels,thresholds,aggregates,splits}.py`;
+`ml/base.py`, `ml/registry.py`, `ml/null.py` and every serving path; `ingest/*`;
+`tests/test_import_boundaries.py`, which already forbids serving from importing
+`ml.training` and so needs no change for a module created there; `requirements/`;
+`pyproject.toml`; and `.github/workflows/ci.yml`. No dependency is added and no
+CI workflow changes. Whether the index eventually belongs beside a serving path
+is Phase 3's question and is not answered here.
+
+**D40 addendum — exception identity under a reloadable module (D40.1, §7 of the
+Task 20 contract).**
+*Was:* D40.1 authorised the index extraction and required Task 18's behaviour to
+be unchanged, but said only that `EmbeddingDimensionMismatch` stays in
+`ml/embedders/minilm.py` and is imported from there. It did not say *when* the
+class is resolved, and the distinction turned out to matter.
+*Now:* the four extracted symbols retain their observable signatures, defaults,
+validation, exception types, exception messages, ordering and numerical
+behaviour. Within that, **`RetrievalIndex` may resolve
+`EmbeddingDimensionMismatch` through the currently loaded `ml.embedders.minilm`
+module at raise time rather than capturing the class object when
+`ml/training/index.py` is imported.** This is required rather than preferred:
+that module is reloadable and is reloaded by its own test suite,
+`importlib.reload` rebinds the class to a new object, and a class captured at
+index-module import time then differs from the one a caller reads off the module,
+so `except` stops matching. The defect was real and observed — three Task 18
+tests failed in a full-suite run while passing in isolation, which is how this
+class of problem hides. Before the extraction the question could not arise,
+because `rank` and the benchmark resolved the name from one namespace.
+**This changes implementation binding, not observable exception type or message
+behaviour**; the type and the message are exactly Task 18's, and a regression test
+reloads the embedder module and then asserts that the class `rank` raises is the
+one the module currently exposes. The purpose is **compatibility preservation,
+not refactoring**, and **no other extracted body may receive an analogous change
+without a separate contract decision** — the deviation from lifting the bodies
+verbatim is confined to that single raise site.
+*Scope:* D40.1 only. D1–D39 and the rest of D40 are unaltered. No production file
+other than `ml/training/index.py` is affected, and that file is the one this
+clarification describes; `ml/embedders/minilm.py`,
+`ml/training/experiments/dedup.py` and Task 18's tests are untouched.
