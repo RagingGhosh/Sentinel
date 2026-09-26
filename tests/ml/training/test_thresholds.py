@@ -25,6 +25,7 @@ import random
 from pathlib import Path
 
 import pytest
+
 from ml.training.thresholds import (
     MIN_ELIGIBLE_OBSERVATIONS,
     THRESHOLD_QUANTILE,
