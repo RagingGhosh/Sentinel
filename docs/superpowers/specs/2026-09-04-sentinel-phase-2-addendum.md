@@ -3152,3 +3152,139 @@ verbatim is confined to that single raise site.
 other than `ml/training/index.py` is affected, and that file is the one this
 clarification describes; `ml/embedders/minilm.py`,
 `ml/training/experiments/dedup.py` and Task 18's tests are untouched.
+
+**D41 — Task 20's measurement API surface is frozen, because the RED suite needs
+observable interfaces to assert on (§15 of the Task 20 contract, D40, plan §S,
+plan §U Task 20).**
+*Was:* D40 froze the five measurements, the clean-environment rule, the RSS
+backends, the artifact-absence semantics, the synthetic vector source and the
+report rule — but named no identifier. The RED suite then could not express any of
+it without choosing names, so it chose them, exactly as Tasks 18 and 19's RED
+phases did before their surfaces were frozen. Three of its choices were design
+decisions rather than transcriptions of D40, and are ratified here.
+*Now — the names are authoritative.* Constants: `BATCH_SIZES` `(1, 8, 32)`,
+`INDEX_POPULATIONS` `(10_000, 50_000)`, `FORBIDDEN_PACKAGES`
+`("pandas", "pyarrow")`, `SEED` `20`, `WINDOWS_RSS_BACKEND`, `POSIX_RSS_BACKEND`
+and `ARTIFACT_CLASSES`. Structure: `Figure(value, unit, environment)`. Functions:
+`environment()`, `peak_rss_bytes()`, `rss_backend()`,
+`require_clean_environment()`, `synthetic_vectors(count, dimension)`,
+`synthetic_refs(count)`, `load_embedder()`, `measure_minilm_load()`,
+`measure_embedding_throughput(embedder)`, `measure_artifact_sizes(artifact_root)`,
+`measure_index_build(dimension)`, `measure_query_latency(index)`, and
+`run_measurements(*, artifact_root, report_path) -> ResourceReport`. Renaming one
+means amending the contract and the tests together, never the code alone. No
+further public API is invented.
+*Now — one entry point, five internal seams.* **`run_measurements` is the
+harness's entry point** and the only function an outside caller is expected to
+use; both its arguments are keyword-only and neither has a default. **The five
+`measure_*` functions are internal stage seams**, existing so that D40's
+whole-or-nothing failure contract can be exercised — a test injects a failure at
+exactly one stage and asserts no report survives — and they are **not** intended
+as stable external APIs. The constants are frozen because the measurement
+protocol depends on them, and are exposed as no runtime knob; a test may patch a
+constant to avoid waiting for a real 50,000-vector build, which is a test
+affordance rather than a supported production configuration.
+*Now — a figure cannot exist unprovenanced.* `environment` is a **required**
+constructor argument of `Figure`, so an unprovenanced figure is a construction
+error rather than a serialization-time omission — which is what makes D40.5's
+"every numeric figure carries its environment provenance" checkable rather than
+aspirational. The attached environment records the CPU model, the CPU core count,
+the Python version, the versions of the libraries the figure depended on, and,
+for a memory figure, the RSS backend that produced it. **A figure whose
+provenance is missing or incomplete does not serialize successfully**, and neither
+does a non-finite value.
+*Now — absence has its own shape.* An existing artifact serializes as
+`{"value": <integer bytes>, "unit": "bytes"}`; an absent one as
+`{"status": "absent"}`, carrying no `value` key. Absence is never zero bytes,
+never a null value and never an ordinary measurement holding a sentinel number,
+and the distinction **survives serialization** so that a reader of the persisted
+report can tell the two apart. The converse binds equally: a genuinely empty
+artifact directory measures zero bytes and is reported as a measurement, because
+zero is a fact and absence is the lack of one.
+*Now — `ARTIFACT_CLASSES` is declared, not discovered.* A filesystem scan cannot
+report a class that is missing, and D40.3 requires exactly that, absence being the
+normal result in a fresh clone where artifacts are git-ignored. A scan would also
+let directory enumeration order decide the report's order, which D40's
+reproducibility rule forbids. So the tuple is part of the measurement protocol,
+and the report's artifact membership and order equal it whatever the filesystem
+holds.
+*Scope:* Task 20's API surface only. **D1–D40 are unaltered**, including D40's six
+rulings and its exception-identity addendum; this decision names the interfaces
+through which those rulings are observed, and changes none of them. D40's
+environment rule in particular is not relaxed because the development environment
+installs the training tier: the harness correctly refuses there, which is the rule
+working. No production file exists yet — `ml/training/measure.py` is unwritten —
+and this decision authorises no code, no dependency, no `pyproject.toml` change
+and no CI change.
+
+**D41 addendum — `minilm_assets` is an external model-asset class and resolves
+through the MiniLM asset directory (§15.8 of the Task 20 contract, D40.3, D18,
+D38).**
+*Was:* D40.3 fixed the artifact-size semantics around a **caller-supplied artifact
+root**, and D41 froze `ARTIFACT_CLASSES` as a declared tuple whose fourth member
+is `minilm_assets`. Neither said where that member resolves, and the contract's own
+§5 went further than it should have: reading D38's "Phase 2 writes no embedder
+artifact" as meaning the class is simply expected to be absent. That conflated two
+different things.
+*Now:* three of the four classes are experiment artifacts and resolve under the
+caller-supplied `artifact_root`, where Tasks 16, 17 and 19 write them.
+**`minilm_assets` is an external model-asset class, not a run-produced experiment
+artifact**, so it is **intentionally resolved through the MiniLM asset directory**
+— `SENTINEL_MINILM_DIR` when configured, the embedder's packaged default otherwise
+— and not through `artifact_root`. D38 remains exactly as written: Phase 2 writes
+no embedder *artifact*, and D18's artifact-metadata clause still waits for Phase
+3's first serving embedder artifact. That is a statement about artifacts, not about
+the assets: the pinned `model.onnx` and `tokenizer.json` are real files with a real
+on-disk size, and their cost is the kind of figure plan §S asks for. **The measured
+size is a real on-disk byte measurement**, taken during the recorded run and
+reported in the same shape as any other measured class. **If the asset directory is
+unavailable the class follows the ordinary absence and failure semantics** of the
+contract's §5 and §9 — recorded absent, or the run fails — and **no value is
+invented**, absence never being zero. `ARTIFACT_CLASSES` is unchanged and the
+assets are not moved into `artifact_root`.
+*Also recorded:* the filesystem-ordering mutation the negative sweep left
+uncaught stays **contract-equivalent**, and no ordering rule is invented to change
+that. Two variants were tried and neither is detectable: a class directory chosen
+without sorting is the same path whenever class names are unique, which they are in
+a `<domain>/<model>/<version>` tree; and an unsorted byte total is equal by
+construction, because the figure is a sum and addition is commutative. The
+determinism that matters is already required and already proven — the report's
+artifact membership and order come from the declared `ARTIFACT_CLASSES` tuple, and
+a mutation that discovers classes from the filesystem instead is caught by six
+tests.
+*Scope:* Task 20 only. **D1–D40 are unaltered**, including D38's no-embedder-artifact
+ruling, which this clarification applies rather than amends, and D40.3's
+caller-supplied artifact root, which continues to govern the three experiment
+classes. The rest of D41 is unchanged. No production code changes: the harness
+already behaves this way, and this decision records why.
+
+**D41 addendum — a publishable memory figure needs a fresh process (§4.1 and §8 of
+the Task 20 contract, D40.2).**
+*Was:* D40.2 froze the backends — `GetProcessMemoryInfo` on Windows,
+`getrusage` on POSIX — and the quantity, peak process RSS. It did not say how many
+runs one interpreter may contribute, because the question only appears once the
+harness is actually run twice.
+*Now:* **any memory figure intended for publication must be produced in a fresh
+process that has performed no earlier measurement run.** Both backends report a
+process high-water mark for the lifetime of the process, so a second run inside one
+interpreter inherits whatever the first reached; **repeated runs in a single
+interpreter are not independent memory measurements** and the later ones are not
+publishable as such. This was observed rather than predicted: in the
+clean-environment validation the second run reported a MiniLM *load* peak equal to
+the first run's *50,000-vector index* peak, because the process had already been
+there. The first run's figures were sound and the second run's memory figures were
+not. Time and throughput figures do not have this property and may be repeated in
+one process; the rule is about memory alone.
+**Even in a fresh process, a memory figure is the process peak observed through the
+measured stage, not an incremental allocation attributable to that stage alone** — a
+load figure includes the interpreter, the imported libraries and the ONNX session,
+and an index figure includes everything the process had already reached. The
+published documentation must not imply otherwise, and `docs/phase-2-resource-measurements.md`
+may publish only figures from fresh-process runs in the clean environment.
+*Scope:* a measurement procedure, and nothing more. **D1–D40 are unaltered**,
+including D40.2's two backends, the quantity they report and the
+standard-library-only dependency rule; the existing D41 rulings are unaltered; and
+the five measurement categories of D40.1 are untouched. **No production code and no
+test changes**: `ml/training/measure.py` and `tests/ml/training/test_measure.py` are
+byte-identical to the state this clause describes, because the clause constrains how
+a run is *conducted* rather than what the harness does.

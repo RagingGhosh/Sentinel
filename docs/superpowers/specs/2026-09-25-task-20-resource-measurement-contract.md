@@ -102,6 +102,34 @@ native allocation, which `tracemalloc` cannot see.
 **An unsupported platform is a refusal, not a zero.** A figure of zero bytes
 would read as "no memory used".
 
+### 4.1 One fresh process per publishable memory figure
+
+**Any memory figure intended for publication must be produced in a fresh
+process that has performed no earlier measurement run.**
+
+Both backends report a process **peak** — a high-water mark for the lifetime of
+the process — so a second run inside one interpreter inherits whatever the first
+run reached. **Repeated runs in a single interpreter are therefore not
+independent memory measurements**, and the later ones are not publishable as
+such. This was observed, not anticipated: in the clean-environment validation,
+a second run reported a MiniLM *load* peak identical to the first run's
+*50,000-vector index* peak, because the process had already been there. The
+first run's figures were sound; the second run's memory figures were not.
+
+Time and throughput figures do not have this property and may be repeated
+freely in one process; the rule is about memory alone.
+
+**Even in a fresh process, a memory figure is the process peak observed through
+the measured stage — not an incremental allocation attributable to that stage
+alone.** A load figure includes the interpreter, the imported libraries and the
+ONNX session; an index figure includes everything the process had already
+reached. **The published documentation must not imply otherwise**, and must not
+describe such a figure as the cost of the stage by itself.
+
+This clause is a **measurement procedure**, and nothing more. It changes neither
+backend, nor the quantity measured, nor the standard-library-only rule, nor the
+harness, nor the five categories of §2.
+
 ---
 
 ## 5. Artifact sizes, and what absence means — FROZEN
@@ -115,14 +143,21 @@ would read as "no memory used".
   - **No size is invented.**
   - **Absence is never reported as zero bytes.**
 - The report **distinguishes measured sizes from absent artifacts** structurally,
-  not only in prose, so a reader cannot mistake one for the other.
+  not only in prose, so a reader cannot mistake one for the other. The two
+  serialized shapes are frozen in §15.
 
 The expected classes are those Phase 2 produces: the Task 16 triage artifact,
 the Task 17 risk artifact and the Task 19 probe artifact, plus the external
-MiniLM assets the embedder loads. **Phase 2 writes no embedder artifact** —
-D38 decided that, and D18's artifact-metadata clause is deferred to the first
-serving embedder artifact, which Phase 3 creates — so that class is expected to
-be absent, and recording it as absent is the correct outcome rather than a gap.
+MiniLM assets the embedder loads.
+
+**Phase 2 writes no embedder *artifact*** — D38 decided that, and D18's
+artifact-metadata clause is deferred to the first serving embedder artifact,
+which Phase 3 creates. That is a statement about artifacts, **not** about the
+assets: the pinned `model.onnx` and `tokenizer.json` the embedder loads are real
+files with a real on-disk size, and their cost is exactly the kind of figure §S
+asks for. So `minilm_assets` is an **external model-asset class** rather than a
+run-produced experiment artifact, and §15.8 fixes where it resolves. The three
+experiment classes are the ones expected to be absent in a fresh clone.
 
 Artifacts and assets are git-ignored and are produced by runs, so absence is the
 normal state of a fresh clone. The harness must be useful in that state.
@@ -236,6 +271,10 @@ authorises no other movement of experiment code.
 - `docs/phase-2-resource-measurements.md` is the document plan §U names, and it
   is written from a recorded run's output. It is not the harness's default
   destination.
+- **That document may publish only figures produced by fresh-process runs in the
+  clean environment** (§3, §4.1). A memory figure from a second run inside an
+  interpreter that had already measured is evidence, not a publishable
+  measurement, and none may be transcribed.
 - **Every numeric figure carries its environment provenance** (§3).
 - **Every figure is produced by an actual measurement run.** No hand-entered
   value appears in the harness's output, and no figure is transcribed into the
@@ -409,3 +448,192 @@ compatibility test and performs no implementation or test work for it.
 13. No dependency, `pyproject.toml` or CI change.
 14. Tasks 16, 17 and 19 remain byte-identical, as do the serving path and the
     existing import-boundary test.
+15. The module exposes exactly the identifiers §15 freezes, spelled as §15
+    spells them, and adds no further public API.
+16. A `Figure` cannot be constructed without its environment provenance, and a
+    figure whose provenance is incomplete does not serialize (§15).
+17. The five `measure_*` stage functions exist as independently patchable seams,
+    so a failure injected at any one of them leaves no report (§13's
+    whole-or-nothing rule, §15's seam classification).
+18. `ARTIFACT_CLASSES` is a declared tuple, and the report's artifact order and
+    membership equal it regardless of what the filesystem holds or in what order
+    it enumerates (§15).
+19. An existing artifact serializes as `{"value": <int>, "unit": "bytes"}` and an
+    absent one as `{"status": "absent"}`, with no `value` key — never zero, never
+    null, never a sentinel number (§15).
+
+---
+
+## 15. The frozen API surface — FROZEN
+
+This section was added after the RED phase, which is why it sits last: §§1–14
+fixed the file, the five measurements and their semantics but **no identifiers**,
+and `tests/ml/training/test_measure.py` could not express the frozen behaviour
+without naming things. The names below are therefore **authoritative for Task
+20**, and the RED suite is written against them: renaming one means amending this
+section and those tests together, never the code alone.
+
+### 15.1 Constants and configuration
+
+| Identifier | Meaning | Frozen value |
+|---|---|---|
+| `BATCH_SIZES` | §2.B's batch sizes, in order | `(1, 8, 32)` |
+| `INDEX_POPULATIONS` | §2.D's populations, in order | `(10_000, 50_000)` |
+| `FORBIDDEN_PACKAGES` | §3's clean-environment proof | `("pandas", "pyarrow")` |
+| `SEED` | the deterministic seed for §6's synthetic input | `20`, the task number, as Task 17 used 17 and Task 18 used 18 |
+| `WINDOWS_RSS_BACKEND` | §4's Windows backend name, recorded with each memory figure | a name containing `GetProcessMemoryInfo` |
+| `POSIX_RSS_BACKEND` | §4's POSIX backend name | a name containing `getrusage` |
+| `ARTIFACT_CLASSES` | §5's expected classes, in report order | a declared tuple (§15.5) |
+
+**These are the measurement protocol, not runtime knobs.** Nothing exposes them
+as parameters, environment variables or command-line options. A production run
+always uses the frozen values.
+
+The RED suite patches `INDEX_POPULATIONS` down to two small populations, and
+patches `BATCH_SIZES` and `FORBIDDEN_PACKAGES` in the few tests that need to, so
+that a unit test never waits for a real 50,000-vector build. That is a test
+affordance and **not** a supported production configuration: patching a module
+constant is available to any test in Python, and choosing it over a production
+parameter is precisely how the protocol stays frozen for real runs.
+
+### 15.2 The figure
+
+```
+Figure(value, unit, environment)
+```
+
+`environment` is **required**: see §15.3.
+
+### 15.3 Functions
+
+| Identifier | Role |
+|---|---|
+| `run_measurements(*, artifact_root, report_path) -> ResourceReport` | **the entry point** |
+| `environment()` | the provenance every figure carries (§3) |
+| `peak_rss_bytes()` | §4's peak process RSS, in bytes |
+| `rss_backend()` | which of the two §4 backends this platform uses |
+| `require_clean_environment()` | §3's refusal |
+| `synthetic_vectors(count, dimension)` | §6's deterministic `float32` vectors |
+| `synthetic_refs(count)` | §6's deterministic, distinct `RecordRef` identities |
+| `load_embedder()` | the pinned MiniLM loader, whose observed dimension §6 uses |
+| `measure_minilm_load()` | stage seam — §2.A |
+| `measure_embedding_throughput(embedder)` | stage seam — §2.B |
+| `measure_artifact_sizes(artifact_root)` | stage seam — §2.C |
+| `measure_index_build(dimension)` | stage seam — §2.D |
+| `measure_query_latency(index)` | stage seam — §2.E |
+
+**Public versus internal.**
+
+- **`run_measurements` is the harness's entry point**, and the only function a
+  caller outside this module is expected to use. Both its arguments are
+  keyword-only and neither has a default (§5, §8).
+- **`Figure` is the required provenance-bearing figure representation.** Every
+  numeric figure the report publishes is one.
+- **The five `measure_*` functions are internal stage seams.** They exist so that
+  §13's whole-or-nothing failure contract can be exercised: a test injects a
+  failure at exactly one stage and asserts no report survives. They are **not**
+  intended as stable external APIs, and nothing outside this module and its tests
+  should call them.
+- The remaining functions are the harness's own mechanics, named because the RED
+  suite asserts on them directly — the RSS backend, the synthetic input's
+  determinism, the environment guard's refusal.
+
+**No additional public API is invented.** A harness that needed a further public
+name would be exceeding this contract, not extending it.
+
+### 15.4 Provenance is not optional
+
+**A `Figure` cannot exist without its environment provenance.** `environment` is
+a required constructor argument, so an unprovenanced figure is a construction
+error rather than a serialization-time omission — which is what makes §8's "every
+numeric figure carries its environment provenance" checkable rather than
+aspirational.
+
+The environment attached to every figure records:
+
+- the **CPU model**;
+- the **CPU core count**;
+- the **Python version**;
+- the **versions of the libraries the figure depended on**;
+- and, for a memory figure, the **RSS backend** that produced it (§4).
+
+**A figure whose provenance is missing or incomplete does not serialize
+successfully.** A non-finite value does not either: a `NaN` or an infinity
+describes nothing.
+
+### 15.5 The two artifact shapes
+
+An artifact that **exists** serializes as a measurement:
+
+```json
+{"value": 2098, "unit": "bytes"}
+```
+
+An artifact that **does not exist** serializes as a status, carrying **no**
+`value` key:
+
+```json
+{"status": "absent"}
+```
+
+Absence is **never** represented as zero bytes, as a null value, or as an
+ordinary measurement holding a sentinel number. The distinction **survives
+serialization**, so a reader of the persisted report — not only a caller holding
+the in-memory object — can tell an unavailable figure from a measured one.
+
+The converse binds equally: a genuinely empty artifact directory measures **zero
+bytes** and is reported as a measurement, not as absent. Zero is a fact; absence
+is the lack of one.
+
+### 15.6 Why `ARTIFACT_CLASSES` is declared rather than discovered
+
+A filesystem scan cannot report a class that is missing, and §5 requires exactly
+that — absence is a first-class result, and in a fresh clone it is the *normal*
+result, since artifacts are git-ignored and produced by runs. A scan would also
+let directory enumeration order decide the report's order, which §14's
+reproducibility rule forbids.
+
+So `ARTIFACT_CLASSES` is **a declared, deterministic tuple and part of the
+measurement protocol**, not a list inferred at runtime. The report's artifact
+membership and order equal that tuple, whatever the filesystem holds.
+
+### 15.7 The environment guard is not relaxed for convenience
+
+§3's rule stands exactly as written: `pandas` importable refuses the report,
+`pyarrow` importable refuses it, either one refuses it, and only an environment
+where **both are genuinely unavailable** permits the positive path.
+
+The development environment for this repository installs the training tier, so
+the harness **correctly refuses there**. That is the rule working, not a problem
+with the rule, and it is not weakened to make local runs convenient: the RED suite
+tests the refusals in-process against that real environment, neutralises the guard
+for the tests whose subject is something else, and proves the positive path in a
+subprocess where both packages are genuinely blocked.
+
+### 15.8 Why `minilm_assets` resolves outside the artifact root
+
+Three of `ARTIFACT_CLASSES` are experiment artifacts and resolve **under the
+caller-supplied `artifact_root`**, which is where Tasks 16, 17 and 19 write them.
+`minilm_assets` does not, and that is deliberate:
+
+- It is an **external model-asset class, not a run-produced experiment artifact.**
+  Nothing in Phase 2 writes it; the embedder *reads* it, from wherever it lives.
+  Its location is the embedder's own — `SENTINEL_MINILM_DIR` when configured, the
+  packaged default otherwise — and an `artifact_root` a caller chose for
+  experiment output has no authority over it.
+- **It is therefore resolved through the MiniLM asset directory**, not through
+  `artifact_root`. Requiring it under `artifact_root` would mean either copying a
+  90MB binary into a directory that exists for experiment output, or reporting the
+  class absent on a machine where the assets are demonstrably present — measuring
+  nothing while a real cost sits on disk.
+- **Its measured size is still a real on-disk byte measurement**, taken during the
+  recorded run by the same traversal and reported in the same shape as any other
+  measured class.
+- **If the asset directory is unavailable, the class follows the ordinary
+  absence/failure semantics of §5 and §9.** It is recorded absent, or the run
+  fails, exactly as the rest of the contract says. **No value is invented**, and
+  absence is still never zero.
+
+`ARTIFACT_CLASSES` does not change, and the assets are not moved into
+`artifact_root`. This clause records where the one external class resolves; it
+alters no other rule.
