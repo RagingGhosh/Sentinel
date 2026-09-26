@@ -265,7 +265,7 @@ def _windows_peak_rss() -> int:
     )
     if not ok:
         raise RuntimeError(
-            f"GetProcessMemoryInfo failed with error {ctypes.get_last_error()}; "
+            f"GetProcessMemoryInfo failed with error {ctypes.get_last_error()}; "  # type: ignore[attr-defined]
             "no peak RSS was measured, and none is invented"
         )
     return int(counters.PeakWorkingSetSize)
