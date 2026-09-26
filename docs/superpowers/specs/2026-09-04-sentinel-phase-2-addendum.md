@@ -3288,3 +3288,121 @@ the five measurement categories of D40.1 are untouched. **No production code and
 test changes**: `ml/training/measure.py` and `tests/ml/training/test_measure.py` are
 byte-identical to the state this clause describes, because the clause constrains how
 a run is *conducted* rather than what the harness does.
+
+**D42 — Task 21's real-corpus metrics have never been measured, so Task 21 is
+re-scoped to publish only what has been; the model evaluations, the ship-or-cut
+decision and the cross-platform tolerance are deferred, and Phase 2 is not yet
+complete (plan §U Task 21, §T, §R, §W, §F, I1, addendum §3.2, §5.4, D19, D35,
+D38, D40, D41).**
+*Was:* plan §U defines Task 21 as "Reproducibility documentation and README
+metrics", with prerequisites Tasks 16, 17, 18 and 20. Per §T it publishes, in the
+README's "Model performance" section, "the measured table — every figure beside
+its baseline, the dedup benchmark labelled as synthetic retrieval, and any
+experiment that did not clear its baseline reported as such", and it writes a
+reproducibility guide covering "corpus ingestion commands with expected runtimes".
+Per §R and its own entry it *measures* the cross-platform metric tolerance "on at
+least two environments". Its acceptance rule is that "no unmeasured figure appears
+in either document". Reconnaissance before implementation found that none of those
+inputs exists, and that the repository cannot currently produce them.
+*Now — the blocked portion, stated as fact.* **Task 21's real-corpus metrics are
+unmeasured.** No corpus of either source exists: `data/` is absent. No Task 16,
+17 or 19 artifact has ever been produced, and no `metadata.json` exists under
+`ml/artifacts`. The Task 18 benchmark has never run on a real corpus, the Task 19
+probe has run only on test fixtures, and no MiniLM ship-or-cut decision has been
+recorded. Tasks 16 to 19 delivered tested code, not measured results. **The
+repository intentionally has no concrete fetcher for either source.** Plan §F
+defines a fetch *stage* and a paginated, resumable `fetch` interface, but no
+approved document specifies an endpoint, a pagination scheme, a retry policy or a
+rate limit for CFPB or NYC 311. `ingest/cli.py` therefore stops at an injected
+`Fetcher` boundary and records that "the concrete HTTP client belongs to whichever
+task specifies those things"; its command line passes no fetcher and runs from a
+raw cache that nothing populates. That was a deliberate refusal to invent
+specification, and D42 does not reverse it. **A second measurement environment has
+not been available**: the only measured figures in the repository, Task 20's, come
+from one Windows machine.
+*Now — no fabricated or substituted metric.* No figure may be invented, estimated,
+extrapolated or copied from another source. No metric computed on a test fixture may
+be presented as model performance: the fixtures exist to test behaviour, and a
+figure over a few dozen synthetic rows describes the fixture, not a model. No
+synthetic corpus may stand in for a real one. No metric from a partial or
+`--limit`ed corpus may be presented as a model's performance. And no resource
+figure may be presented as model performance: Task 20 measures cost, not quality.
+*Now — Task 20's figures remain valid evidence.* `docs/phase-2-resource-measurements.md`
+and the figures in it are unaffected. They were measured in a clean `requirements/ml.txt`
+environment under D40 and D41, each traces to a recorded run, and they are the only
+measured figures Task 21 may publish.
+*Now — what Task 21 may publish.* **`docs/phase-2-reproducibility.md`** may state,
+each limited to what exists and has been verified: environment setup for the four
+dependency tiers `base`, `dev`, `ml` and `train`, as the files under `requirements/`
+define them; the ingestion pipeline as implemented — plan §F's three stages, the
+cache-driven normalize-and-load pass, and the plain statement that no concrete
+fetcher exists, so neither corpus can currently be obtained from its source, **with
+no ingestion runtime stated**, because none has been measured; how each Task 16 to 19
+experiment is invoked, together with the statement that each needs a corpus that
+cannot currently be obtained and that none has therefore been run on real data; how
+to read artifact metadata under D35's closed schema; how to rerun the Task 20
+measurement, including `SENTINEL_MINILM_DIR` and the fresh-process rule of D41's
+second addendum; and **the plan I1 Phase 3 prerequisite**, stated explicitly as I1
+requires — the risk model's two category aggregates are derived from NYC 311 and keyed
+to its complaint types, so at Phase 3 serving time they may have no source for a
+complaint in another domain. **`README.md`'s "Model performance" section** may state
+plainly that no model has yet been evaluated on a real corpus and why, and may refer
+readers to `docs/phase-2-resource-measurements.md` for the measured inference-time
+resource cost, identified as cost rather than model performance. It carries **no
+figure table**: there is no model metric to tabulate, and the resource figures stay
+published once, in the document that traces each one to its run, rather than being
+restated where they would read as model results. The section keeps its heading.
+The robustness probe keeps its full binding name wherever either document mentions
+it (§5.4), and D19's prohibition applies to both documents in full.
+*Now — the three doc tests are retained, and what they currently prove is
+disclosed.* The test that every metric table in `README.md` has a baseline column
+is retained; the README carries no metric table under D42, so the test guards the
+deferred publication and fails the moment a metric table without a baseline column
+is added. The D19 test is retained and fully applicable to both documents. The test
+that the probe's published table carries its `result_classification` is retained
+as a conditional guard: any table in either document presenting the probe's figures
+must carry its classification, and since D42 publishes no probe figure, the guard
+currently asserts against their premature appearance. **The first and third tests
+pass without a table to inspect, and that is disclosed rather than presented as
+their original purpose having been met.** The acceptance rule is unchanged: every
+measured figure either document carries must be a Task 20 figure traceable to its
+source run. A protocol constant or a version string is not a measurement and may
+appear as what it is.
+*Now — what is deferred.* These are **not** Task 21's under D42; they remain
+required, and are the target of later work. First, the specification and
+implementation of a concrete fetcher for each source — endpoint, pagination, retry
+and rate limit — belong to a future task that specifies them, as `ingest/cli.py`
+already records. Second, real ingestion of both corpora, and the ingestion runtimes
+§T asks the guide to state. Third, **real-corpus evaluation of the triage, risk,
+dedup and probe work of Tasks 16 to 19**, and the README table §T describes. Fourth,
+the **MiniLM ship-or-cut decision** plan §W requires, which rests on the Task 18
+benchmark having run on a real corpus. Fifth, the probe's published real-corpus
+table with its six framing facts and its `result_classification`. Sixth, the risk
+model's README verdict against its majority baseline that addendum §3.2 requires;
+until it exists, neither document may claim the risk model cleared its baseline or
+failed to, and no model is represented as fit to serve. Seventh, the **cross-platform
+metric tolerance** of §R and Task 21, **until a second environment is actually
+measured**.
+*Now — the original requirements stand.* Plan §U's Task 21 entry, §T, §R, §W and I1
+are not edited, weakened or deleted. **D42 records a deviation from them; it does not
+rewrite them.** When the deferred work exists, the original Task 21 content becomes
+deliverable, and a later decision closes this deviation rather than this one being
+quietly forgotten.
+*Now — Phase 2 is not yet complete.* **The original Phase 2 completion criteria of
+plan §W are not fully satisfied, and this re-scope does not change that.** Unmet
+because of this block: both corpora ingesting reproducibly from their sources; the
+triage and risk experiments' loadable artifacts with real-corpus metrics beside their
+baselines; the dedup benchmark's report of both arms with a ship-or-cut decision
+recorded; and the probe's published real-corpus figures, framing facts and result
+classification. Task 22's integration guarantees have not yet run. D42 makes no
+finding about the criteria it does not touch. No document may describe Phase 2 as
+complete while any §W criterion is unmet.
+*Scope:* the Task 21 block only, and no other decision. **D1–D41 are unaltered.**
+D19 applies in full; §5.4's binding name is kept; addendum §3.2's README commitment is
+deferred together with the evaluation it depends on, not withdrawn; D35's schema is
+what the guide describes; D38's report convention and its no-embedder-artifact ruling
+stand; and D40, D41 and D41's two addenda are unaffected, their figures being the
+only ones Task 21 publishes. D42 adds no fetcher, specifies no endpoint, downloads
+nothing and creates no synthetic substitute. It changes no code, no test, no
+requirement and no CI, and `README.md` and `docs/phase-2-reproducibility.md` remain
+unchanged until Task 21 is implemented under it.
