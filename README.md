@@ -51,12 +51,29 @@ load.
 
 ## Model performance
 
-Not applicable yet. Phase 1 ships no trained models — every prediction path
-resolves to an explicit null implementation, and `/healthz` reports `null`
-for triage, dedup, and risk on every domain. This section will carry the
-live accuracy/precision/recall figures, evaluated against a stated baseline,
-once Phase 2 trains real models. No metric is written here until it has
-actually been measured.
+**No model has yet been evaluated on a real corpus, so this section publishes no
+model metric.** No metric is written here until it has actually been measured.
+
+Phase 2 built and tested the triage, risk and duplicate-retrieval experiments and
+the reduced-feature cross-domain cross-target robustness probe. Running any of them
+needs the CFPB and NYC 311 corpora, and the repository cannot obtain those yet: no
+concrete fetcher for either source has been specified or implemented, so ingestion
+can only read a local cache that nothing populates. Figures computed on the test
+suite's small fixtures describe the fixtures, not a model, and are not published as
+model performance.
+
+Phase 2 has measured one thing: the inference-time resource cost of the embedder
+and the retrieval index — memory, throughput and latency — in a clean
+inference-only environment. Those figures describe cost, not model quality, and
+are published with their provenance in
+[`docs/phase-2-resource-measurements.md`](docs/phase-2-resource-measurements.md).
+
+How to set up each dependency tier, what can and cannot be rerun today, and the
+work still outstanding are in
+[`docs/phase-2-reproducibility.md`](docs/phase-2-reproducibility.md). **Phase 2 is
+not complete:** real-corpus evaluation, the MiniLM ship-or-cut decision and the
+cross-platform metric tolerance are deferred under decision D42 in the Phase 2
+addendum.
 
 ## Local setup
 
