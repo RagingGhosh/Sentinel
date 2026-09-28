@@ -3621,3 +3621,330 @@ and no document may describe it as complete.**
 *Scope:* the CFPB source model and its refusal policy, NYC 311's source, the
 provenance minimum and the fetch boundary. **D1–D42 are unaltered.** D43 changes no
 code, no test, no requirement, no CI and no other document.
+
+**D44 — The concrete fetch contract: each acquisition is scoped to its own directory,
+verified in UTC-day slices for CFPB and in New York civil-day slices for NYC 311, and
+described by an immutable acquisition record that manifest version 3 cites by digest;
+the fetchers build behind the implemented injected `Fetcher`, and plan Tasks 23–25 are
+added to implement them, none of which authorizes real ingestion (plan §F, §G, §Q, §U,
+§V, Tasks 6, 8, 22; addendum §1, §2.5, §2.7; D1, D24, D27, D37.2, D42, D43).**
+*Was:* D43 left five choices to the fetch task — the CFPB narrative filter, where
+provenance lives, the reconstruction's source identity including `source_api_version`,
+retry, backoff and pacing, and NYC 311's page size, ordering key and app-token use —
+and said none may be settled implicitly. It left four ingestion conflicts open, and it
+authorized no change to the adapters, normalization, the adapter protocol, the
+manifest schema or the `source_api_version` constant. Plan §U ends at Task 22, so the
+fetch work had no task. The facts below were measured on 2026-09-28 by the fetch-task
+contract reconnaissance, from aggregate counts, response headers, the archive's list
+of exports, one day of CFPB metadata and the export #8 file D43 inspected; no corpus
+was downloaded.
+*Now — the API behaviour this entry rests on.* The CFPB API documents
+`date_received_max` as "date < date_received_max", which D43 quotes; in use it
+includes its own UTC calendar day. `date_received_min=date_received_max=2024-11-01`
+returned 9,417 records timestamped 2024-11-01T00:00:09Z … 2024-11-01T23:59:55Z, and
+`date_received_min=2024-11-01` with `date_received_max=2024-11-02` returned 14,810:
+those 9,417 and the 5,393 of UTC 2024-11-02. D43 is unaltered, since its sentence
+records the documentation; the fetcher relies on neither reading, querying
+`date_received_min=date_received_max=D` and checking the timestamps returned. The
+documented `format=csv` export, with which "frm/size will be ignored", returned that
+whole 14,810-record UTC day in one response: 14,810 rows with 14,810 distinct
+Complaint IDs, equal to the same day's JSON `hits.total`, each `Date received` of the
+form `YYYY-MM-DDTHH:MM:SS.000Z`, in 15 columns with no narrative. Across 104 records
+compared with the JSON response every compared field was equal, except that the CSV
+spells a JSON null as the literal string `None` (97 `tags`, 34
+`company_public_response` and 1 `sub_issue` cell among 100 compared records). For
+inclusive UTC days the API holds 2,734,269 complaints in 2024 and 5,442,963 in 2025,
+8,177,232 in the window; 2024-11-01 … 2024-12-31 holds 591,058, which is export #8's
+row count — an equality of counts, not a proven equality of ID sets. Its
+`_meta.last_indexed` was 2026-09-27T12:00:00-05:00, so the API is still being updated
+after the archive's snapshot.
+*Now — the archive and NYC 311 as measured.* The Narratives Archive lists 21 ZIP
+exports. The window falls in export #5 (September 2023 through March 2024, which
+begins before the window) through export #14 (November through December 2025),
+736,201,829 bytes by `Content-Length`; export #15 is 36,832,036 bytes. Their ETags
+carry a multipart suffix and are not content digests. NYC 311's `erm2-nwe9` holds
+3,456,769 records in 2024 and 3,655,041 in 2025 by `created_date` inside D37.2's
+window, its largest single day holds 16,388 (2025-12-15), and its `rowsUpdatedAt`
+shows that it is updated daily.
+*Now — (1) the CFPB narrative filter.* The archive side of the reconstruction is
+restricted to rows whose narrative is a string that is not blank after `strip()` — the
+adapter's own `MissingNarrative` test — applied by the CFPB fetcher before the
+archive/API join. Every excluded row is counted in the acquisition record; none is
+dropped silently. The CFPB adapter is not altered: a blank narrative that reaches
+normalization still raises `MissingNarrative`, and §2.5 still refuses the run. D43's
+refusals apply to the rows this filter includes. This is the population §1 and D1
+already describe — the window "holds 2,036,434 narratives" — and plan Task 5's "so the
+caller decides" names the caller that decides, which is the fetcher. Without a filter
+every real run is refused, since 73.8% of export #8's rows carry no narrative;
+skipping in the adapter would change normalization, which Task 8 protects, and would
+hide the drop.
+*Now — (2) provenance: an immutable acquisition record, cited by manifest version 3.*
+Provenance lives in a separate acquisition record, one per acquisition, written last
+through a same-directory temporary file and `os.replace`, and never modified once
+written. `acquisition_id` is the SHA256 of the record's bytes as written. The corpus
+manifest cites it: `manifest_version` 3 adds exactly one field,
+`acquisition_id: str | None`. A version 1 or version 2 manifest stays readable, a
+missing `acquisition_id` being read as `None` — the read-only default D37.16 gave
+`outcome_part_files` — and every new write emits version 3. `schema_version`, the
+storage path and the definition of `corpus_id` are unchanged, as plan §G requires of a
+manifest-only change. Recording the whole provenance in the manifest was rejected,
+because provenance is produced once, at fetch time, and is large, while the manifest
+is rewritten by every normalize pass; a separate record with no link was rejected,
+because an artifact cites only a `corpus_id` and could then never reach its
+provenance. The record holds at least:
+
+| Part | Recorded |
+|---|---|
+| Every acquisition | the source; the window as supplied and as resolved; start and completion times; the client identity (User-Agent, library and version); the retry and pacing values in force; the journal of completed slices, each with its request URL and every query parameter, its retrieval time, the digest and size of the raw response, the page digests it produced and its verification counts; the Sentinel commit |
+| CFPB identity and archive | `acquisition_kind`; the reading-room page's URL, SHA256 and retrieval time; for each export its URL, byte size, SHA256, `Last-Modified`, the ETag as served (recorded, never used as a digest), member name and size, header, row count and observed `Date received` range |
+| CFPB API | the base URL and endpoint; for each UTC day the JSON count's `hits.total`, `_meta.last_indexed` and the hit's `_index`, and the digest of the raw CSV body, which is retained gzipped |
+| CFPB join | the join key, stated as exact Complaint ID string equality; the narrative-filter predicate and its excluded count; the matched, archive-only, excluded and API-only populations; mismatched and missing records by kind |
+| NYC 311 | the dataset id, endpoint and SODA version; for each slice its `count(*)`, row count and page digest; `rowsUpdatedAt` and the window's `count(*)` at the start and at the end |
+
+*Now — (3) source identity.* The reconstruction's acquisition identity is
+`cfpb-archive-api-reconstruction-v1`, recorded as the acquisition record's
+`acquisition_kind`. `SOURCE_API_VERSION = "cfpb-ccdb-v1"` in `ingest/sources/cfpb.py`
+is kept unchanged: it versions the page shape the adapter reads
+(`hits.hits[]._source`), and the reconstruction yields that shape. Task 6's and Task
+8's protections of that file therefore stand, and D43's statement that no change to
+the constant is authorized is not overridden.
+*Now — (4) CFPB API retrieval.* For each UTC day D of the window, and one margin day
+at each end, the fetcher makes one CSV export request (`format=csv`,
+`date_received_min=date_received_max=D`) and one same-day JSON count request
+(`size=1`). `GET /{complaintId}` is used only for a record whose CSV cell in an
+adapter-relevant column — `Complaint ID`, `Product`, `Timely response?`,
+`Date received` or `Date sent to company` — is the literal `None`, which is ambiguous
+between a null and a value; the JSON value is then used, and no cell is ever mapped
+silently. **The CSV export is treated as the API surface for this reconstruction —
+"the API" of D43's per-field authority. That is an interpretation, recorded so it can
+be disagreed with:** it is the same documented endpoint with a format parameter, and
+its values equalled the JSON response's on every compared field apart from the
+spelling of null. The choice rests on these constraints:
+
+| Strategy | Requests for the window | Evidence | Cost |
+|---|---|---|---|
+| By Complaint ID, narrative rows only | at least 2,036,434 (§0, measured before narratives were removed) | three of forty requests half a second apart returned HTTP 429 (D43) | at least 11.8 days at that spacing and 23.6 days at one second; no view of API records the archive lacks |
+| JSON search, `size=100` with `search_after` | about 81,773 | documented: `size` at most 100, `frm` at most 100,000; observed: chaining works, with a strictly increasing (epoch milliseconds, Complaint ID) key and no overlap, but one chained page took 11.7 s | about 2.7 to 11 days |
+| **CSV export, one request per UTC day** | about 733, and as many count requests | documented to ignore `frm` and `size`; observed: a 14,810-record day returned complete in about 4 s | about two hours (an estimate) |
+
+*Now — (5) CFPB completeness.* A CFPB acquisition is complete only when all of the
+following hold, and its record is written only then. **Archive:** every export used —
+exports #5 through #14, and export #15 solely to classify records at the window's end
+boundary — is pinned by SHA256; its header equals the 16-column header verified in
+export #8, or the run is refused; the verified content, not the export's name, covers
+every window day; and no Complaint ID appears in two exports, or the run is refused.
+**API:** for every day D, margin days included, the CSV's row count equals the JSON
+`hits.total`, its Complaint IDs are distinct, and every row's `date_received` falls on
+UTC day D. **Join:** every archive row the narrative filter includes joins exactly one
+API row with an equal `product`, an equal `timely` and an equal date, or the run is
+refused under D43; D43's case of a returned ID that differs arises only from a
+`GET /{complaintId}` request. **Populations recorded:** matched; archive-only;
+excluded by the narrative filter; and API-only, each API-only record being looked up
+in every loaded export so that a date mismatch at a window edge is refused rather than
+mislabelled. API-only records are recorded, not refused: they carry no obtainable
+narrative and cannot enter the population. For export #8's range the net difference is
+zero, 591,058 on each side; Task 25's reconnaissance measures the API-only population
+of every other export used and reports it before the implementation is frozen, and
+strict refusal remains the alternative a later decision may choose. **Completeness is
+scoped to the retained archive population:** a completed acquisition claims that every
+included archive record was joined and verified, never that CFPB's historical
+narrative population is complete. §0's narrative counts, measured before narratives
+were removed from the API, are recorded beside the result as a comparison and are not
+a completeness gate. D43's compatibility sample is not a completeness result.
+*Now — (6) failure, retry and pacing.* These values are **engineering policy, not
+source requirements**: neither CFPB nor Socrata documents a numeric rate limit for
+these endpoints, and Socrata's own pages conflict (D43).
+
+| Aspect | Policy |
+|---|---|
+| Transient | a connection error or timeout; HTTP 429, 500, 502, 503 and 504; an unparseable or short body, such as a CSV whose row count differs from `hits.total` |
+| Permanent | HTTP 400, 401, 403, 410 and any other 4xx except 429; a `GET /{complaintId}` 404 is a missing record, which refuses the run (D43) |
+| Attempts | at most 6 per request |
+| Backoff | 2, 4, 8, 16 and 32 seconds, with no jitter |
+| `Retry-After` | when present, the wait is the larger of the backoff and the header, capped at 300 seconds |
+| Pacing | at least 1 second between request starts, per host |
+| HTTP 403 | never retried: the run stops immediately, and the client identity is never changed to get past it |
+| Exhaustion | a typed `FetchFailed` naming the request and its last status |
+
+An acquisition that ends in `FetchFailed` stays incomplete: no acquisition record is
+written, so it never becomes a completed acquisition; `ingest` refuses before any
+corpus write (§2.5, "a page cannot be fetched"); and a rerun resumes at the first
+slice its journal does not hold. The client identifies itself honestly by a User-Agent
+naming Sentinel, and never impersonates a browser or another client.
+*Now — (7) NYC 311 page size.* SODA 2.0 with `$limit=50000`, its documented maximum,
+and one request per New York civil day D: `$where` of
+`created_date >= 'DT00:00:00' AND created_date < 'D+1T00:00:00'`, written with
+explicit comparisons because whether `between` includes its endpoints is not
+documented (D43), and
+`$select=unique_key,created_date,closed_date,complaint_type,descriptor`, exactly the
+adapter's fields. Literal floating-timestamp strings make every daylight-saving day
+come out right with no timezone conversion. A slice holding 50,000 rows or more
+refuses the run; it is never truncated. The largest measured day, 16,388, leaves about
+three times that headroom. `SOURCE_API_VERSION = "socrata-soda2"` already names the
+SODA 2.0 bare-array shape, and SODA 3 requires a token.
+*Now — (8) NYC 311 ordering.* `$order=unique_key` within each slice: the source's own
+identifier, which makes a page's bytes deterministic for unchanged data. Socrata's
+documented minimum, `$order=:id`, exists for paging, and no slice is paged by offset;
+a slice at the limit refuses under (7), and any future split would be by time, never
+by offset.
+*Now — (9) NYC 311 authentication.* No app token. The fetcher never reads, sends or
+logs one. About 1,500 requests at one-second spacing do not need one, the two official
+statements about throttling with a token conflict and D43 resolved neither, and an
+unauthenticated client needs no secret in a public repository. An HTTP 429 goes
+through (6); throttling that persists would be a new decision.
+*Now — (10) NYC 311 completeness.* An NYC 311 acquisition is complete only when, for
+every slice, `count(*)` equals the number of rows returned and the number of distinct
+`unique_key`s, and is below 50,000; the slice totals reconcile to the window's
+`count(*)` taken at the end of the run; and no `unique_key` appears in more than one
+slice. If `rowsUpdatedAt` or the window count changes during the acquisition, every
+slice's count is verified again and each changed slice is fetched again, once; an
+inconsistency that remains refuses the run.
+*Now — an acquisition-scoped raw cache.* Today every run's pages accumulate in one
+cache per source that every normalize pass reads whole, and a real fetcher resumed
+after an interruption would download every page again, skipping only the cache writes.
+Each acquisition now has its own directory under `data/acquisitions/<source>/`, which
+is the `raw_root` its pages are cached in; pages stay content-addressed. A journal of
+completed slices lets an interrupted acquisition resume at the first slice it does not
+hold, without repeating a request. The acquisition record is written last, and a
+completed acquisition never changes. Normalization reads only the pages a completed
+acquisition record lists, verifying each page's digest; an unlisted, missing or
+corrupt page, or an acquisition without a completed record, refuses the run before any
+corpus write.
+*Now — atomic, checked cache writes, and duplicate identity refused.* D43 left two
+conflicts open that the fetch path must touch, and D44 resolves both. **Partially
+written raw-cache pages.** Today `cache_page` gzips straight to its final
+content-addressed name and skips any name that exists, so a write killed part-way
+leaves a truncated page that is trusted by name from then on and breaks every later
+read: `ingest/cli.py`'s statement that an interrupted run leaves "whole pages behind,
+never half of one" does not hold for such a write, and plan §F's "verified by
+checksum, not existence" is not what the code does. A page is now written to a
+temporary file in the same directory and moved into place with `os.replace`, and a
+page whose name already exists is digested again and replaced when its content does
+not match its name. **Duplicate `external_id`s.** Nothing checks for them today. They
+can come from pages accumulated across acquisitions of a source updated daily, from
+duplicates inside a source, and from overlapping CFPB exports. Acquisition-scoped raw
+roots remove the first; the fetchers refuse any duplicate identifier within an
+acquisition; and a normalized window holding two records with the same
+`(source, external_id)` refuses the run before any corpus write, a refusal D44 adds to
+those §2.5 lists. Nothing is ever deduplicated silently.
+*Now — the two conflicts D44 does not resolve.* NYC 311's daylight-saving edge rows
+are not the fetch path's to change: the fetchers pass them through untouched, and D45
+records them together with the other NYC 311 refusals measured beside them.
+Full-window normalization memory is unchanged: `ingest()` holds the whole window
+because §1.1 and D24 require the roster to be asserted over it before anything is
+written. The reconnaissance measured 1,661 bytes per held CFPB record-and-outcome pair
+with a 1,202-character narrative and 472 bytes per NYC 311 pair, both undercounts, and
+estimated a peak of about 4 to 6 GB per source. That peak is to be measured on the
+first real run, and a two-pass redesign would be its own decision, taken only if the
+measured peak does not fit.
+*Now — the fetch boundary.* The fetchers are built with an injected transport, clock,
+sleeper and acquisition directory, and passed to `ingest(..., fetcher=…)` as the
+unchanged `Fetcher = Callable[[str, date, date], Iterable[SourcePage]]`. Plan §F's
+`SourceAdapter.fetch`, `PageCursor`, `FetchPage` and `dataset_adapter` stay superseded
+and are not revived. A new `--fetch` flag is opt-in; without it the command line stays
+cache-only and network-free, which keeps Task 8's "Normalize and load are re-run from
+the raw cache without network access" and every existing test. The fetch code lives in
+a new `ingest/fetch/` package that imports only the standard library and `requests`,
+already pinned in `requirements/base.txt`; it imports no pyarrow, no scipy, not
+`ingest.cli`, and no Django. Tests never touch the network: every new fetch test
+module blocks sockets, no fetcher can be built without an explicit transport, and the
+real transport is built only in the command line's `main()`. Nothing under `data/`,
+which is gitignored, is ever committed.
+*Now — what D44 authorizes, and what it does not.*
+
+| Surface | Under D44 |
+|---|---|
+| `ingest/cli.py` | **Modified:** an atomic, checked `cache_page`; verification of the acquisition record before normalization; the duplicate `external_id` refusal; the opt-in `--fetch`; `acquisition_id` passed to the manifest; its docstring's account of fetching |
+| `ingest/manifest.py` | **Modified:** version 3, `acquisition_id`, and reading versions 1 and 2 |
+| `tests/ingest/test_manifest.py` | **Modified:** the seven assertions that pin version 2 are updated, tests reading versions 1 and 2 are added, and nothing is weakened |
+| `tests/ingest/test_cli.py` | Additions only |
+| `ingest/fetch/`, `tests/ingest/fetch/`, `tests/fixtures/fetch/` | **Created**; fixtures are tiny and synthetic |
+| `ingest/sources/cfpb.py`, `ingest/sources/nyc311.py`, `ingest/sources/base.py` | **Unchanged** |
+| Normalization logic | **Unchanged** |
+| `ingest/storage.py`, `ingest/schema.py`, `ingest/roster.py`, `ingest/identity.py` | **Unchanged** |
+| `requirements/*`, `.github/workflows/ci.yml` | **Unchanged:** pure fetch tests run in the application job, and end-to-end tests live in `test_cli.py` and `test_manifest.py`, which the ML job already runs |
+| `tests/test_phase2_integration.py`, the root `conftest.py` | **Unchanged**; a suite-wide network guard is not authorized here |
+| `README.md`, `docs/phase-2-reproducibility.md`, Task 20's evidence | **Unchanged** until real ingestion |
+
+*Now — real data.* **Tasks 23, 24 and 25 do not authorize full-window ingestion of
+either source.** No corpus was downloaded to write this entry, and no README or
+model-metric change follows from it. Downloading the archive exports that Task 25's
+reconnaissance needs, about 0.77 GB, requires its own authorization. Real ingestion
+happens only after D45 is decided and after a separate authorization of the hardware
+and of the run; it remains D42's second deferred item. **Phase 2 is not complete, and
+no document may describe it as complete.**
+*Now — D42 and D43 are preserved.* D44 completes the specification of D42's first
+deferred item — endpoint, pagination, retry and rate limit — but not its
+implementation, so that item stays open until Tasks 23 to 25 land, and a later
+decision closes the deviation. D42's other deferred items are untouched. D43's source
+model, per-field authority and refusals stand as written; D44 adds how they are met.
+*Scope:* the concrete fetch contract for both sources, the acquisition record and
+manifest version 3, the two cache-and-identity resolutions, and plan Tasks 23 to 25.
+**D1–D43 are unaltered.** The addendum's sections and plan §G are not edited: where
+D44 adds a §2.5 refusal and a manifest version, this entry is their record. D44
+changes no code, no test, no requirement and no CI; the code and test changes it
+authorizes belong to Tasks 23 to 25.
+
+**D45 — NYC 311's measured real-data refusals mean every real ingestion of D37.2's
+window is refused under the current contract; how to treat them is left open here, and
+must be decided before any real NYC 311 ingestion, though not before the fetcher is
+built and tested (addendum §1.1, §2.4, §2.5; plan Task 6; D21, D37.2, D43, D44).**
+*Was:* §2.4 rejects an ambiguous (autumn fold) or nonexistent (spring gap) local time
+and calls the effect "a negligible loss and a loud signal", while §2.5 lists adapter
+normalization errors — "for example §2.4's DST rejections" — among the refusals of the
+whole run, which is what the code does. Plan Task 6 refuses a null `descriptor`
+(`MissingDescriptor`) and a `closed_date` before its `created_date`
+(`NegativeResolutionTime`), the latter because "the reconnaissance measured zero
+negatives". D43 recorded the daylight-saving conflict as unresolved, and D44 leaves
+those rows to this entry.
+*Now — the measured populations.* Measured on 2026-09-28 by SoQL aggregate queries
+against `erm2-nwe9`, over records whose `created_date` lies in D37.2's window; counts
+only, no rows retrieved. The dataset is updated daily, so these counts are a snapshot,
+and a real acquisition records its own.
+
+| Row class | Adapter refusal | Records |
+|---|---|---|
+| `descriptor` null | `MissingDescriptor` | 47,844 |
+| `closed_date` before `created_date` | `NegativeResolutionTime` | 1,904 |
+| `created_date` in the autumn fold, 2024-11-03 01:00–02:00 | `AmbiguousLocalTime` | 659 |
+| `created_date` in the autumn fold, 2025-11-02 01:00–02:00 | `AmbiguousLocalTime` | 796 |
+| `created_date` in the spring gap, 2024-03-10 02:00–03:00 | `NonexistentLocalTime` | 1 |
+| `created_date` in the spring gap, 2025-03-09 02:00–03:00 | `NonexistentLocalTime` | 0 |
+| `closed_date` in the autumn fold, 2024-11-03 01:00–02:00 | `AmbiguousLocalTime` | 890 |
+| `closed_date` in the autumn fold, 2025-11-02 01:00–02:00 | `AmbiguousLocalTime` | 759 |
+| `closed_date` in the spring gap, 2024-03-10 02:00–03:00 | `NonexistentLocalTime` | 1 |
+| `closed_date` in the spring gap, 2025-03-09 02:00–03:00 | `NonexistentLocalTime` | 1 |
+| `closed_date` in the spring gap, 2026-03-08 02:00–03:00 | `NonexistentLocalTime` | 0 |
+
+The daylight-saving rows number between 1,651 and 3,107: a record created and closed
+in the same edge hour is counted twice above, and that overlap was not measured. Nor
+was the overlap between the three row classes. Also measured: `complaint_type` null in
+0 records, and `closed_date` null in 118,649, which are open requests the adapter
+accepts. Whether `unique_key` is unique across the window was not measured; that query
+timed out.
+*Now — the conflict.* One such row refuses the whole run under §2.5 and the code, so
+with these counts every real NYC 311 ingestion of D37.2's window is refused. For the
+daylight-saving rows §2.4's own words describe a loss of records, while §2.5 and the
+code refuse the run. For null descriptors and negative durations the refusal is
+specified consistently, and the counts above are what it costs.
+*Now — the two policy options.* For each of the three row classes the deciding entry
+chooses one of:
+(a) **Retain the refusal.** §2.4, §2.5, Task 6 and the adapter stay as they are. No
+NYC 311 corpus can be produced for D37.2's window while any such row is present, so
+the work that needs one stays deferred under D42.
+(b) **Exclude the typed rows, counted and reported.** Only rows raising exactly that
+class's typed adapter error are excluded; each exclusion is counted by class and year,
+recorded in the corpus's provenance and reported; no other refusal is weakened, and
+nothing is dropped silently. This changes how those typed errors are handled — in
+`ingest/cli.py` or in the adapter — and §2.5's list of refusals, which Tasks 6 and 8
+protect, so the entry that chooses it must authorize that change explicitly.
+*Now — when the decision is required.* **D45 must be decided before any real NYC 311
+ingestion.** It is **not** required to build or test the fetcher: Task 24's fetcher
+passes every row through untouched, its tests use synthetic fixtures, and it
+implements neither option. D45 chooses neither option.
+*Now — what D45 does not do.* It changes no refusal, no adapter, no section of this
+addendum and no plan task; it downloads nothing; and it makes no completeness claim.
+D42's deferred items stay open. **Phase 2 is not complete, and no document may
+describe it as complete.**
+*Scope:* the NYC 311 real-data refusals only. **D1–D44 are unaltered.** D45 changes no
+code, no test, no requirement and no CI.
