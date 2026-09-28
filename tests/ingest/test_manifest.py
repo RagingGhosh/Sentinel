@@ -288,7 +288,7 @@ def test_manifest_carries_no_operational_complaint_data(tmp_path):
 
 def test_the_manifest_carries_the_three_contract_fields(tmp_path):
     m = a_corpus(tmp_path, limit=500)
-    assert m.manifest_version == MANIFEST_VERSION == 2
+    assert m.manifest_version == MANIFEST_VERSION == 3
     assert m.limit == 500
     assert m.timestamp_diagnostic == DIAGNOSTIC
 
@@ -345,7 +345,7 @@ def test_write_manifest_emits_the_three_new_keys(tmp_path):
     write_manifest(m, root=tmp_path)
     raw = (tmp_path / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").read_text(encoding="utf-8")
     payload = json.loads(raw)
-    assert payload["manifest_version"] == 2
+    assert payload["manifest_version"] == 3
     assert payload["limit"] == 250
     assert payload["timestamp_diagnostic"] == DIAGNOSTIC
 
@@ -355,7 +355,7 @@ def test_read_manifest_reconstructs_the_new_fields_exactly(tmp_path):
     write_manifest(m, root=tmp_path)
     back = read_manifest("cfpb", root=tmp_path)
     assert back == m
-    assert back.manifest_version == 2
+    assert back.manifest_version == 3
     assert back.limit == 7
     assert back.timestamp_diagnostic == DIAGNOSTIC
 
@@ -979,19 +979,19 @@ def test_a_version_one_manifest_without_the_new_field_still_reads(tmp_path):
 def test_a_version_one_manifest_is_read_only_compatibility(tmp_path):
     """D37.16: reading v1 is supported; every new write emits v2."""
     manifest = a_311_corpus(tmp_path, with_sidecar=False)
-    assert manifest.manifest_version == 2
+    assert manifest.manifest_version == 3
     write_manifest(manifest, root=tmp_path)
     payload = json.loads(
         (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}" / "manifest.json").read_text(encoding="utf-8")
     )
-    assert payload["manifest_version"] == 2
+    assert payload["manifest_version"] == 3
     assert "outcome_part_files" in payload
 
 
 def test_a_source_with_no_outcome_stream_writes_an_empty_outcome_map(tmp_path):
     """D37.16: v2 carries the field, which may legitimately be empty."""
     manifest = a_corpus(tmp_path)
-    assert manifest.manifest_version == 2
+    assert manifest.manifest_version == 3
     assert manifest.outcome_part_files == {}
 
 
@@ -999,7 +999,7 @@ def test_the_record_schema_version_is_untouched_by_the_manifest_bump(tmp_path):
     """D37.16: the two version numbers version different things (§G)."""
     manifest = a_311_corpus(tmp_path)
     assert manifest.schema_version == SCHEMA_VERSION == 1
-    assert manifest.manifest_version == 2
+    assert manifest.manifest_version == 3
 
 
 def test_outcome_part_files_has_a_default_and_is_not_a_strict_required_key(tmp_path):
@@ -1048,3 +1048,95 @@ def test_the_manifest_remains_the_validity_boundary_for_outcomes(tmp_path):
     (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}" / "manifest.json").unlink(missing_ok=True)
     with pytest.raises(ManifestNotFound):
         load_outcomes("nyc311", root=tmp_path)
+
+
+# --- manifest v3: acquisition_id (D44, D46) ------------------------------------------
+
+
+def _rewrite_payload(path, change):
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    change(payload)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def test_a_manifest_built_without_an_acquisition_writes_a_null_acquisition_id(tmp_path):
+    manifest = a_corpus(tmp_path)
+    assert manifest.acquisition_id is None
+    path = write_manifest(manifest, root=tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert "acquisition_id" in payload and payload["acquisition_id"] is None
+
+
+def test_a_version_three_manifest_round_trips_its_acquisition_id(tmp_path):
+    a_corpus(tmp_path)
+    manifest = build_manifest(
+        source="cfpb",
+        window_start=datetime(2024, 1, 1, tzinfo=UTC),
+        window_end=datetime(2024, 12, 31, tzinfo=UTC),
+        source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
+        root=tmp_path,
+        acquisition_id="d" * 64,
+    )
+    write_manifest(manifest, root=tmp_path)
+    back = read_manifest("cfpb", root=tmp_path)
+    assert back == manifest
+    assert back.acquisition_id == "d" * 64
+
+
+def test_a_version_two_manifest_reads_with_no_acquisition_id(tmp_path):
+    """D46: v2 predates the field, which reads as None; nothing else changes."""
+    manifest = a_311_corpus(tmp_path)
+    path = write_manifest(manifest, root=tmp_path)
+
+    def to_version_two(payload):
+        payload["manifest_version"] = 2
+        del payload["acquisition_id"]
+
+    _rewrite_payload(path, to_version_two)
+    back = read_manifest("nyc311", root=tmp_path)
+    assert back.manifest_version == 2
+    assert back.acquisition_id is None
+    assert back.outcome_part_files == manifest.outcome_part_files
+    assert back.corpus_id == manifest.corpus_id
+
+
+def test_a_version_one_manifest_reads_with_no_acquisition_id(tmp_path):
+    manifest = a_311_corpus(tmp_path, with_sidecar=False)
+    path = write_manifest(manifest, root=tmp_path)
+
+    def to_version_one(payload):
+        payload["manifest_version"] = 1
+        del payload["outcome_part_files"]
+        del payload["acquisition_id"]
+
+    _rewrite_payload(path, to_version_one)
+    back = read_manifest("nyc311", root=tmp_path)
+    assert back.manifest_version == 1
+    assert back.acquisition_id is None
+    assert back.outcome_part_files == {}
+
+
+def test_a_version_three_manifest_without_acquisition_id_is_refused(tmp_path):
+    """Only v1 and v2 may omit it: from v3 the lookup is strict, like every other key."""
+    path = write_manifest(a_corpus(tmp_path), root=tmp_path)
+    _rewrite_payload(path, lambda payload: payload.pop("acquisition_id"))
+    with pytest.raises(KeyError, match="acquisition_id"):
+        read_manifest("cfpb", root=tmp_path)
+
+
+def test_acquisition_id_does_not_enter_the_corpus_identity(tmp_path):
+    """corpus_id stays a digest of the part files alone (D46)."""
+    without = a_corpus(tmp_path)
+    with_id = build_manifest(
+        source="cfpb",
+        window_start=datetime(2024, 1, 1, tzinfo=UTC),
+        window_end=datetime(2024, 12, 31, tzinfo=UTC),
+        source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
+        root=tmp_path,
+        acquisition_id="d" * 64,
+    )
+    assert with_id.corpus_id == without.corpus_id

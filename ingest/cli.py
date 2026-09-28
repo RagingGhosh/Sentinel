@@ -1,16 +1,18 @@
 """Resumable corpus ingestion, and the timestamp provenance diagnostic.
 
     python -m ingest.cli --source {cfpb,nyc311} --start YYYY-MM-DD --end YYYY-MM-DD
-                         [--limit N] [--corpus-root PATH]
+                         [--limit N] [--corpus-root PATH] [--fetch]
 
 The order of operations is load-bearing::
 
     refuse an --end before --start, then a --limit below one (D28)
       -> refuse a --limit run into a root holding an authoritative corpus (D26)
-      -> fetch (or reuse the raw cache)
+      -> fetch (or reuse the raw cache, or a completed acquisition)
+      -> verify the acquisition, when one is given (D46)
       -> normalize through the source's adapter, filtered to the window
       -> refuse an empty window (D23)
       -> assert the label roster over the whole window   <-- before the corpus changes
+      -> refuse a duplicate (source, external_id) in the window (D44)
       -> apply --limit, and compute the timestamp diagnostic
       -> clear the source's tree, manifest first (D27)
       -> write partitions
@@ -23,18 +25,28 @@ deleting it afterwards is not the same as never having written it. Tests assert
 that nothing on disk changes after any refusal.
 
 **Resumability is content-addressed, not a checkpoint file.** Each fetched page
-is stored gzipped at `data/raw/<source>/<sha256>.json.gz`, so a page whose
+is stored gzipped at `<raw root>/<source>/<sha256>.json.gz`, so a page whose
 checksum matches an existing file is skipped. Re-running performs zero writes
-and no fetch is required at all: normalize and load read the cache. An
-interrupted run leaves whole pages behind, never half of one, and the resumed
-run replaces the source's whole tree from the full cache (D27) — so a resumed
-corpus is byte-identical to a clean one rather than merely equivalent.
+and no fetch is required at all: normalize and load read the cache. A page is
+written to a temporary file beside its destination and moved into place, and a
+page already on disk is digested again and replaced when its content does not
+match its name (D44), so an interrupted run leaves whole pages behind, never
+half of one. The resumed run replaces the source's whole tree from the full
+cache (D27) — so a resumed corpus is byte-identical to a clean one rather than
+merely equivalent.
 
-**Fetching is injected.** No approved document specifies an endpoint, a
-pagination scheme, a retry policy or a rate limit for either source, so none is
-invented here. `Fetcher` is the boundary; the concrete HTTP client belongs to
-whichever task specifies those things. Passing `fetcher=None` runs entirely from
-the cache, which is what the plan requires of the normalize-and-load pass.
+**Fetching is injected.** `Fetcher` is the boundary, and passing `fetcher=None`
+runs entirely from the cache, which is what the plan requires of the
+normalize-and-load pass. Addendum D44 and D46 specify the concrete fetch: each
+acquisition has its own directory, `data/acquisitions/<source>/<start>_<end>/`,
+which is the raw root its pages are cached in, and `ingest.fetch` holds the
+transport, the retry and pacing policy, the journal and the immutable acquisition
+record. Given `acquisition=`, `ingest()` reads only the pages that acquisition's
+completed record lists, verifying each one first, and records the record's
+digest as the manifest's `acquisition_id`; without it, nothing here changes.
+`--fetch` is opt-in: it uses the fetcher registered for the source and refuses
+with `FetcherUnavailable` while none is. Without `--fetch` the command line reads
+the raw cache exactly as it always has.
 
 **The diagnostic follows §2.3 exactly and adds nothing.** Its primary evidence
 is the CFPB `date_received` -> `date_sent_to_company` delta; the hour and
@@ -53,7 +65,10 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 import sys
+import tempfile
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
@@ -61,6 +76,14 @@ from typing import Any
 
 from scipy.stats import chi2
 
+from ingest.fetch.acquisition import (
+    acquisition_dir,
+    current_commit,
+    is_complete,
+    verify_acquisition,
+)
+from ingest.fetch.http import HttpClient, RequestsTransport
+from ingest.fetch.registry import FETCHERS, FetchContext
 from ingest.manifest import (
     CorpusManifest,
     build_manifest,
@@ -152,6 +175,24 @@ class EmptyWindow(IngestError):
     """
 
 
+class DuplicateExternalId(IngestError):
+    """The normalized window holds two records with one `(source, external_id)` (D44).
+
+    Raised after the roster assertion and before any write, so nothing is written.
+    A record's identity is the pair; two records sharing it would collide on every
+    `RecordRef`, and neither is dropped in favour of the other.
+    """
+
+
+class FetcherUnavailable(IngestError):
+    """`--fetch` named a source no fetcher is registered for (D46).
+
+    Raised by the command line before any transport is built, any request is made,
+    any directory is created and anything is written. Task 23 registers no source;
+    Tasks 24 and 25 each register theirs.
+    """
+
+
 # --- the raw cache -----------------------------------------------------------
 
 
@@ -169,19 +210,42 @@ def raw_dir(source: str, raw_root: Path = RAW_ROOT) -> Path:
     return Path(raw_root) / source
 
 
+def _stored_checksum(path: Path) -> str | None:
+    """The checksum of the page stored at `path`, or `None` when it cannot be read."""
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            return page_checksum(json.load(handle))
+    except (OSError, EOFError, ValueError):
+        return None
+
+
 def cache_page(page: SourcePage, source: str, raw_root: Path = RAW_ROOT) -> tuple[Path, bool]:
     """Store one page, or recognise it as already stored.
 
     Returns the path and whether anything was written. Content addressing is
     what makes a rerun free: the same page yields the same name.
+
+    A page is never trusted by its name alone (D44). One already on disk is
+    digested again, and replaced when its content does not match its name, so a
+    truncated or altered page is repaired rather than read. A new page is written
+    to a temporary file beside its destination and moved into place, so a write
+    killed part-way leaves nothing at the final name.
     """
     directory = raw_dir(source, raw_root)
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{page_checksum(page)}.json.gz"
-    if path.exists():
+    checksum = page_checksum(page)
+    path = directory / f"{checksum}.json.gz"
+    if path.exists() and _stored_checksum(path) == checksum:
         return path, False
-    with gzip.open(path, "wt", encoding="utf-8") as handle:
-        json.dump(page, handle, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    handle, temporary = tempfile.mkstemp(dir=directory, prefix=".page-", suffix=".tmp")
+    os.close(handle)
+    try:
+        with gzip.open(temporary, "wt", encoding="utf-8") as stream:
+            json.dump(page, stream, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
     return path, True
 
 
@@ -488,15 +552,23 @@ def ingest(
     fetcher: Fetcher | None = None,
     corpus_root: Path = CORPUS_ROOT,
     raw_root: Path = RAW_ROOT,
+    acquisition: Path | None = None,
 ):
-    """Fetch, normalize, validate, write, and describe one source's corpus."""
+    """Fetch, normalize, validate, write, and describe one source's corpus.
+
+    `acquisition` names an acquisition directory (D46). With `None`, the run reads
+    `raw_root` exactly as it always has, checks no acquisition, and records
+    `acquisition_id` as `None`. With a directory, that directory is the raw root for
+    the fetch and for the read, a complete one is reused without calling `fetcher`,
+    and the pages are normalized only after `verify_acquisition` has passed.
+    """
     if end < start:
         raise InvalidDateRange(f"--end {end.isoformat()} precedes --start {start.isoformat()}")
     if limit is not None and limit < 1:
         raise InvalidLimit(f"--limit must be a positive integer; got {limit}")
 
     corpus_root = Path(corpus_root)
-    raw_root = Path(raw_root)
+    raw_root = Path(raw_root) if acquisition is None else Path(acquisition)
 
     # D26: a truncated run may not replace a full corpus. Checked before the
     # fetch and before any write, so a refused run leaves no trace at all.
@@ -512,7 +584,17 @@ def ingest(
 
     window_start, window_end = resolve_window(source, start, end)
 
-    fetch_into_cache(source, start, end, fetcher, raw_root)
+    acquisition_id: str | None = None
+    if acquisition is None:
+        fetch_into_cache(source, start, end, fetcher, raw_root)
+    else:
+        # D46: a completed acquisition is immutable and reused with zero requests;
+        # whatever the fetch did, nothing is read until the record verifies.
+        if not is_complete(raw_root):
+            fetch_into_cache(source, start, end, fetcher, raw_root)
+        acquisition_id = verify_acquisition(
+            raw_root, source=source, start=start, end=end
+        ).acquisition_id
 
     # The complete window, before any truncation. --limit bounds persistence
     # only (D24), so the roster below is derived from every candidate record.
@@ -540,6 +622,22 @@ def ingest(
         counts[record.label] = counts.get(record.label, 0) + 1
     if source == "cfpb":
         assert_roster(counts, _locked_roster(source, corpus_root, by_year))
+
+    # D44: a record's identity is (source, external_id), so two records sharing one
+    # refuse the run rather than one of them being kept. Still before any write; after
+    # the roster, so a taxonomy failure is reported as the taxonomy failure it is.
+    identities = Counter((record.source, record.external_id) for record, _ in window)
+    duplicates = {key: count for key, count in identities.items() if count > 1}
+    if duplicates:
+        shown = ", ".join(
+            f"{src}:{external_id} ({count} records)"
+            for (src, external_id), count in sorted(duplicates.items())[:10]
+        )
+        raise DuplicateExternalId(
+            f"{source}: {len(duplicates)} (source, external_id) pair"
+            f"{'' if len(duplicates) == 1 else 's'} occur more than once in the window: "
+            f"{shown}. Nothing was written."
+        )
 
     # Only now does --limit decide what is persisted.
     kept = window if limit is None else window[:limit]
@@ -600,6 +698,7 @@ def ingest(
         limit=limit,
         timestamp_diagnostic=diagnostic,
         root=corpus_root,
+        acquisition_id=acquisition_id,
     )
     write_manifest(manifest, root=corpus_root)
     return manifest
@@ -632,17 +731,57 @@ def build_parser() -> argparse.ArgumentParser:
         default=CORPUS_ROOT,
         help="corpus root to write; a --limit run needs one without an authoritative corpus",
     )
+    parser.add_argument(
+        "--fetch",
+        action="store_true",
+        help="acquire the window from its source first (network); without it the run "
+        "reads the raw cache only",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if not args.fetch:
+        ingest(
+            source=args.source,
+            start=args.start,
+            end=args.end,
+            limit=args.limit,
+            corpus_root=args.corpus_root,
+        )
+        return 0
+
+    # D46: the source's registered fetcher, or a refusal before any transport, any
+    # request, any directory and any write.
+    factory = FETCHERS.get(args.source)
+    if factory is None:
+        raise FetcherUnavailable(
+            f"{args.source}: no fetcher is registered for this source, so --fetch cannot "
+            "acquire it. Nothing was requested, created or written."
+        )
+    transport = RequestsTransport()
+    resolved_start, resolved_end = resolve_window(args.source, args.start, args.end)
+    context = FetchContext(
+        source=args.source,
+        start=args.start,
+        end=args.end,
+        resolved_start=resolved_start,
+        resolved_end=resolved_end,
+        directory=acquisition_dir(args.source, args.start, args.end),
+        http=HttpClient(transport),
+        client=transport.identity,
+        sentinel_commit=current_commit(),
+        now=lambda: datetime.now(UTC),
+    )
     ingest(
         source=args.source,
         start=args.start,
         end=args.end,
         limit=args.limit,
+        fetcher=factory(context),
         corpus_root=args.corpus_root,
+        acquisition=context.directory,
     )
     return 0
 

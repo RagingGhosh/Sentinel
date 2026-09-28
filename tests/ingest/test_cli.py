@@ -13,6 +13,7 @@ neither is re-derived here.
 
 import ast
 import gzip
+import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -29,7 +30,9 @@ from ingest.cli import (  # noqa: E402
     SUPPORTED,
     VERDICT_RULE,
     AuthoritativeCorpusExists,
+    DuplicateExternalId,
     EmptyWindow,
+    FetcherUnavailable,
     IngestError,
     InvalidDateRange,
     InvalidLimit,
@@ -37,12 +40,21 @@ from ingest.cli import (  # noqa: E402
     authoritative_roster,
     build_diagnostic,
     build_parser,
+    cache_page,
     decide_verdict,
     ingest,
     main,
     page_checksum,
     resolve_window,
 )
+from ingest.fetch.acquisition import (  # noqa: E402
+    Acquisition,
+    AcquisitionIncomplete,
+    AcquisitionIntegrityError,
+    record_path,
+)
+from ingest.fetch.canonical import canonical_bytes, page_digest  # noqa: E402
+from ingest.fetch.http import ClientIdentity, FetchFailed, HttpClient, Response  # noqa: E402
 from ingest.manifest import (  # noqa: E402
     ManifestNotFound,
     load_corpus,
@@ -2086,7 +2098,7 @@ def test_the_run_manifest_binds_both_streams(tmp_path):
     manifest, _ = a_311_run(tmp_path, [nyc311_resolved("1", closed="2024-03-15T21:00:00.000")])
     assert set(manifest.part_files) & set(manifest.outcome_part_files) == set()
     assert all("/outcomes/" in path for path in manifest.outcome_part_files)
-    assert manifest.manifest_version == 2
+    assert manifest.manifest_version == 3
 
 
 def test_corpus_identity_binds_the_outcome_bytes_end_to_end(tmp_path):
@@ -2156,4 +2168,392 @@ def test_a_cfpb_corpus_remains_loadable_without_a_311_sidecar(tmp_path):
     a_cfpb_run(tmp_path, [[cfpb_row("1")]])
     manifest = read_manifest("cfpb", root=tmp_path / "corpus")
     assert manifest.schema_version == SCHEMA_VERSION == 1
-    assert manifest.manifest_version == 2
+    assert manifest.manifest_version == 3
+
+
+# --- Task 23: the acquisition layer (addendum D44, D46) ----------------------------------
+#
+# Every transport below is a scripted fake: nothing here reaches the network, and the
+# `closed_network` fixture holds every test that fetches to that.
+
+ACQ_START, ACQ_END = date(2024, 1, 1), date(2024, 1, 3)
+ACQ_DAYS = ("2024-01-01", "2024-01-02", "2024-01-03")
+TEST_COMMIT = "c" * 40
+TEST_CLIENT = ClientIdentity(user_agent="Sentinel-test/0", library="fake", library_version="0")
+FIXED_NOW = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+
+
+@pytest.fixture
+def closed_network(monkeypatch):
+    import socket
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a Task 23 test attempted a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+    monkeypatch.setattr(socket, "create_connection", refuse)
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+
+
+def day_rows(day):
+    return [
+        {
+            "unique_key": f"{day}-{i}",
+            "created_date": f"{day}T09:00:00.000",
+            "complaint_type": "Noise",
+            "descriptor": "Loud",
+        }
+        for i in range(2)
+    ]
+
+
+class DayTransport:
+    """Serves one day's rows per request and records the days asked for."""
+
+    def __init__(self, forbid=()):
+        self.days = []
+        self.forbid = set(forbid)
+
+    def get(self, url, params, headers):
+        day = dict(params)["day"]
+        self.days.append(day)
+        if day in self.forbid:
+            return Response(status=403, headers={}, body=b"")
+        return Response(status=200, headers={}, body=json.dumps(day_rows(day)).encode())
+
+
+def quiet_client(transport):
+    return HttpClient(
+        transport, clock=lambda: 0.0, sleep=lambda seconds: None, now=lambda: FIXED_NOW
+    )
+
+
+def day_fetcher(directory, http, *, commit=TEST_COMMIT, client=TEST_CLIENT):
+    """A test-only fetcher over the acquisition API: one slice per day, resumable."""
+
+    def fetch(source, start, end):
+        window_start, window_end = resolve_window(source, start, end)
+        acquisition = Acquisition(
+            directory,
+            source=source,
+            start=start,
+            end=end,
+            resolved_start=window_start,
+            resolved_end=window_end,
+            client=client,
+            sentinel_commit=commit,
+            now=lambda: FIXED_NOW,
+        )
+        done = acquisition.completed_slices()
+        for day in ACQ_DAYS:
+            if day in done:
+                continue
+            fetched = http.get("https://example.test/311", [("day", day)])
+            page = json.loads(fetched.response.body)
+            yield page
+            acquisition.record_slice(
+                day, requests=[fetched.record], pages=[page_digest(page)], verification={}
+            )
+        acquisition.complete({})
+
+    return fetch
+
+
+def acquired(tmp_path, *, name="acq", transport=None, fetcher=None, corpus="corpus"):
+    directory = tmp_path / name
+    transport = transport or DayTransport()
+    manifest = ingest(
+        source="nyc311",
+        start=ACQ_START,
+        end=ACQ_END,
+        limit=None,
+        fetcher=fetcher or day_fetcher(directory, quiet_client(transport)),
+        corpus_root=tmp_path / corpus,
+        acquisition=directory,
+    )
+    return manifest, directory, transport
+
+
+def snapshot(root):
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+
+def never_called(source, start, end):
+    raise AssertionError("the fetcher must not be called")
+    yield  # pragma: no cover
+
+
+def test_the_page_digest_is_the_cli_page_checksum():
+    pages = [
+        {"hits": {"hits": [{"_source": {"b": 1, "a": "café"}}]}},
+        [{"unique_key": "1", "descriptor": "ñ ✓"}, {"unique_key": "2"}],
+        [],
+        {"nested": [1, [2, {"z": None, "y": True}]]},
+    ]
+    for page in pages:
+        assert page_digest(page) == page_checksum(page)
+
+
+def test_a_page_write_killed_part_way_leaves_nothing_at_its_name(tmp_path, monkeypatch):
+    import ingest.cli as cli
+
+    def dies_part_way(value, stream, **kwargs):
+        stream.write("[{")
+        raise RuntimeError("killed mid-write")
+
+    monkeypatch.setattr(cli.json, "dump", dies_part_way)
+    with pytest.raises(RuntimeError):
+        cache_page([{"unique_key": "1"}], "nyc311", tmp_path / "raw")
+    assert list((tmp_path / "raw" / "nyc311").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        lambda path: path.write_bytes(path.read_bytes()[:12]),
+        lambda path: path.write_bytes(gzip.compress(b'[{"unique_key":"other"}]')),
+        lambda path: path.write_bytes(b"not gzip at all"),
+    ],
+)
+def test_a_cached_page_that_does_not_match_its_name_is_replaced(tmp_path, damage):
+    page = [{"unique_key": "1", "descriptor": "d"}]
+    path, _ = cache_page(page, "nyc311", tmp_path / "raw")
+    damage(path)
+
+    again, written = cache_page(page, "nyc311", tmp_path / "raw")
+    assert again == path and written is True
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        assert page_checksum(json.load(handle)) == page_checksum(page)
+    assert [p.name for p in path.parent.iterdir()] == [path.name], "no temporary file remains"
+
+
+def test_a_duplicate_external_id_refuses_before_any_write(tmp_path):
+    corpus = tmp_path / "corpus"
+    a_311_run(tmp_path, [nyc311_row("1"), nyc311_row("2")])
+    before = snapshot(corpus)
+
+    later = nyc311_row("7", created="2024-03-16T10:00:00.000")
+    with pytest.raises(DuplicateExternalId, match="nyc311:7") as caught:
+        ingest(
+            source="nyc311",
+            start=date(2024, 1, 1),
+            end=date(2024, 12, 31),
+            limit=None,
+            fetcher=StubFetcher([[nyc311_row("7"), nyc311_row("8")], [later]]),
+            corpus_root=corpus,
+            raw_root=tmp_path / "later-raw",
+        )
+    assert isinstance(caught.value, IngestError)
+    assert snapshot(corpus) == before
+
+
+def test_a_duplicate_within_one_cfpb_page_refuses_on_a_first_run(tmp_path):
+    with pytest.raises(DuplicateExternalId, match="cfpb:5"):
+        a_cfpb_run(tmp_path, [[cfpb_row("5"), cfpb_row("5"), cfpb_row("6")]])
+    corpus = tmp_path / "corpus"
+    assert not corpus.exists() or not list(corpus.rglob("*.*"))
+
+
+def test_a_run_without_an_acquisition_records_no_acquisition_id(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path, [[cfpb_row("1")]])
+    assert manifest.acquisition_id is None
+    assert read_manifest("cfpb", root=tmp_path / "corpus").acquisition_id is None
+
+
+def test_an_acquisition_run_records_the_sha256_of_its_record(tmp_path, closed_network):
+    manifest, directory, transport = acquired(tmp_path)
+    data = record_path(directory).read_bytes()
+    assert manifest.acquisition_id == hashlib.sha256(data).hexdigest()
+    assert read_manifest("nyc311", root=tmp_path / "corpus").acquisition_id == (
+        manifest.acquisition_id
+    )
+    assert canonical_bytes(json.loads(data)) == data
+    assert transport.days == list(ACQ_DAYS)
+    assert manifest.record_count == 6
+    _, records = load_corpus("nyc311", root=tmp_path / "corpus")
+    assert sorted(r.external_id for r in records) == sorted(
+        row["unique_key"] for day in ACQ_DAYS for row in day_rows(day)
+    )
+
+
+def test_a_completed_acquisition_is_reused_with_zero_requests(tmp_path, closed_network):
+    first, directory, _ = acquired(tmp_path)
+    record_before = record_path(directory).read_bytes()
+    stamp = record_path(directory).stat().st_mtime_ns
+
+    transport = DayTransport()
+    second, _, _ = acquired(tmp_path, transport=transport, fetcher=never_called)
+
+    assert transport.days == []
+    assert second.acquisition_id == first.acquisition_id
+    assert second.corpus_id == first.corpus_id
+    assert record_path(directory).read_bytes() == record_before
+    assert record_path(directory).stat().st_mtime_ns == stamp
+
+
+def test_an_interrupted_acquisition_resumes_from_its_journal(tmp_path, closed_network):
+    clean, clean_dir, _ = acquired(tmp_path, name="clean", corpus="clean-corpus")
+
+    broken = DayTransport(forbid={"2024-01-02"})
+    with pytest.raises(FetchFailed, match="403"):
+        acquired(tmp_path, transport=broken)
+    directory = tmp_path / "acq"
+    assert broken.days == ["2024-01-01", "2024-01-02"]
+    assert not record_path(directory).exists(), "an incomplete acquisition has no record"
+    corpus = tmp_path / "corpus"
+    assert not corpus.exists() or not list(corpus.rglob("manifest.json"))
+
+    resumed_transport = DayTransport()
+    resumed, _, _ = acquired(tmp_path, transport=resumed_transport)
+    assert resumed_transport.days == ["2024-01-02", "2024-01-03"], "journaled slices skipped"
+    assert record_path(directory).read_bytes() == record_path(clean_dir).read_bytes()
+    assert resumed.acquisition_id == clean.acquisition_id
+    assert resumed.corpus_id == clean.corpus_id
+
+
+def test_an_incomplete_acquisition_refuses_before_any_corpus_write(tmp_path, closed_network):
+    corpus = tmp_path / "corpus"
+    a_311_run(tmp_path, [nyc311_row("1")])
+    before = snapshot(corpus)
+    with pytest.raises(AcquisitionIncomplete):
+        ingest(
+            source="nyc311",
+            start=ACQ_START,
+            end=ACQ_END,
+            limit=None,
+            fetcher=None,
+            corpus_root=corpus,
+            acquisition=tmp_path / "never-acquired",
+        )
+    assert snapshot(corpus) == before
+    assert not (tmp_path / "never-acquired").exists()
+
+
+def _drop_a_page(directory):
+    next((directory / "nyc311").glob("*.json.gz")).unlink()
+
+
+def _add_an_unlisted_page(directory):
+    path = directory / "nyc311" / ("e" * 64 + ".json.gz")
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump([], handle)
+
+
+def _corrupt_a_page(directory):
+    path = next((directory / "nyc311").glob("*.json.gz"))
+    path.write_bytes(gzip.compress(b'[{"unique_key":"forged"}]'))
+
+
+def _pretty_print_the_record(directory):
+    path = record_path(directory)
+    path.write_bytes(json.dumps(json.loads(path.read_bytes()), indent=2).encode() + b"\n")
+
+
+@pytest.mark.parametrize(
+    "damage", [_drop_a_page, _add_an_unlisted_page, _corrupt_a_page, _pretty_print_the_record]
+)
+def test_a_damaged_acquisition_refuses_before_any_corpus_write(tmp_path, closed_network, damage):
+    _, directory, _ = acquired(tmp_path, corpus="scratch-corpus")
+    damage(directory)
+    corpus = tmp_path / "corpus"
+    a_311_run(tmp_path, [nyc311_row("1")])
+    before = snapshot(corpus)
+
+    with pytest.raises(AcquisitionIntegrityError):
+        acquired(tmp_path, fetcher=never_called)
+    assert snapshot(corpus) == before
+
+
+def test_an_acquisition_of_another_window_refuses(tmp_path, closed_network):
+    _, directory, _ = acquired(tmp_path)
+    with pytest.raises(AcquisitionIntegrityError, match="window"):
+        ingest(
+            source="nyc311",
+            start=ACQ_START,
+            end=date(2024, 1, 2),
+            limit=None,
+            fetcher=never_called,
+            corpus_root=tmp_path / "other-corpus",
+            acquisition=directory,
+        )
+    assert not (tmp_path / "other-corpus").exists()
+
+
+@pytest.mark.parametrize("source", ["cfpb", "nyc311"])
+def test_fetch_refuses_before_any_side_effect_while_no_fetcher_is_registered(
+    tmp_path, monkeypatch, closed_network, source
+):
+    import ingest.cli as cli
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("nothing may be built or run before the refusal")
+
+    monkeypatch.chdir(tmp_path)
+    for name in ("RequestsTransport", "HttpClient", "FetchContext", "current_commit", "ingest"):
+        monkeypatch.setattr(cli, name, forbidden)
+
+    with pytest.raises(FetcherUnavailable, match=source) as caught:
+        main(["--source", source, "--start", "2024-01-01", "--end", "2024-01-03", "--fetch"])
+    assert isinstance(caught.value, IngestError)
+    assert list(tmp_path.iterdir()) == [], "no directory created and nothing written"
+
+
+def test_fetch_builds_the_real_transport_only_in_main_and_uses_the_acquisition_directory(
+    tmp_path, monkeypatch, closed_network
+):
+    import ingest.cli as cli
+
+    built = []
+
+    class FakeRequestsTransport(DayTransport):
+        def __init__(self):
+            super().__init__()
+            self.identity = TEST_CLIENT
+            built.append(self)
+
+    contexts = []
+
+    def factory(context):
+        contexts.append(context)
+        return day_fetcher(context.directory, context.http, commit=context.sentinel_commit)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "RequestsTransport", FakeRequestsTransport)
+    monkeypatch.setattr(cli, "HttpClient", quiet_client)
+    monkeypatch.setattr(cli, "current_commit", lambda: TEST_COMMIT)
+    monkeypatch.setitem(cli.FETCHERS, "nyc311", factory)
+
+    code = main(
+        [
+            "--source",
+            "nyc311",
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-03",
+            "--corpus-root",
+            str(tmp_path / "corpus"),
+            "--fetch",
+        ]
+    )
+    assert code == 0
+    assert len(built) == 1 and built[0].days == list(ACQ_DAYS)
+    context = contexts[0]
+    assert context.directory == Path("data/acquisitions/nyc311/2024-01-01_2024-01-03")
+    assert (context.source, context.start, context.end) == ("nyc311", ACQ_START, ACQ_END)
+    assert (context.resolved_start, context.resolved_end) == resolve_window(
+        "nyc311", ACQ_START, ACQ_END
+    )
+    assert context.client == TEST_CLIENT and context.sentinel_commit == TEST_COMMIT
+    record = tmp_path / context.directory / "acquisition.json"
+    manifest = read_manifest("nyc311", root=tmp_path / "corpus")
+    assert manifest.acquisition_id == hashlib.sha256(record.read_bytes()).hexdigest()
+
+
+def test_without_fetch_the_command_line_passes_exactly_the_arguments_it_always_did(monkeypatch):
+    seen = {}
+    monkeypatch.setattr("ingest.cli.ingest", lambda **kw: seen.update(kw))
+    main(["--source", "cfpb", "--start", "2024-01-01", "--end", "2025-12-31"])
+    assert set(seen) == {"source", "start", "end", "limit", "corpus_root"}
+    arguments = ["--source", "cfpb", "--start", "2024-01-01", "--end", "2024-01-02"]
+    assert build_parser().parse_args(arguments).fetch is False

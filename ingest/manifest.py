@@ -54,14 +54,15 @@ from ingest.storage import (
 MANIFEST_NAME = "manifest.json"
 _CHECKSUM_CHUNK = 1 << 20
 
-MANIFEST_VERSION = 2
-"""Version 2 adds `outcome_part_files` (D37.16).
+MANIFEST_VERSION = 3
+"""Version 3 adds `acquisition_id` (D44, D46); version 2 added `outcome_part_files` (D37.16).
 
-Only the manifest document changed, so `schema_version` stays 1 and every
-record partition stays exactly where it is: plan section G separates the two
-numbers for precisely this case. A v1 manifest still reads, its absent
-`outcome_part_files` becoming an empty mapping with nothing else
-reinterpreted. That compatibility is read-only; every new write emits 2.
+Only the manifest document changed each time, so `schema_version` stays 1 and
+every record partition stays exactly where it is: plan section G separates the
+two numbers for precisely this case. A v1 manifest still reads, its absent
+`outcome_part_files` becoming an empty mapping; a v1 or v2 manifest reads with
+`acquisition_id` as `None`; nothing else is reinterpreted. That compatibility is
+read-only; every new write emits 3.
 """
 """The manifest document's own shape (plan §G).
 
@@ -152,6 +153,13 @@ class CorpusManifest:
     because it is the only field carrying a default, which is what lets a v1
     manifest written before the sidecar existed still be read."""
 
+    acquisition_id: str | None = None
+    """SHA256 of the acquisition record the corpus was normalized from (D44, D46).
+
+    `None` when `ingest()` was given no acquisition, which is every run that does
+    not name one, and in every v1 or v2 manifest. Last, and defaulted, for the same
+    reason as `outcome_part_files`."""
+
 
 def sha256_file(path: Path) -> str:
     """Digest a file's bytes, read in chunks so a large part file is not loaded."""
@@ -187,6 +195,7 @@ def build_manifest(
     timestamp_diagnostic: dict[str, Any],
     root: Path = CORPUS_ROOT,
     ingested_at: datetime | None = None,
+    acquisition_id: str | None = None,
 ) -> CorpusManifest:
     """Describe the corpus currently on disk for one source.
 
@@ -231,6 +240,7 @@ def build_manifest(
         corpus_id=compute_corpus_id({**part_checksums, **outcome_checksums}),
         limit=limit,
         timestamp_diagnostic=timestamp_diagnostic,
+        acquisition_id=acquisition_id,
     )
 
 
@@ -289,6 +299,8 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
         corpus_id=payload["corpus_id"],
         limit=payload["limit"],
         timestamp_diagnostic=dict(payload["timestamp_diagnostic"]),
+        # Required from v3 on; a v1 or v2 manifest predates it and reads as None (D46).
+        acquisition_id=(payload["acquisition_id"] if payload["manifest_version"] >= 3 else None),
     )
 
 
