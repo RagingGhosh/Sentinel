@@ -3406,3 +3406,218 @@ only ones Task 21 publishes. D42 adds no fetcher, specifies no endpoint, downloa
 nothing and creates no synthetic substitute. It changes no code, no test, no
 requirement and no CI, and `README.md` and `docs/phase-2-reproducibility.md` remain
 unchanged until Task 21 is implemented under it.
+
+**D43 — The 2024–2025 CFPB corpus is a Sentinel reconstruction joining the official
+CFPB Narratives Archive to the official CFPB Consumer Complaint Database API by exact
+Complaint ID, and any disagreement between the two refuses the ingestion run; NYC 311
+is read from the official NYC Open Data dataset; the concrete fetch builds against the
+implemented injected `Fetcher` boundary (plan §F, §G, §X, Tasks 5, 6, 8; addendum §0,
+§1, §2.3, §2.4, §2.5; D21, D37.2, D42).**
+*Was:* D42 recorded that no approved document specified an endpoint, a pagination
+scheme, a retry policy or a rate limit for either source, and deferred the concrete
+fetcher to a future task that specifies them. The design assumed CFPB records came
+from the live Consumer Complaint Database search API: `ingest/sources/cfpb.py` names
+it (`SOURCE_API_VERSION = "cfpb-ccdb-v1"`, "Elasticsearch-shaped response"), and
+§0's CFPB measurements were taken from it. Plan §F described a per-adapter fetch
+abstraction (`SourceAdapter.fetch`, `PageCursor`, `FetchPage`, `dataset_adapter`)
+that the code never implemented; the implemented boundary is the injected `Fetcher`
+in `ingest/cli.py`.
+*Now — why the CFPB source changes.* These are external facts, each read from an
+official source. The CFPB ceased publishing complaint narratives: its announcement is
+dated Aug 14, 2026 and states no effective date
+(https://www.consumerfinance.gov/about-us/newsroom/the-cfpb-to-cease-discretionary-publication-of-complaint-narratives-and-visualizations/).
+Release 24 of the Consumer Complaint Database (September 2026) records that
+"Consumers' complaint narratives and complaint data visualizations have been removed
+from the database" (https://cfpb.github.io/api/ccdb/release-notes.html). Previously
+published narratives were placed in the CFPB's FOIA Reading Room as the CFPB Consumer
+Complaint Database Narratives Archive, described as an "Archive of consumer
+complaints received December 1, 2011 through August 14, 2026 that were previously
+published in the Consumer Complaint Database", published as 21 ZIP exports with no
+record counts, checksums or data dictionary
+(https://www.consumerfinance.gov/foia-requests/foia-electronic-reading-room/cfpb-consumer-complaint-database-narratives-archive/).
+The live API still serves complaint metadata, and no narratives.
+*Now — what one archive export shows, and what it does not.* Export #8,
+`CCDB_Export_8_November_2024_through_December_2024.zip` (52,563,546 bytes, SHA256
+`24b3326a954c0edeff33318b157d12eef5a59547f6f274f9236f1ceaba988a74`), was inspected
+directly. It holds one CSV of 591,058 rows with 591,058 distinct Complaint IDs, under
+16 display-named columns (`Date received`, `Product`, `Consumer complaint narrative`,
+`Date sent to company`, `Timely response?`, `Complaint ID` among them) rather than the
+adapter's `hits.hits[]._source` row shape. Its `Date received` spans 2024-11-01 …
+2024-12-31, matching the file's name. In every row `Date received` and
+`Date sent to company` are bare `YYYY-MM-DD` dates, with no time of day and no UTC
+offset, and 73.8% of rows carry no narrative. **These are facts about export #8
+alone.** It is one compatibility sample: the other 20 exports, including every export
+covering 2025, have not been inspected, and nothing here asserts that they share its
+format or coverage. Nor does the archive's stated date range, on its own, establish
+that a corpus built from it is complete.
+*Now — the archive alone is incompatible.* Task 5 requires an ISO-8601 timestamp with
+an offset, parsed to aware UTC, and the existing normalizer refuses a date-only value
+as `NaiveTimestamp`. No conversion can satisfy that contract without inventing a time
+of day or an offset. A day-resolution contract is rejected rather than adopted: with
+97.97% of export #8's received and sent dates falling on the same day, §2.3's
+field-delta rule would return `strongly_suspicious_load_timestamp` by construction,
+and the reduced-feature cross-domain cross-target robustness probe's CFPB
+`submitted_hour` would lose its meaning.
+*Now — the source model.* Sentinel's CFPB corpus for 2024-01-01 … 2025-12-31 is a
+**Sentinel reconstruction**, not an official CFPB combined dataset. It joins two
+source views of the same complaints — the Narratives Archive and the Consumer
+Complaint Database API — by exact Complaint ID, which the official field reference
+defines as "The unique identification number for a complaint"
+(https://cfpb.github.io/api/ccdb/fields.html). The API is the official
+`https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1/`,
+with `GET /{complaintId}` documented as "Find consumer complaint by ID"
+(https://raw.githubusercontent.com/cfpb/ccdb5-api/main/swagger-config.yaml). The
+reconstruction is recorded here as a project decision on a documented shared key, as
+D21 records an interpretation, so that it can be disagreed with explicitly.
+*Now — per-field authority.*
+
+| Field | Authority | Rule |
+|---|---|---|
+| Complaint ID | both views | The join key, compared as exact strings. The API returns it as a string although its specification types it as an integer. |
+| narrative | the archive only | The API no longer publishes narratives (Release 24). |
+| `date_received` | the API only | Documented as "date & time". The archive's date-only value is a cross-check and never a substitute. |
+| `date_sent_to_company` | the API only | As `date_received`. |
+| `product` | both views | They must agree exactly, or the run is refused. |
+| `timely` | both views | They must agree exactly, or the run is refused. |
+
+*Now — join semantics.* A pair joins only on exact Complaint ID string equality. The
+reconstructed row must satisfy the existing CFPB normalization contract unchanged: one
+row carrying an API record's metadata and the archive's narrative field was accepted
+by the unmodified normalizer, giving `submitted_at 2024-11-01T05:55:55+00:00`, while
+the same row with the archive's date-only value was refused with `NaiveTimestamp`. How
+the API is read — by Complaint ID, or by a date-window search followed by a local join
+— and where the join is performed are the fetch task's to specify. The API's own
+limits bound that choice: `size` at most 100, `frm` at most 100,000, deep paging
+through `search_after`, and `date_received_min` inclusive with `date_received_max`
+exclusive at date granularity.
+*Now — refusals.* Each of the following refuses the ingestion run, before any corpus
+write, as every refusal in §2.5 does:
+
+| Case | Behaviour |
+|---|---|
+| `product` differs between the two views | Refuse the run. Neither view is silently preferred. |
+| `timely` differs between the two views | Refuse the run. It is a model outcome field and is never reconciled. |
+| An archive record included in the reconstruction has no valid API record: none exists, the retrieval fails permanently, or the returned `complaint_id` differs from the requested one | Refuse the run. What counts as a permanent failure is set by the fetch task's retry contract. |
+| An API record lacks a required field or carries an unparseable one | Unchanged: the normalizer raises (`MissingField`, `NaiveTimestamp`) and §2.5 refuses the run. No exclude-and-report behaviour is introduced. |
+| The archive's `Date received` differs from the UTC calendar date of the API's `date_received` | Refuse the run. |
+
+The calendar-date comparison uses the API timestamp's UTC date because that is the
+frame in which all 37 compared records agreed, including at least five where the New
+York date would have differed. The archive's own date frame is not documented, so a
+disagreement refuses rather than being reinterpreted. In every case the API timestamp
+remains the only timestamp source: the archive's date is a cross-check and is never
+substituted. Which archive records the reconstruction includes is not decided here
+(see the narrative-filter decision below); these refusals apply to whichever records
+that decision includes.
+*Now — the compatibility sample, and what it is not.* Forty Complaint IDs were drawn
+deterministically from export #8 — every n-th of its sorted narrative-bearing IDs
+(30) and of its narrative-free IDs (10) — and requested one at a time, half a second
+apart, from `GET /{complaintId}`. Thirty-seven returned HTTP 200 and three returned
+HTTP 429. Among the 37, the Complaint ID, `product`, `timely` and the calendar date of
+`date_received` agreed in 37 of 37, and every `date_received` and
+`date_sent_to_company` had the form `YYYY-MM-DDTHH:MM:SS.000Z`, with varying times and
+an explicit UTC offset. **This is a source-compatibility sample, not a completeness
+result.** It covers November–December 2024 only, says nothing about 2025, and supports
+no claim about how many archive records the API serves.
+*Now — temporal consistency.* The sampled API records carry
+`date_indexed = 2026-09-14T20:06:00Z`, so the API index was rebuilt then; the archive
+export's member is stamped 2026-09-13 and its server reports `Last-Modified` of
+Sep 14, 2026. The API's metadata is a current publication view. No official source
+states that it never changes, and nothing here assumes it does. A reconstructed corpus
+is therefore reproducible only if **both sides are retained and pinned**: the archive
+ZIPs by digest, and the raw API responses as retrieved. Querying the API again later
+may return different data.
+*Now — provenance.* Every reconstructed CFPB corpus must record, at minimum: for each
+archive ZIP, its URL, byte size, SHA256 and `Last-Modified` when served; the API base
+URL, the exact endpoint and every query parameter; the retrieval time of each API
+response; the API index name and `date_indexed` where a response carries them; the
+join key, stated as exact Complaint ID string equality; the matched, missing and
+mismatched counts, each broken down by kind; and a digest of every cached API
+response, which the content-addressed raw cache already provides. The current
+manifest (`manifest_version` 2) cannot hold all of this: its only field for source
+identity is `source_api_version`, and it has none for archive digests, API query
+parameters, retrieval times, index metadata or join counts. **The fetch task must
+choose between a manifest-versioned provenance extension — which, per plan §G,
+increments `manifest_version` and states how version-2 manifests are read — and a
+separate provenance record.** D43 adds no schema field and makes neither choice.
+Plan §X's "regenerable … from the source APIs given the recorded window" no longer
+holds for CFPB narratives; the original reproducibility requirement stands, and only
+the way it is met changes.
+*Now — rate limiting and retry.* Three of forty requests sent half a second apart
+returned HTTP 429. Separately, one client configuration was refused with HTTP 403 on
+every request while standard curl requests succeeded; that behaviour is not
+documented. The official material reviewed — the API specification, the field
+reference, the release notes and the data-use page — states no numeric rate limit.
+D43 therefore freezes no rate, interval, concurrency or backoff: retry, backoff and
+pacing are part of the fetch task's implementation contract.
+*Now — NYC 311 source.* The dataset is "311 Service Requests from 2020 to Present",
+`erm2-nwe9`, official and published; the records for 2010–2019 were split into
+`76ig-c548`
+(https://www.nyc.gov/opendata/news/all-news/311-Service-Requests-Updates), and
+D37.2's window lies wholly inside `erm2-nwe9`. Its SODA2 endpoint,
+`https://data.cityofnewyork.us/resource/erm2-nwe9.json`, returns a bare JSON array,
+with `unique_key` as text and `created_date` as a `floating_timestamp` such as
+`"2020-09-25T15:43:34.000"`, which is the shape the existing adapter reads. Socrata's
+documentation (https://dev.socrata.com/docs/queries/limit.html,
+https://dev.socrata.com/docs/queries/order.html,
+https://dev.socrata.com/docs/app-tokens.html,
+https://dev.socrata.com/consumers/getting-started.html,
+https://dev.socrata.com/docs/response-codes.html,
+https://dev.socrata.com/docs/datatypes/floating_timestamp.html) states that `$limit`
+defaults to 1,000 with a maximum of 50,000 on SODA 2.0 and none on 2.1 or 3.0; that
+results are not implicitly ordered, so paging requires `$order`, "at a minimum
+`$order=:id`"; that app tokens are optional for SODA2 and sent as `X-App-Token`, with
+unauthenticated requests drawn from a throttled pool and throttling answered with HTTP
+429; and that SODA3 (https://dev.socrata.com/docs/queries/) requires authentication
+or an app token. Two official Socrata pages conflict about throttling with a token
+("do not throttle … unless abusive" against "up to 1000 requests per rolling hour"),
+and D43 resolves neither. The dataset "is updated daily and expected values for many
+fields will change over time"; no snapshot mechanism is documented, and whether
+`between` includes its endpoints is not documented.
+*Now — fetch abstraction.* The fetch task builds against
+`Fetcher = Callable[[str, date, date], Iterable[SourcePage]]` in `ingest/cli.py`,
+passed into `ingest(..., fetcher=…)` and cached by `fetch_into_cache`. Plan §F's
+`SourceAdapter.fetch`, `PageCursor`, `FetchPage` and `dataset_adapter` are superseded
+for Phase 2 and are not revived. For `cfpb`, one `Fetcher` call covers both
+acquisitions — the archive and the API — and yields pages in the adapter's existing
+input shape; how and where the join is done is the fetch task's.
+*Now — decisions deferred to the fetch task.* D43 decides none of these, and none may
+be settled implicitly:
+1. **The CFPB narrative filter.** Export #8 has no narrative in 73.8% of its rows, and
+   the existing normalizer refuses such a row with `MissingNarrative`, which §2.5
+   makes refuse the whole run. The fetch task must decide explicitly whether the
+   reconstruction's archive side is restricted to narrative-bearing rows, and how that
+   decision interacts with §2.5.
+2. **Where provenance lives**: a manifest-versioned extension or a separate record.
+3. **The reconstruction's source identity**, including its final `source_api_version`,
+   whose constant lives in `ingest/sources/cfpb.py`, which Task 6 lists as
+   must-not-change and so needs explicit authorization.
+4. **Retry, backoff and pacing** for both sources, including what counts as a
+   permanently failed retrieval.
+5. **NYC 311 page size, ordering key and app-token use.**
+
+*Now — ingestion conflicts that remain unresolved.* Besides the narrative filter, four
+conflicts identified before D43 stay open, each needing its own decision before any
+real ingest it affects: NYC 311's DST edge rows, which §2.4 calls a "negligible loss"
+while §2.5 and the code refuse the run, inside a D37.2 window that contains two autumn
+folds and two spring gaps; raw-cache pages written non-atomically and trusted by name
+rather than by content; duplicate `external_id`s after a source changes, which nothing
+in `ingest/` checks; and the memory held by normalizing a whole window at once.
+*Now — what D43 does not authorize.* No invented time of day, offset or timezone for
+any CFPB record, and no day-resolution CFPB timestamp contract; the archive's dates
+never substitute for API timestamps. No silent reconciliation of any mismatch. No
+synthetic, partial or `--limit`ed corpus standing in for a real one, and no download
+of either full corpus. No fetcher, and no network access in tests or CI. No change to
+the adapters, to normalization, to the adapter protocol, to the manifest schema or to
+the `source_api_version` constant. No retry interval, rate limit, page size or
+concurrency for either source. No treating the compatibility sample as a completeness
+result, and no claim that the API's metadata never changes.
+*Now — D42 is preserved.* D43 narrows D42's first deferred item — the concrete fetcher
+— by naming the official sources and their endpoints; pagination choices, retry and
+rate limiting remain the fetch task's, so that item is not closed. No figure may be
+fabricated or substituted. D42's deferred items stay open until the deferred work
+actually lands, and a later decision closes the deviation. **Phase 2 is not complete,
+and no document may describe it as complete.**
+*Scope:* the CFPB source model and its refusal policy, NYC 311's source, the
+provenance minimum and the fetch boundary. **D1–D42 are unaltered.** D43 changes no
+code, no test, no requirement, no CI and no other document.
