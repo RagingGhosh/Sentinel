@@ -3948,3 +3948,135 @@ D42's deferred items stay open. **Phase 2 is not complete, and no document may
 describe it as complete.**
 *Scope:* the NYC 311 real-data refusals only. **D1–D44 are unaltered.** D45 changes no
 code, no test, no requirement and no CI.
+
+**D46 — A correction to D44 and plan Task 23: nine existing assertions pin manifest
+version 2, not seven; acquisition verification applies only to an explicitly supplied
+acquisition; `--fetch` refuses until a source registers a fetcher; each source and
+window has one acquisition directory; and the acquisition record's contents and exact
+bytes are frozen before Task 23 is implemented (addendum D44; plan Task 23, §G; D27,
+D37.16).**
+*Was:* D44 authorized updating "the seven assertions that pin version 2" in
+`tests/ingest/test_manifest.py`, kept `tests/ingest/test_cli.py` to additions only,
+and plan Task 23's acceptance allowed "no existing assertion changes except the seven
+that pin manifest version 2". Task 23's reconnaissance found two more such assertions
+in `tests/ingest/test_cli.py`, so manifest version 3 could not be implemented within
+D44 as written. It also found three points D44 left open: which normalization runs the
+acquisition checks govern, given that every existing ingestion test normalizes a raw
+root that has no acquisition record; what `--fetch` does while no source-specific
+fetcher exists; and how an acquisition is found, resumed and reused. D44 listed the
+acquisition record's minimum contents but not its bytes, although `acquisition_id` is
+their SHA256.
+*Now — (A) nine assertions, not seven.* Exactly these nine existing assertions may
+change, each from 2 to 3. Each asserts the version a newly written manifest carries,
+which becomes 3:
+
+| File | Test | Assertion |
+|---|---|---|
+| `tests/ingest/test_manifest.py` | `test_the_manifest_carries_the_three_contract_fields` | `m.manifest_version == MANIFEST_VERSION == 2` |
+| `tests/ingest/test_manifest.py` | `test_write_manifest_emits_the_three_new_keys` | `payload["manifest_version"] == 2` |
+| `tests/ingest/test_manifest.py` | `test_read_manifest_reconstructs_the_new_fields_exactly` | `back.manifest_version == 2` |
+| `tests/ingest/test_manifest.py` | `test_a_version_one_manifest_is_read_only_compatibility` | `manifest.manifest_version == 2` |
+| `tests/ingest/test_manifest.py` | `test_a_version_one_manifest_is_read_only_compatibility` | `payload["manifest_version"] == 2` |
+| `tests/ingest/test_manifest.py` | `test_a_source_with_no_outcome_stream_writes_an_empty_outcome_map` | `manifest.manifest_version == 2` |
+| `tests/ingest/test_manifest.py` | `test_the_record_schema_version_is_untouched_by_the_manifest_bump` | `manifest.manifest_version == 2` |
+| `tests/ingest/test_cli.py` | `test_the_run_manifest_binds_both_streams` | `manifest.manifest_version == 2` |
+| `tests/ingest/test_cli.py` | `test_a_cfpb_corpus_remains_loadable_without_a_311_sidecar` | `manifest.manifest_version == 2` |
+
+No other existing assertion may change.
+`test_a_version_one_manifest_without_the_new_field_still_reads` keeps asserting that a
+version 1 manifest reads as 1, and `tests/ingest/test_cli.py` is otherwise additions
+only.
+*Now — (B1) where acquisition verification applies.* `ingest()`, the pass that
+normalizes cached pages into the authoritative corpus, gains an optional keyword
+argument `acquisition`, the path of an acquisition directory, defaulting to `None`.
+With `None`, nothing changes: `ingest()` reads the raw root exactly as before, applies
+no acquisition check, and writes `acquisition_id` as `None`. With an acquisition
+supplied, that directory is the raw root for the fetch and for the read; the
+completeness, page-list and digest checks below apply; and the manifest's
+`acquisition_id` is the SHA256 of that acquisition's record. When the supplied
+acquisition is already complete, `ingest()` does not call the fetcher. The command
+line without `--fetch` passes no acquisition, so it behaves exactly as before.
+`load_corpus`, the reader of a written corpus, is unchanged.
+*Now — (B2) `--fetch` before a source fetcher exists.* `--fetch` looks up a fetcher
+registered for the requested source. Task 23 builds the registration point and
+registers nothing, so for every source `--fetch` raises `FetcherUnavailable`, a
+subclass of `IngestError` whose message names the source, before any transport is
+built, any request is made, any directory is created and anything is written. Task 23
+builds no generic fetcher and gives no source any fetch behaviour; Tasks 24 and 25
+each register their own source.
+*Now — (B3) one acquisition directory per source and window.* An acquisition lives at
+`data/acquisitions/<source>/<start>_<end>/`, where `<start>` and `<end>` are the run's
+`--start` and `--end` as `YYYY-MM-DD`. An acquisition whose record is absent is
+incomplete, and a `--fetch` run resumes it from its journal. An acquisition whose
+record is present is complete and immutable: a `--fetch` run reuses it with zero
+requests, and nothing in Sentinel deletes, overwrites or appends to it. A record that
+is present but fails verification refuses the run and is left as it is. A fresh
+snapshot of the same source and window is an explicit operator action that Task 23
+does not provide. The directory holds:
+
+| Path | Holds |
+|---|---|
+| `acquisition.json` | the acquisition record, written last; its presence marks the acquisition complete |
+| `journal.jsonl` | one entry per completed slice; kept after completion, and not part of `acquisition_id` |
+| `<source>/<sha256>.json.gz` | the cached pages, content-addressed as today, since the directory is the raw root |
+
+Any further subdirectory, such as one retaining raw source responses, is defined by
+the task that writes it, and is never `<source>/` itself.
+*Now — the acquisition record's contents.* The record is a JSON object with at least
+these keys; D44's minimum is met by them together with each source's `source_details`:
+
+| Key | Type | Content |
+|---|---|---|
+| `record_version` | integer | `1`, this contract |
+| `source` | string | the source slug |
+| `window` | object | `start` and `end`, the dates as supplied; `resolved_start` and `resolved_end`, the instants `resolve_window` gives |
+| `started_at`, `completed_at` | string | timestamps of the acquisition's first request and of its completion |
+| `client` | object | `user_agent`, `library` and `library_version` |
+| `policy` | object | the D44 values in force: `max_attempts`, `backoff_seconds`, `retry_after_cap_seconds` and `min_request_interval_ms` |
+| `sentinel_commit` | string | the 40-character commit of the Sentinel checkout that ran the acquisition; if it cannot be determined, the acquisition does not start |
+| `slices` | array | one object per completed slice, sorted by `key`: `key`, a string unique in the record; `requests`, in the order sent, one per request whose response the slice used, each with `url`, `params` as `[name, value]` pairs in the order sent, `retrieved_at`, `status`, `response_sha256` and `response_bytes`; `pages`, the page digests in the order yielded; and `verification`, an object of the slice's verification counts |
+| `pages` | array | every page digest the slices list, each once, in ascending order |
+| `source_details` | object | the source-specific provenance D44 requires, including `acquisition_kind` for CFPB, with its keys defined by Task 24 or Task 25; empty in Task 23's tests |
+
+*Now — the acquisition record's bytes.* `acquisition_id` is the SHA256 of the record
+file's bytes, so those bytes are fixed by these rules. **Values:** objects, arrays,
+strings, integers, `true`, `false` and `null` only — no floating-point number, NaN or
+infinity; durations are whole seconds or milliseconds, as each key's name says.
+**Timestamps:** UTC strings of the form `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`, always
+with six fractional digits. **Digests:** 64 lowercase hexadecimal characters.
+**Serialization:** keys sorted by Unicode code point at every level; no whitespace
+between tokens; non-ASCII characters written as UTF-8 rather than escaped; strings
+kept exactly as received, with no Unicode normalization; the file is that JSON in
+UTF-8 with no byte-order mark, followed by exactly one line feed (0x0A) and nothing
+else. This is the canonical form `page_checksum` already applies to pages —
+`json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)`
+— with the final line feed added. **Writing:** in binary mode, so no platform newline
+translation occurs, to a temporary file in the same directory, moved into place with
+`os.replace`. **Hash input:** exactly the file's bytes, final line feed included;
+`acquisition_id` is their SHA256 in lowercase hexadecimal. **Reading:** a reader
+parses the file, serializes it again by these rules, and refuses the acquisition
+unless the result equals the bytes on disk.
+*Now — the journal.* Each line of `journal.jsonl` is one completed slice's object,
+serialized by the rules above and ended by a line feed, appended and flushed to disk
+before the next slice begins. A slice counts as completed only when its line is whole
+and parses, and only while every page it lists is present under its digest; a trailing
+incomplete line is removed before anything more is appended. The record's `slices` are
+the journal's slices, sorted by `key`.
+*Now — verifying a completed acquisition.* When `ingest()` is given an acquisition,
+before any page is normalized: the record must be present, or the run is refused as
+incomplete; its bytes must be canonical, it must parse, carry every required key and
+`record_version` 1, and name the run's source and the run's `--start` and `--end`, or
+the run is refused; every page it lists must be present under `<source>/`, and the
+`page_checksum` of each page, as decompressed and parsed, must equal its name, or the
+run is refused; and any `*.json.gz` file directly under `<source>/` that the record
+does not list refuses the run. The pages are then read in the order `ingest()` already
+uses, by file name, and every refusal precedes any corpus write.
+*Now — what D46 does not change.* D44's ten decisions, its two cache-and-identity
+resolutions and its authorized and protected surfaces stand, except where this entry
+corrects them. Tasks 23 to 25 still do not authorize full-window ingestion, nothing is
+downloaded, and D45 stays undecided. **Phase 2 is not complete, and no document may
+describe it as complete.**
+*Scope:* the correction of D44's count of assertions and the four points D44 left
+open, recorded before Task 23 is implemented. **D1–D45 are unaltered.** Plan Task 23
+is corrected by reference, not rewritten. D46 changes no code, no test, no requirement
+and no CI.

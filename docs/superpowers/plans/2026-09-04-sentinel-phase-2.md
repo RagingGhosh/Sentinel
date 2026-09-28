@@ -722,6 +722,7 @@ Written to metadata as `feature_distribution_shift` and reproduced in the publis
 **Acceptance:** no test touches the network; the command line without `--fetch` behaves exactly as before; no existing assertion changes except the seven that pin manifest version 2; `ruff check`, `ruff format --check` and `mypy complaints domains ml accounts ingest` are clean; CI is unchanged.
 **Commit:** `feat: acquisition layer behind the injected Fetcher`
 **Must not change:** `ingest/sources/cfpb.py`, `ingest/sources/nyc311.py`, `ingest/sources/base.py`; normalization logic; `ingest/storage.py`, `ingest/schema.py`; requirements; CI. Plan §F's abandoned `SourceAdapter.fetch`, `PageCursor`, `FetchPage` and `dataset_adapter` abstractions are not revived. Full-window ingestion is not authorized (D44).
+**Corrected by D46:** nine existing assertions pin manifest version 2 — seven in `tests/ingest/test_manifest.py` and two in `tests/ingest/test_cli.py` — and exactly those nine change, from 2 to 3; no other existing assertion changes. D46 also fixes where acquisition verification applies (only when `ingest()` is given an acquisition), what `--fetch` does before Tasks 24 and 25 (it refuses with `FetcherUnavailable`), the acquisition directory (`data/acquisitions/<source>/<start>_<end>/`), and the acquisition record's contents and exact bytes. Task 23 implements them as D46 states.
 
 ### Task 24: NYC 311 fetcher
 
