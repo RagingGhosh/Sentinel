@@ -4080,3 +4080,109 @@ describe it as complete.**
 open, recorded before Task 23 is implemented. **D1–D45 are unaltered.** Plan Task 23
 is corrected by reference, not rewritten. D46 changes no code, no test, no requirement
 and no CI.
+
+**D47 — Hardening the Task 23 acquisition layer before Task 24: which HTTP statuses
+are retried, redirects refused, the transport's timeouts frozen and recorded, orphaned
+pages quarantined rather than adopted or deleted, a damaged journal truncated from its
+first damaged slice, one writer per acquisition, and a version 3 manifest's
+`acquisition_id` validated (addendum D44, D46; plan Task 23).**
+*Was:* a senior audit of commit 9db0977, which implements Task 23 under D44 and D46,
+found behaviour neither entry fixed. Statuses outside D44's two lists — 3xx, 501, 505
+and every other 5xx — were not retried. The real transport followed up to 30 redirects
+on its own while the request's provenance kept the URL first requested. Its 30-second
+connect and 300-second read timeouts were neither frozen nor recorded. A page cached
+just before a crash, and orphaned when the source then returned different content,
+made completion refuse with no way to recover. Damage before the journal's last line
+dropped every later slice under no stated rule. Nothing stopped two writers from
+sharing one acquisition. A version 3 manifest's `acquisition_id` was read without its
+value being checked. D46 is authoritative (commit 9f0430c) and 9db0977 implements it;
+neither is rewritten.
+*Now — (1) HTTP statuses.* Transient statuses are retried under D44's attempts,
+backoff, `Retry-After` and pacing; permanent ones raise `FetchFailed` at once.
+
+| Status | Class |
+|---|---|
+| 2xx | success, then the caller's body validation, as before |
+| 429 | transient, as before |
+| 500, 502, 503, 504 | transient, as before |
+| every other 5xx except 501 and 505 | transient |
+| 501, 505 | permanent |
+| 403 | permanent, and stops the run at once, as before |
+| every other 4xx except 429 | permanent, as before |
+| 3xx | not a success: permanent, under (2) |
+| any status outside 1xx to 5xx, and 1xx | permanent, as before |
+
+*Now — (2) redirects.* `RequestsTransport` does not follow redirects. A 3xx reaches
+the client unfollowed and is a permanent `FetchFailed` naming its status, so the URL a
+request's provenance records is always the URL its response came from. Sentinel never
+moves silently to another URL or host.
+*Now — (3) timeouts.* The real transport's connect timeout is 30 seconds and its read
+timeout 300 seconds. The read timeout bounds each wait for data, not a whole response,
+and no overall deadline is introduced. A timeout is transient, as D44 says. Both
+values are frozen HTTP policy, and every acquisition record's `policy` carries them as
+the integers `connect_timeout_seconds` (30) and `read_timeout_seconds` (300), beside
+D46's four keys. D46 lets a record carry more keys than it lists, so `record_version`
+stays 1.
+*Now — (4) orphaned pages.* A page is orphaned when it lies directly under `<source>/`
+in an incomplete acquisition and no completed journal slice lists it: a page cached
+before a crash, or one only a slice removed under (5) listed. An orphaned page is not
+a completed slice and is never written into the journal. When an incomplete
+acquisition is opened for writing, after its journal has been checked under (5), every
+orphaned page is moved, never deleted, with `os.replace` to
+`quarantine/<sha256 of the file's bytes>/<its file name>` inside the acquisition
+directory. The destination is fixed by the file's bytes, so a rerun that meets
+identical bytes replaces them with themselves, and different bytes never overwrite one
+another. Nothing else moves: journal, listed pages, record and any other file stay
+where they are, including a temporary file a killed write left behind, which is not a
+page. Quarantine happens only when an acquisition is opened; completion stays strict
+and refuses while any unlisted page lies under `<source>/`. D46's verification of a
+completed acquisition is unchanged: every listed page must be present and verify, and
+no unlisted page may remain under `<source>/`. `quarantine/` is never `<source>/`, so
+nothing in it is a page.
+*Now — (5) damage before the journal's last line.* When an acquisition is opened for
+writing, its journal is read from the first line, and the first line that is not a
+completed slice is the resume point: a line that is incomplete, unparseable, not
+canonical or malformed, that repeats an earlier key, or that lists a page which is
+missing or does not verify. The journal is truncated there, and that slice and every
+slice after it are unfinished and may be fetched again. No line is repaired or
+rewritten in place. The resume point depends only on the journal's bytes and the pages
+on disk, so it is deterministic. Pages that only the removed slices listed are
+orphaned and quarantined under (4). Completion never truncates: before it writes the
+record it verifies every page the journaled slices list, and if any is missing or does
+not verify it refuses and writes no record, leaving the next open to apply this rule.
+*Now — (6) one writer per acquisition.* An acquisition directory has one active
+writer. Opening an acquisition for writing first creates `writer.lock` in its
+directory with an atomic exclusive create (`O_CREAT | O_EXCL`), which fails if the
+file already exists; the file records its holder's process id, host and start time. An
+open that finds the lock refuses, naming the file and its recorded holder. The writer
+removes the lock when it closes, whether it succeeded or failed, and removes nothing
+else. A lock left by a process that could not close, after a hard kill or a power
+loss, refuses every later open until an operator removes that one file, having
+confirmed that no writer is running; Sentinel never removes a lock it did not create,
+and never guesses whether a holder is alive. Removing the lock touches no journal
+line, page or record, so an interrupted acquisition resumes exactly as it would have.
+Reading a completed acquisition, whether to verify it or to reuse it, takes no lock.
+*Now — (7) `acquisition_id` in a manifest.* In a version 3 manifest `acquisition_id`
+is required: its key must be present, and its value is either null — a run given no
+acquisition, exactly as D46 says — or a SHA-256 digest written as 64 lowercase
+hexadecimal characters. Any other value, or a missing key, refuses the manifest on
+read, and `build_manifest` refuses any value that is neither. Versions 1 and 2 still
+read it as `None`.
+*Now — two defects fixed without a contract change.* A `Retry-After` header is read as
+whole seconds only when it consists of ASCII decimal digits, surrounding whitespace
+aside; anything else, including non-ASCII numerals, is ignored rather than raising or
+being read as a number, as D44's "when present" already implies. And the journal's
+pages are checked once, when an acquisition is opened, and each new slice's pages when
+it is recorded, rather than every journaled page on every append; with completion's
+check under (5) and D46's verification before normalization, no check is weakened.
+*Now — what D47 does not change.* The adapters, normalization, `ingest/storage.py`,
+`ingest/schema.py`, `ingest/roster.py` and `ingest/identity.py` are unchanged. D44,
+D45 and D46 stand as written: D47 settles only what they left open. Task 22 is
+unchanged. Tasks 24 and 25 remain unimplemented, `FETCHERS` stays empty, and Tasks 23
+to 25 still do not authorize full-window ingestion. Nothing is downloaded, and D45
+stays undecided. **Phase 2 is not complete, and no document may describe it as
+complete.**
+*Scope:* the seven points above, and the two defect fixes, recorded before Task 24.
+**D1–D46 are unaltered.** Plan Task 23 is extended by reference, not rewritten: its
+hardening lands after 9db0977 as two further commits. D47 changes no code, no test, no
+requirement and no CI.
