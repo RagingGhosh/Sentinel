@@ -206,11 +206,15 @@ def retry_after_seconds(value: str | None, now: datetime) -> float | None:
 
     Both forms HTTP allows are read: whole seconds, and an HTTP date. A date in the
     past waits zero. An unreadable value is ignored rather than guessed at.
+
+    Seconds are ASCII decimal digits only (D47). `str.isdigit` alone also accepts
+    superscripts and other scripts' numerals, one of which `int()` then refuses and
+    others of which it reads as a number no server meant.
     """
     if value is None:
         return None
     text = value.strip()
-    if text.isdigit():
+    if text.isascii() and text.isdigit():
         return float(int(text))
     try:
         moment = parsedate_to_datetime(text)

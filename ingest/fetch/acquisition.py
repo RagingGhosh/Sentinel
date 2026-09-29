@@ -12,7 +12,10 @@ slice counts as completed only while its line is whole, canonical and parses, it
 is new, and every page it lists is present under its digest. The first line that is
 not a completed slice, and everything after it, is removed before anything more is
 appended, so a key appears in the journal once. That costs at most a re-fetch of the
-slices it removes, never a wrong record.
+slices it removes, never a wrong record. The journal is checked once, when the
+acquisition is opened, and each later slice as it is recorded (D47); completion then
+verifies every listed page once more and, finding damage, refuses rather than
+truncating, so a record never omits a slice its fetcher completed.
 
 **An acquisition with a record is complete and immutable.** Nothing here deletes,
 overwrites or appends to it: `Acquisition` refuses to open it for writing,
@@ -234,6 +237,9 @@ class Acquisition:
         self.client = client
         self.sentinel_commit = sentinel_commit
         self._now = now
+        # The journal is checked once, here; each later slice is checked as it is
+        # recorded (D47). Completion verifies every listed page once more.
+        self._slices = self._load()
 
     # --- the journal -------------------------------------------------------------
 
@@ -244,6 +250,7 @@ class Acquisition:
             return {}
         data = path.read_bytes()
         completed: dict[str, dict[str, Any]] = {}
+        verified: set[str] = set()
         offset = 0
         while offset < len(data):
             end = data.find(b"\n", offset)
@@ -259,8 +266,10 @@ class Acquisition:
                 break
             if entry["key"] in completed:
                 break
-            if not all(_page_present(self.directory, self.source, d) for d in entry["pages"]):
+            unchecked = [d for d in entry["pages"] if d not in verified]
+            if not all(_page_present(self.directory, self.source, d) for d in unchecked):
                 break
+            verified.update(unchecked)
             completed[entry["key"]] = entry
             offset = end + 1
         if offset < len(data):
@@ -271,8 +280,8 @@ class Acquisition:
         return completed
 
     def completed_slices(self) -> dict[str, dict[str, Any]]:
-        """Each completed slice's object, keyed by slice key."""
-        return self._load()
+        """Each completed slice's object, keyed by slice key. Reads nothing from disk."""
+        return dict(self._slices)
 
     def record_slice(
         self,
@@ -285,8 +294,7 @@ class Acquisition:
         """Journal one completed slice. Its pages must already be cached (D46)."""
         if is_complete(self.directory):
             raise AcquisitionError(f"{self.directory} is complete; nothing is appended to it")
-        completed = self._load()
-        if key in completed:
+        if key in self._slices:
             raise AcquisitionError(f"slice {key!r} is already journaled")
         entry = {
             "key": key,
@@ -302,10 +310,20 @@ class Acquisition:
             raise AcquisitionError(f"slice {key!r} lists pages that are not cached: {missing}")
         line = canonical_bytes(entry)
         self.directory.mkdir(parents=True, exist_ok=True)
-        with open(journal_path(self.directory), "ab") as stream:
-            stream.write(line)
-            stream.flush()
-            os.fsync(stream.fileno())
+        path = journal_path(self.directory)
+        before = path.stat().st_size if path.exists() else 0
+        try:
+            with open(path, "ab") as stream:
+                stream.write(line)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            # The journal is not reread before the next append, so a line that did
+            # not land whole is taken back now rather than left for the next open.
+            with open(path, "r+b") as stream:
+                stream.truncate(before)
+            raise
+        self._slices[key] = entry
 
     # --- completion --------------------------------------------------------------
 
@@ -313,8 +331,16 @@ class Acquisition:
         """Write the record, last and atomically, and return its `acquisition_id`."""
         if is_complete(self.directory):
             raise AcquisitionError(f"{self.directory} already has a record; it is immutable")
-        slices = [entry for _, entry in sorted(self._load().items())]
+        slices = [entry for _, entry in sorted(self._slices.items())]
         listed = sorted({digest for entry in slices for digest in entry["pages"]})
+        damaged = [d for d in listed if not _page_present(self.directory, self.source, d)]
+        if damaged:
+            # D47: completion never truncates. The next open finds the first damaged
+            # slice and resumes from there.
+            raise AcquisitionIntegrityError(
+                f"{self.directory}: journaled pages are missing or damaged: {damaged}; "
+                "no record was written"
+            )
         unlisted = sorted(_pages_on_disk(self.directory, self.source) - set(listed))
         if unlisted:
             raise AcquisitionIntegrityError(

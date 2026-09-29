@@ -359,3 +359,36 @@ def test_the_real_transport_is_built_only_in_the_command_lines_main():
                 ):
                     builders.append((path.relative_to(ROOT).as_posix(), function.name))
     assert builders == [("ingest/cli.py", "main")]
+
+
+# --- Retry-After accepts ASCII digits only (D47) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("60", 60),
+        ("  60  ", 60),
+        ("\t7\n", 7),
+        ("0", 0),
+        ("²", None),
+        ("٦٠", None),
+        ("６０", None),
+        ("", None),
+        ("   ", None),
+        ("abc", None),
+        ("6 0", None),
+        ("+60", None),
+        ("-3", None),
+        ("1.5", None),
+    ],
+)
+def test_retry_after_reads_ascii_digits_only(value, expected):
+    assert retry_after_seconds(value, NOW) == expected
+
+
+def test_a_non_ascii_retry_after_falls_back_to_the_backoff():
+    fetch, transport, clock = client([status(503, {"retry-after": "²"}), ok()])
+    fetch.get(URL)
+    assert clock.sleeps == [2]
+    assert len(transport.calls) == 2

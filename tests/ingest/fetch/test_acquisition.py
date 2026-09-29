@@ -439,3 +439,87 @@ def test_verification_changes_nothing(tmp_path):
     after = {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
     assert after == before
     assert {p.name for p in directory.iterdir()} == {RECORD_NAME, JOURNAL_NAME, SOURCE}
+
+
+# --- the journal is checked once, never on every append (D47) --------------------------
+
+
+@pytest.fixture
+def page_reads(monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    count = {"reads": 0}
+    real = module._read_page_digest
+
+    def counting(path):
+        count["reads"] += 1
+        return real(path)
+
+    monkeypatch.setattr(module, "_read_page_digest", counting)
+    return count
+
+
+def test_recording_slices_reads_each_new_page_once(tmp_path, page_reads):
+    directory = tmp_path / "acq"
+    acquisition = opened(directory)
+    for n in range(50):
+        digest = cache(directory, [{"unique_key": f"page-{n}"}])
+        acquisition.record_slice(f"k{n:03d}", requests=[], pages=[digest], verification={})
+    assert page_reads["reads"] == 50, "each new page once, never the whole journal again"
+    acquisition.complete({})
+    assert page_reads["reads"] == 100, "completion verifies every listed page once more"
+
+
+def test_opening_verifies_the_journal_once(tmp_path, page_reads):
+    directory = tmp_path / "acq"
+    acquisition = opened(directory)
+    for n in range(20):
+        digest = cache(directory, [{"unique_key": f"page-{n}"}])
+        acquisition.record_slice(f"k{n:03d}", requests=[], pages=[digest], verification={})
+    page_reads["reads"] = 0
+    resumed = opened(directory)
+    assert page_reads["reads"] == 20
+    for _ in range(3):
+        assert len(resumed.completed_slices()) == 20
+    assert page_reads["reads"] == 20, "asking again reads nothing"
+
+
+def test_completion_refuses_and_writes_nothing_when_a_journaled_page_is_damaged(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition = opened(directory)
+    digests = [cache(directory, slice_pages(n)) for n in (1, 2, 3)]
+    for n, digest in zip((1, 2, 3), digests):
+        acquisition.record_slice(f"k{n}", requests=[], pages=[digest], verification={})
+    journal = journal_path(directory).read_bytes()
+    damaged = directory / SOURCE / f"{digests[1]}.json.gz"
+    damaged.write_bytes(gzip.compress(b'[{"unique_key":"forged"}]'))
+
+    with pytest.raises(AcquisitionIntegrityError, match="no record"):
+        acquisition.complete({})
+    assert not record_path(directory).exists()
+    assert journal_path(directory).read_bytes() == journal, "completion never truncates"
+
+
+def test_a_failed_append_leaves_the_journal_as_it_was(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    acquisition = opened(directory)
+    acquisition.record_slice(
+        "k1", requests=[], pages=[cache(directory, slice_pages(1))], verification={}
+    )
+    journal = journal_path(directory).read_bytes()
+    second = cache(directory, slice_pages(2))
+
+    def disk_full(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module.os, "fsync", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        acquisition.record_slice("k2", requests=[], pages=[second], verification={})
+    monkeypatch.undo()
+
+    assert journal_path(directory).read_bytes() == journal
+    assert list(acquisition.completed_slices()) == ["k1"]
+    acquisition.record_slice("k2", requests=[], pages=[second], verification={})
+    assert list(acquisition.completed_slices()) == ["k1", "k2"]
