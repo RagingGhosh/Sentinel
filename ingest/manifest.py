@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Iterator
@@ -53,6 +54,14 @@ from ingest.storage import (
 
 MANIFEST_NAME = "manifest.json"
 _CHECKSUM_CHUNK = 1 << 20
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _valid_acquisition_id(value: object) -> bool:
+    """Null, or a SHA-256 digest as 64 lowercase hexadecimal characters (D47)."""
+    return value is None or (isinstance(value, str) and _SHA256.fullmatch(value) is not None)
+
 
 MANIFEST_VERSION = 3
 """Version 3 adds `acquisition_id` (D44, D46); version 2 added `outcome_part_files` (D37.16).
@@ -157,8 +166,10 @@ class CorpusManifest:
     """SHA256 of the acquisition record the corpus was normalized from (D44, D46).
 
     `None` when `ingest()` was given no acquisition, which is every run that does
-    not name one, and in every v1 or v2 manifest. Last, and defaulted, for the same
-    reason as `outcome_part_files`."""
+    not name one, and in every v1 or v2 manifest. Any other value is a digest of 64
+    lowercase hexadecimal characters, which `build_manifest` and `read_manifest`
+    both enforce (D47). Last, and defaulted, for the same reason as
+    `outcome_part_files`."""
 
 
 def sha256_file(path: Path) -> str:
@@ -202,6 +213,11 @@ def build_manifest(
     Counts come from a streaming read, so building a manifest costs one pass and
     no more memory than reading does.
     """
+    if not _valid_acquisition_id(acquisition_id):
+        raise ValueError(
+            f"acquisition_id must be null or a SHA-256 digest of 64 lowercase hexadecimal "
+            f"characters (D47), not {acquisition_id!r}"
+        )
     root = Path(root)
     part_checksums = {
         path.relative_to(root).as_posix(): sha256_file(path)
@@ -281,6 +297,16 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
         raise ManifestNotFound(f"no manifest for source {source!r} at {path}")
 
     payload = json.loads(path.read_text(encoding="utf-8"))
+    # Required from v3 on, and null or a digest (D46, D47); a v1 or v2 manifest
+    # predates the field and reads it as None, whatever it holds.
+    acquisition_id = None
+    if payload["manifest_version"] >= 3:
+        acquisition_id = payload["acquisition_id"]
+        if not _valid_acquisition_id(acquisition_id):
+            raise CorpusIntegrityError(
+                f"{path}: acquisition_id {acquisition_id!r} is neither null nor a SHA-256 "
+                "digest of 64 lowercase hexadecimal characters (D47)"
+            )
     return CorpusManifest(
         manifest_version=payload["manifest_version"],
         schema_version=payload["schema_version"],
@@ -299,8 +325,7 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
         corpus_id=payload["corpus_id"],
         limit=payload["limit"],
         timestamp_diagnostic=dict(payload["timestamp_diagnostic"]),
-        # Required from v3 on; a v1 or v2 manifest predates it and reads as None (D46).
-        acquisition_id=(payload["acquisition_id"] if payload["manifest_version"] >= 3 else None),
+        acquisition_id=acquisition_id,
     )
 
 

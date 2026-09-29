@@ -1,20 +1,24 @@
-"""The transport boundary, and D44's failure, retry and pacing policy.
+"""The transport boundary, and D44's and D47's failure, retry and pacing policy.
 
 Every value below is **engineering policy, not a source requirement** (D44): neither
 CFPB nor Socrata documents a numeric rate limit for the endpoints Sentinel reads.
 
-    transient   a connection error or timeout; HTTP 429, 500, 502, 503, 504; a body
-                its caller's validator rejects                      -> retried
-    permanent   HTTP 403, and every other status outside 2xx         -> never retried
+    transient   a connection error or timeout; HTTP 429; every 5xx except 501 and
+                505 (D47); a body its caller's validator rejects     -> retried
+    permanent   HTTP 403; every other 4xx; 501 and 505; every 3xx, since redirects
+                are never followed (D47); anything outside 2xx-5xx   -> never retried
     attempts    at most 6 per request
     backoff     2, 4, 8, 16, 32 seconds, with no jitter
     Retry-After the larger of the backoff and the header, capped at 300 seconds
     pacing      at least 1 second between request starts, per host
+    timeouts    30 seconds to connect, 300 seconds per wait for data, and no overall
+                deadline (D47); both are recorded in every acquisition's policy
     exhaustion  FetchFailed, naming the request and its last status
 
 HTTP 403 stops the run at once. Sentinel never changes its identity to get past a
 refusal: the one User-Agent it sends names the project, and nothing here imitates a
-browser or any other client.
+browser or any other client. Nor does it follow a redirect: the URL a request's
+provenance records is always the URL its response came from.
 
 `HttpClient` has no default transport, so nothing can reach the network by
 accident. The real transport, `RequestsTransport`, is built only by
@@ -47,19 +51,33 @@ RETRY_AFTER_CAP_SECONDS = 300
 MIN_REQUEST_INTERVAL_MS = 1000
 """Between two request starts to the same host."""
 
-TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
+TOO_MANY_REQUESTS = 429
 FORBIDDEN = 403
+PERMANENT_SERVER_ERRORS = frozenset({501, 505})
+"""The two 5xx statuses that are not retried (D47): not implemented, and an HTTP
+version the server does not support. Neither changes on a second attempt."""
 
-REQUEST_TIMEOUT_SECONDS = (30, 300)
-"""Connect and read timeouts for the real transport. A timeout is transient."""
+CONNECT_TIMEOUT_SECONDS = 30
+READ_TIMEOUT_SECONDS = 300
+"""Each wait for data, not a whole response; no overall deadline exists (D47)."""
+REQUEST_TIMEOUT_SECONDS = (CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS)
+
+
+def is_transient_status(status: int) -> bool:
+    """429, and every 5xx except 501 and 505 (D44, D47)."""
+    if status == TOO_MANY_REQUESTS:
+        return True
+    return 500 <= status <= 599 and status not in PERMANENT_SERVER_ERRORS
 
 
 def policy() -> dict[str, Any]:
-    """The values in force, as an acquisition record states them (D46)."""
+    """The values in force, as an acquisition record states them (D46, D47)."""
     return {
         "backoff_seconds": list(BACKOFF_SECONDS),
+        "connect_timeout_seconds": CONNECT_TIMEOUT_SECONDS,
         "max_attempts": MAX_ATTEMPTS,
         "min_request_interval_ms": MIN_REQUEST_INTERVAL_MS,
+        "read_timeout_seconds": READ_TIMEOUT_SECONDS,
         "retry_after_cap_seconds": RETRY_AFTER_CAP_SECONDS,
     }
 
@@ -182,8 +200,13 @@ class RequestsTransport:
         headers: Mapping[str, str],
     ) -> Response:
         try:
+            # D47: a redirect is returned unfollowed, and the client refuses it.
             reply = self._session.get(
-                url, params=list(params), headers=dict(headers), timeout=REQUEST_TIMEOUT_SECONDS
+                url,
+                params=list(params),
+                headers=dict(headers),
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                allow_redirects=False,
             )
             body = reply.content
         except (
@@ -302,10 +325,18 @@ class HttpClient:
                         attempts=attempt,
                         reason="HTTP 403 is never retried; the run stops",
                     )
-                elif status in TRANSIENT_STATUSES:
+                elif is_transient_status(status):
                     reason = f"HTTP {status}"
                     retry_after = retry_after_seconds(
                         response.headers.get("retry-after"), self._now()
+                    )
+                elif 300 <= status < 400:
+                    raise FetchFailed(
+                        url,
+                        params,
+                        status=status,
+                        attempts=attempt,
+                        reason=f"HTTP {status} is a redirect, which Sentinel never follows",
                     )
                 else:
                     raise FetchFailed(

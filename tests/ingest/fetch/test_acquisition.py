@@ -10,19 +10,27 @@ the network.
 import gzip
 import hashlib
 import json
+import os
+import subprocess
+import sys
+import textwrap
 from datetime import UTC, date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from ingest.fetch.acquisition import (
     ACQUISITIONS_ROOT,
     JOURNAL_NAME,
+    LOCK_NAME,
+    QUARANTINE_DIR,
     RECORD_NAME,
     REQUIRED_KEYS,
     Acquisition,
     AcquisitionError,
     AcquisitionIncomplete,
     AcquisitionIntegrityError,
+    AcquisitionLocked,
     acquisition_dir,
     current_commit,
     is_complete,
@@ -84,13 +92,13 @@ def slice_pages(n):
 
 
 def complete_three_slices(directory):
-    acquisition = opened(directory)
-    for n in (1, 2, 3):
-        digest = cache(directory, slice_pages(n))
-        acquisition.record_slice(
-            f"2024-01-0{n}", requests=[request(n)], pages=[digest], verification={"rows": 2}
-        )
-    return acquisition.complete({})
+    with opened(directory) as acquisition:
+        for n in (1, 2, 3):
+            digest = cache(directory, slice_pages(n))
+            acquisition.record_slice(
+                f"2024-01-0{n}", requests=[request(n)], pages=[digest], verification={"rows": 2}
+            )
+        return acquisition.complete({})
 
 
 # --- canonical bytes -----------------------------------------------------------------
@@ -183,8 +191,10 @@ def test_the_record_holds_every_frozen_field(tmp_path):
     }
     assert record["policy"] == {
         "backoff_seconds": [2, 4, 8, 16, 32],
+        "connect_timeout_seconds": 30,
         "max_attempts": 6,
         "min_request_interval_ms": 1000,
+        "read_timeout_seconds": 300,
         "retry_after_cap_seconds": 300,
     }
     assert record["sentinel_commit"] == COMMIT
@@ -288,6 +298,7 @@ def test_a_reopened_acquisition_resumes_from_its_journal(tmp_path):
     first = opened(directory)
     digest = cache(directory, slice_pages(1))
     first.record_slice("k1", requests=[request(1)], pages=[digest], verification={"rows": 2})
+    first.close()
 
     resumed = opened(directory)
     assert list(resumed.completed_slices()) == ["k1"]
@@ -300,6 +311,7 @@ def test_a_trailing_incomplete_journal_line_is_removed_before_anything_is_append
     acquisition = opened(directory)
     first = cache(directory, slice_pages(1))
     acquisition.record_slice("k1", requests=[], pages=[first], verification={})
+    acquisition.close()
     whole = journal_path(directory).read_bytes()
     with open(journal_path(directory), "ab") as stream:
         stream.write(b'{"key":"k2","pa')
@@ -319,6 +331,7 @@ def test_a_slice_whose_page_is_gone_no_longer_counts_as_completed(tmp_path):
     digests = [cache(directory, slice_pages(n)) for n in (1, 2)]
     acquisition.record_slice("k1", requests=[], pages=[digests[0]], verification={})
     acquisition.record_slice("k2", requests=[], pages=[digests[1]], verification={})
+    acquisition.close()
     (directory / SOURCE / f"{digests[0]}.json.gz").unlink()
 
     assert opened(directory).completed_slices() == {}, "k1 and everything after it are removed"
@@ -476,6 +489,7 @@ def test_opening_verifies_the_journal_once(tmp_path, page_reads):
     for n in range(20):
         digest = cache(directory, [{"unique_key": f"page-{n}"}])
         acquisition.record_slice(f"k{n:03d}", requests=[], pages=[digest], verification={})
+    acquisition.close()
     page_reads["reads"] = 0
     resumed = opened(directory)
     assert page_reads["reads"] == 20
@@ -523,3 +537,262 @@ def test_a_failed_append_leaves_the_journal_as_it_was(tmp_path, monkeypatch):
     assert list(acquisition.completed_slices()) == ["k1"]
     acquisition.record_slice("k2", requests=[], pages=[second], verification={})
     assert list(acquisition.completed_slices()) == ["k1", "k2"]
+
+
+# --- D47 (4): orphaned pages are quarantined, never adopted or deleted ------------------
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def one_slice(directory, n=1):
+    with opened(directory) as acquisition:
+        acquisition.record_slice(
+            f"k{n}", requests=[], pages=[cache(directory, slice_pages(n))], verification={}
+        )
+
+
+def quarantined_files(directory):
+    return sorted((directory / QUARANTINE_DIR).rglob("*.json.gz"))
+
+
+def test_an_orphaned_page_is_moved_to_quarantine_by_its_bytes_when_opened(tmp_path):
+    directory = tmp_path / "acq"
+    one_slice(directory)
+    orphan = cache(directory, slice_pages(2))
+    path = directory / SOURCE / f"{orphan}.json.gz"
+    data = path.read_bytes()
+    journal = journal_path(directory).read_bytes()
+
+    with opened(directory) as resumed:
+        destination = directory / QUARANTINE_DIR / hashlib.sha256(data).hexdigest() / path.name
+        assert resumed.quarantined == (destination,)
+        assert not path.exists()
+        assert destination.read_bytes() == data, "moved, never deleted"
+        assert list(resumed.completed_slices()) == ["k1"], "never adopted into the journal"
+        assert journal_path(directory).read_bytes() == journal
+
+
+def test_a_page_orphaned_by_a_changed_source_no_longer_blocks_completion(tmp_path):
+    directory = tmp_path / "acq"
+    one_slice(directory)
+    cache(directory, [{"unique_key": "2-0", "version": "yesterday"}])
+
+    with opened(directory) as resumed:
+        today = cache(directory, [{"unique_key": "2-0", "version": "today"}])
+        resumed.record_slice("k2", requests=[], pages=[today], verification={})
+        acquisition_id = resumed.complete({})
+    verified = verify_acquisition(directory, source=SOURCE, start=START, end=END)
+    assert verified.acquisition_id == acquisition_id
+    assert len(quarantined_files(directory)) == 1
+
+
+def test_quarantine_is_deterministic_and_never_overwrites_different_bytes(tmp_path):
+    directory = tmp_path / "acq"
+    one_slice(directory)
+    orphan = slice_pages(5)
+    path = directory / SOURCE / f"{cache(directory, orphan)}.json.gz"
+    first = path.read_bytes()
+    with opened(directory):
+        pass
+
+    text = json.dumps(orphan, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    path.write_bytes(gzip.compress(text.encode("utf-8"), mtime=1))
+    second = path.read_bytes()
+    assert second != first
+    with opened(directory):
+        pass
+    assert sorted(p.read_bytes() for p in quarantined_files(directory)) == sorted([first, second])
+
+    path.write_bytes(second)
+    with opened(directory):
+        pass
+    assert len(quarantined_files(directory)) == 2, "identical bytes land on themselves"
+
+
+def test_listed_pages_and_temporary_files_are_never_quarantined(tmp_path):
+    directory = tmp_path / "acq"
+    one_slice(directory)
+    listed = page_digest(slice_pages(1))
+    leftover = directory / SOURCE / ".page-killed.tmp"
+    leftover.write_bytes(b"\x1f\x8b partial")
+    with opened(directory) as resumed:
+        assert resumed.quarantined == ()
+    assert leftover.exists() and (directory / SOURCE / f"{listed}.json.gz").exists()
+    assert not (directory / QUARANTINE_DIR).exists()
+
+
+def test_completion_stays_strict_about_a_page_orphaned_while_open(tmp_path):
+    directory = tmp_path / "acq"
+    with opened(directory) as acquisition:
+        acquisition.record_slice(
+            "k1", requests=[], pages=[cache(directory, slice_pages(1))], verification={}
+        )
+        cache(directory, slice_pages(9))
+        with pytest.raises(AcquisitionIntegrityError, match="no completed slice lists"):
+            acquisition.complete({})
+    assert not record_path(directory).exists()
+
+
+def test_verification_ignores_the_quarantine(tmp_path):
+    directory = tmp_path / "acq"
+    one_slice(directory)
+    cache(directory, slice_pages(9))
+    with opened(directory) as resumed:
+        resumed.complete({})
+    assert quarantined_files(directory)
+    verify_acquisition(directory, source=SOURCE, start=START, end=END)
+
+
+# --- D47 (5): damage before the journal's last line ------------------------------------
+
+
+def test_damage_before_the_last_line_truncates_from_the_first_damaged_slice(tmp_path):
+    directory = tmp_path / "acq"
+    digests = []
+    with opened(directory) as acquisition:
+        for n in (1, 2, 3, 4):
+            digests.append(cache(directory, slice_pages(n)))
+            acquisition.record_slice(f"k{n}", requests=[], pages=[digests[-1]], verification={})
+    first_line = journal_path(directory).read_bytes().splitlines(keepends=True)[0]
+    (directory / SOURCE / f"{digests[1]}.json.gz").write_bytes(b"damaged")
+
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"]
+        assert journal_path(directory).read_bytes() == first_line
+        moved = {path.name for path in resumed.quarantined}
+        assert moved == {f"{digests[i]}.json.gz" for i in (1, 2, 3)}, "k3 and k4 are unfinished"
+    with opened(directory) as again:
+        assert list(again.completed_slices()) == ["k1"], "the resume point is deterministic"
+        assert again.quarantined == ()
+
+
+def test_a_repeated_key_is_where_the_journal_is_cut(tmp_path):
+    directory = tmp_path / "acq"
+    one_slice(directory)
+    line = journal_path(directory).read_bytes()
+    with open(journal_path(directory), "ab") as stream:
+        stream.write(line)
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"]
+    assert journal_path(directory).read_bytes() == line
+
+
+# --- D47 (6): one writer per acquisition -----------------------------------------------
+
+
+def test_a_second_writer_is_refused_while_the_first_is_open(tmp_path):
+    directory = tmp_path / "acq"
+    first = opened(directory)
+    lock = directory / LOCK_NAME
+    holder = json.loads(lock.read_bytes())
+    assert holder["pid"] == os.getpid() and set(holder) == {"host", "pid", "started_at"}
+    with pytest.raises(AcquisitionLocked, match=LOCK_NAME) as caught:
+        opened(directory)
+    assert str(os.getpid()) in str(caught.value)
+    first.close()
+    assert not lock.exists()
+    with opened(directory):
+        pass
+
+
+def test_the_lock_is_released_when_the_writer_fails(tmp_path):
+    directory = tmp_path / "acq"
+    with pytest.raises(RuntimeError):
+        with opened(directory):
+            raise RuntimeError("the fetch failed")
+    assert not (directory / LOCK_NAME).exists()
+    with opened(directory):
+        pass
+
+
+def test_a_lock_left_by_a_hard_kill_refuses_until_an_operator_removes_it(tmp_path):
+    directory = tmp_path / "acq"
+    one_slice(directory)
+    stale = {"host": "gone", "pid": 1, "started_at": "then"}
+    (directory / LOCK_NAME).write_text(json.dumps(stale) + "\n")
+    before = {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    for _ in range(2):
+        with pytest.raises(AcquisitionLocked, match="gone"):
+            opened(directory)
+    after = {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    assert after == before, "a refused open touches nothing, lock included"
+
+    (directory / LOCK_NAME).unlink()
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"], "the evidence survived"
+
+
+def test_a_writer_never_removes_a_lock_it_did_not_create(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition = opened(directory)
+    (directory / LOCK_NAME).write_text("another writer's lock\n")
+    acquisition.close()
+    assert (directory / LOCK_NAME).read_text() == "another writer's lock\n"
+
+
+def test_a_closed_writer_writes_nothing(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition = opened(directory)
+    digest = cache(directory, slice_pages(1))
+    acquisition.close()
+    acquisition.close()
+    with pytest.raises(AcquisitionError, match="closed"):
+        acquisition.record_slice("k1", requests=[], pages=[digest], verification={})
+    with pytest.raises(AcquisitionError, match="closed"):
+        acquisition.complete({})
+    assert not journal_path(directory).exists() and not record_path(directory).exists()
+
+
+HOLDER = textwrap.dedent(
+    """
+    import sys
+    from datetime import UTC, date, datetime
+    from pathlib import Path
+
+    from ingest.fetch.acquisition import Acquisition
+    from ingest.fetch.http import ClientIdentity
+
+    now = datetime(2026, 9, 28, tzinfo=UTC)
+    with Acquisition(
+        Path(sys.argv[1]),
+        source="nyc311",
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 3),
+        resolved_start=now,
+        resolved_end=now,
+        client=ClientIdentity("Sentinel-test/0", "fake", "0"),
+        sentinel_commit="a" * 40,
+        now=lambda: now,
+    ):
+        print("held", flush=True)
+        sys.stdin.read()
+    """
+)
+
+
+def test_a_writer_in_another_process_is_refused(tmp_path):
+    """The production mechanism itself, across two real processes on one filesystem."""
+    directory = tmp_path / "acq"
+    environment = {**os.environ, "PYTHONPATH": str(ROOT)}
+    child = subprocess.Popen(
+        [sys.executable, "-c", HOLDER, str(directory)],
+        cwd=ROOT,
+        env=environment,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "held"
+        # The recorded pid, not Popen's: on Windows a venv's python.exe is a launcher
+        # whose own pid differs from the interpreter's that holds the lock.
+        holder = json.loads((directory / LOCK_NAME).read_bytes())
+        assert holder["pid"] != os.getpid()
+        with pytest.raises(AcquisitionLocked, match=str(holder["pid"])):
+            opened(directory)
+    finally:
+        child.stdin.close()
+        child.wait(timeout=120)
+    assert child.returncode == 0
+    with opened(directory):
+        pass

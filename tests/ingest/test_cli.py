@@ -2233,7 +2233,7 @@ def day_fetcher(directory, http, *, commit=TEST_COMMIT, client=TEST_CLIENT):
 
     def fetch(source, start, end):
         window_start, window_end = resolve_window(source, start, end)
-        acquisition = Acquisition(
+        with Acquisition(
             directory,
             source=source,
             start=start,
@@ -2243,18 +2243,18 @@ def day_fetcher(directory, http, *, commit=TEST_COMMIT, client=TEST_CLIENT):
             client=client,
             sentinel_commit=commit,
             now=lambda: FIXED_NOW,
-        )
-        done = acquisition.completed_slices()
-        for day in ACQ_DAYS:
-            if day in done:
-                continue
-            fetched = http.get("https://example.test/311", [("day", day)])
-            page = json.loads(fetched.response.body)
-            yield page
-            acquisition.record_slice(
-                day, requests=[fetched.record], pages=[page_digest(page)], verification={}
-            )
-        acquisition.complete({})
+        ) as acquisition:
+            done = acquisition.completed_slices()
+            for day in ACQ_DAYS:
+                if day in done:
+                    continue
+                fetched = http.get("https://example.test/311", [("day", day)])
+                page = json.loads(fetched.response.body)
+                yield page
+                acquisition.record_slice(
+                    day, requests=[fetched.record], pages=[page_digest(page)], verification={}
+                )
+            acquisition.complete({})
 
     return fetch
 

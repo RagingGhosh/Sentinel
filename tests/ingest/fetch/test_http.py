@@ -97,8 +97,10 @@ def test_the_policy_values_are_exactly_d44s():
     assert MIN_REQUEST_INTERVAL_MS == 1000
     assert policy() == {
         "backoff_seconds": [2, 4, 8, 16, 32],
+        "connect_timeout_seconds": 30,
         "max_attempts": 6,
         "min_request_interval_ms": 1000,
+        "read_timeout_seconds": 300,
         "retry_after_cap_seconds": 300,
     }
 
@@ -304,8 +306,10 @@ class FakeSession:
         self.outcome = outcome
         self.calls = []
 
-    def get(self, url, params=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "params": params, "headers": headers, "timeout": timeout})
+    def get(self, url, params=None, headers=None, timeout=None, **options):
+        self.calls.append(
+            {"url": url, "params": params, "headers": headers, "timeout": timeout, **options}
+        )
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
@@ -392,3 +396,88 @@ def test_a_non_ascii_retry_after_falls_back_to_the_backoff():
     fetch.get(URL)
     assert clock.sleeps == [2]
     assert len(transport.calls) == 2
+
+
+# --- D47: statuses, redirects and timeouts ----------------------------------------------
+
+
+@pytest.mark.parametrize("code", [501, 505])
+def test_501_and_505_are_permanent(code):
+    fetch, transport, clock = client([status(code), ok()])
+    with pytest.raises(FetchFailed) as caught:
+        fetch.get(URL)
+    assert len(transport.calls) == 1 and clock.sleeps == []
+    assert caught.value.status == code
+
+
+@pytest.mark.parametrize("code", [506, 507, 508, 510, 511, 520, 522, 530, 599])
+def test_every_other_5xx_is_transient(code):
+    fetch, transport, clock = client([status(code), ok()])
+    assert fetch.get(URL).response.status == 200
+    assert len(transport.calls) == 2 and clock.sleeps == [2]
+
+
+@pytest.mark.parametrize("code", [300, 301, 302, 303, 304, 307, 308])
+def test_a_3xx_is_not_a_success_and_is_never_retried(code):
+    moved = status(code, {"location": "https://elsewhere.test/moved"})
+    fetch, transport, clock = client([moved, ok()])
+    with pytest.raises(FetchFailed, match=str(code)) as caught:
+        fetch.get(URL)
+    assert len(transport.calls) == 1 and clock.sleeps == []
+    assert caught.value.status == code
+    assert [call["url"] for call in transport.calls] == [URL]
+
+
+@pytest.mark.parametrize("code", [100, 199, 600, 999])
+def test_statuses_outside_2xx_to_5xx_stay_permanent(code):
+    fetch, transport, clock = client([status(code), ok()])
+    with pytest.raises(FetchFailed):
+        fetch.get(URL)
+    assert len(transport.calls) == 1 and clock.sleeps == []
+
+
+class RedirectingAdapter(requests.adapters.BaseAdapter):
+    """Answers every request with a 302 elsewhere, recording each URL it is sent."""
+
+    def __init__(self):
+        super().__init__()
+        self.sent = []
+
+    def send(self, request, **kwargs):
+        self.sent.append(request.url)
+        reply = requests.Response()
+        reply.status_code = 302
+        reply.headers["Location"] = "https://elsewhere.test/moved"
+        reply._content = b""
+        reply.url = request.url
+        reply.request = request
+        return reply
+
+    def close(self):
+        pass
+
+
+def test_the_real_transport_never_follows_a_redirect():
+    """Driven through requests' own Session machinery, with no socket underneath."""
+    session = requests.Session()
+    session.trust_env = False
+    adapter = RedirectingAdapter()
+    session.mount("https://", adapter)
+    transport = RequestsTransport(session=session)
+
+    response = transport.get(URL, [("a", "1")], {"User-Agent": USER_AGENT})
+    assert response.status == 302
+    assert adapter.sent == [URL + "?a=1"], "the redirect was not followed"
+
+    fetch = HttpClient(transport, clock=FakeClock(), sleep=lambda seconds: None, now=lambda: NOW)
+    with pytest.raises(FetchFailed, match="302"):
+        fetch.get(URL)
+    assert len(adapter.sent) == 2, "one request, never a second to the redirect target"
+
+
+def test_the_timeouts_are_frozen_and_sent_with_every_request():
+    assert (http.CONNECT_TIMEOUT_SECONDS, http.READ_TIMEOUT_SECONDS) == (30, 300)
+    session = FakeSession(FakeReply(200, b"", {}))
+    RequestsTransport(session=session).get(URL, [], {})
+    assert session.calls[0]["timeout"] == (30, 300)
+    assert session.calls[0]["allow_redirects"] is False

@@ -1,11 +1,25 @@
 """The acquisition directory, its journal, its immutable record, and its verification.
 
-Addendum D44 and D46. One acquisition per source and window::
+Addendum D44, D46 and D47. One acquisition per source and window::
 
     data/acquisitions/<source>/<start>_<end>/
         acquisition.json          the record, written last: its presence means complete
         journal.jsonl             one canonical line per completed slice
+        writer.lock               present while one writer holds the acquisition (D47)
         <source>/<sha256>.json.gz the pages -- the directory is the ingest raw root
+        quarantine/<sha256 of the file's bytes>/<file name>   orphaned pages (D47)
+
+**One writer at a time (D47).** Opening an acquisition for writing creates
+`writer.lock` with an atomic exclusive create, and refuses if it already exists;
+closing removes it, and removes nothing else. A lock a hard kill left behind refuses
+every open until an operator removes that one file: nothing here guesses whether its
+holder is alive. Reading a completed acquisition takes no lock.
+
+**Orphaned pages are quarantined, never adopted or deleted (D47).** When an
+incomplete acquisition is opened, after its journal is checked, each page under
+`<source>/` that no completed slice lists is moved to the quarantine, at a path fixed
+by the file's bytes, so a rerun is idempotent and different bytes never collide.
+Completion stays strict: it refuses while any unlisted page lies under `<source>/`.
 
 **An acquisition without a record is incomplete, and resumes from its journal.** A
 slice counts as completed only while its line is whole, canonical and parses, its key
@@ -33,6 +47,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import platform
 import re
 import subprocess
 import tempfile
@@ -56,6 +71,8 @@ ACQUISITIONS_ROOT = Path("data") / "acquisitions"
 
 RECORD_NAME = "acquisition.json"
 JOURNAL_NAME = "journal.jsonl"
+LOCK_NAME = "writer.lock"
+QUARANTINE_DIR = "quarantine"
 PAGE_SUFFIX = ".json.gz"
 RECORD_VERSION = 1
 
@@ -92,6 +109,10 @@ class AcquisitionIncomplete(AcquisitionError):
 
 class AcquisitionIntegrityError(AcquisitionError):
     """A record or page is not what a completed acquisition must hold (D46)."""
+
+
+class AcquisitionLocked(AcquisitionError):
+    """Another writer holds the acquisition, or a crashed one left its lock (D47)."""
 
 
 @dataclass(frozen=True)
@@ -237,9 +258,94 @@ class Acquisition:
         self.client = client
         self.sentinel_commit = sentinel_commit
         self._now = now
-        # The journal is checked once, here; each later slice is checked as it is
-        # recorded (D47). Completion verifies every listed page once more.
-        self._slices = self._load()
+        self._closed = False
+        self.quarantined: tuple[Path, ...] = ()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self._lock = self._acquire_lock()
+        try:
+            # The journal is checked once, here; each later slice is checked as it is
+            # recorded (D47). Completion verifies every listed page once more.
+            self._slices = self._load()
+            self.quarantined = self._quarantine_orphans()
+        except BaseException:
+            self.close()
+            raise
+
+    # --- the single writer (D47) -------------------------------------------------
+
+    def _acquire_lock(self) -> bytes:
+        """Create `writer.lock` atomically and exclusively, or refuse."""
+        path = self.directory / LOCK_NAME
+        holder = canonical_bytes(
+            {
+                "host": platform.node(),
+                "pid": os.getpid(),
+                "started_at": format_timestamp(self._now()),
+            }
+        )
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileExistsError:
+            try:
+                found = path.read_bytes().decode("utf-8", "replace").strip()
+            except OSError:
+                found = "unreadable"
+            raise AcquisitionLocked(
+                f"{path} exists, so another writer holds this acquisition ({found}). If no "
+                "writer is running, an operator may remove that one file; nothing else "
+                "needs to change (D47)."
+            ) from None
+        try:
+            os.write(descriptor, holder)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return holder
+
+    def close(self) -> None:
+        """Give up the acquisition: remove our own lock, and nothing else. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        path = self.directory / LOCK_NAME
+        try:
+            if path.read_bytes() == self._lock:
+                path.unlink()
+        except (AttributeError, OSError):
+            pass
+
+    def __enter__(self) -> Acquisition:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def _writable(self) -> None:
+        if self._closed:
+            raise AcquisitionError(f"{self.directory}: this writer is closed")
+        if is_complete(self.directory):
+            raise AcquisitionError(f"{self.directory} is complete; it is immutable (D46)")
+
+    def _quarantine_orphans(self) -> tuple[Path, ...]:
+        """Move every page no completed slice lists into the quarantine (D47)."""
+        listed = {digest for entry in self._slices.values() for digest in entry["pages"]}
+        folder = pages_dir(self.directory, self.source)
+        if not folder.is_dir():
+            return ()
+        moved = []
+        for path in sorted(folder.iterdir()):
+            if not (path.is_file() and path.name.endswith(PAGE_SUFFIX)):
+                continue
+            if path.name[: -len(PAGE_SUFFIX)] in listed:
+                continue
+            destination = (
+                self.directory / QUARANTINE_DIR / sha256_hex(path.read_bytes()) / path.name
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(path, destination)
+            moved.append(destination)
+        return tuple(moved)
 
     # --- the journal -------------------------------------------------------------
 
@@ -292,8 +398,7 @@ class Acquisition:
         verification: Mapping[str, int],
     ) -> None:
         """Journal one completed slice. Its pages must already be cached (D46)."""
-        if is_complete(self.directory):
-            raise AcquisitionError(f"{self.directory} is complete; nothing is appended to it")
+        self._writable()
         if key in self._slices:
             raise AcquisitionError(f"slice {key!r} is already journaled")
         entry = {
@@ -329,8 +434,7 @@ class Acquisition:
 
     def complete(self, source_details: Mapping[str, Any]) -> str:
         """Write the record, last and atomically, and return its `acquisition_id`."""
-        if is_complete(self.directory):
-            raise AcquisitionError(f"{self.directory} already has a record; it is immutable")
+        self._writable()
         slices = [entry for _, entry in sorted(self._slices.items())]
         listed = sorted({digest for entry in slices for digest in entry["pages"]})
         damaged = [d for d in listed if not _page_present(self.directory, self.source, d)]

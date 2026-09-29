@@ -1140,3 +1140,56 @@ def test_acquisition_id_does_not_enter_the_corpus_identity(tmp_path):
         acquisition_id="d" * 64,
     )
     assert with_id.corpus_id == without.corpus_id
+
+
+# --- D47 (7): a version 3 acquisition_id is null or a SHA-256 digest --------------------
+
+
+def _built(root, acquisition_id):
+    return build_manifest(
+        source="cfpb",
+        window_start=datetime(2024, 1, 1, tzinfo=UTC),
+        window_end=datetime(2024, 12, 31, tzinfo=UTC),
+        source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
+        root=root,
+        acquisition_id=acquisition_id,
+    )
+
+
+@pytest.mark.parametrize(
+    "bad", ["xyz", "", "D" * 64, "g" * 64, "a" * 63, "a" * 65, " " + "a" * 64, 12345, True]
+)
+def test_build_manifest_refuses_a_malformed_acquisition_id(tmp_path, bad):
+    a_corpus(tmp_path)
+    with pytest.raises(ValueError, match="acquisition_id"):
+        _built(tmp_path, bad)
+
+
+@pytest.mark.parametrize("good", [None, "0" * 64, "0123456789abcdef" * 4])
+def test_build_manifest_accepts_null_or_a_digest(tmp_path, good):
+    a_corpus(tmp_path)
+    assert _built(tmp_path, good).acquisition_id == good
+
+
+@pytest.mark.parametrize(
+    "bad", ["not-a-digest", "", "A" * 64, "a" * 63, 12345, True, ["a" * 64], {"id": "a" * 64}]
+)
+def test_a_version_three_manifest_with_a_malformed_acquisition_id_is_refused(tmp_path, bad):
+    path = write_manifest(a_corpus(tmp_path), root=tmp_path)
+    _rewrite_payload(path, lambda payload: payload.update(acquisition_id=bad))
+    with pytest.raises(CorpusIntegrityError, match="acquisition_id"):
+        read_manifest("cfpb", root=tmp_path)
+
+
+def test_version_one_and_two_ignore_a_stray_acquisition_id(tmp_path):
+    """Versions 1 and 2 predate the field, so they read it as None whatever is there."""
+    path = write_manifest(a_corpus(tmp_path), root=tmp_path)
+
+    def to_version_two(payload):
+        payload["manifest_version"] = 2
+        payload["acquisition_id"] = "not-a-digest"
+
+    _rewrite_payload(path, to_version_two)
+    assert read_manifest("cfpb", root=tmp_path).acquisition_id is None
