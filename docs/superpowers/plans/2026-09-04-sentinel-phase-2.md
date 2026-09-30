@@ -734,6 +734,7 @@ Written to metadata as `feature_distribution_shift` and reproduced in the publis
 **Acceptance:** no test touches the network; neither of D45's options is implemented; the adapter's existing refusals are unchanged.
 **Commit:** `feat: NYC 311 fetcher (day-sliced, count-verified)`
 **Must not change:** as Task 23.
+**Corrected by D48:** D44's drift rule is made representable by a generic acquisition extension in `ingest/fetch/acquisition.py` that D48 authorizes only because this task needs it: a rewind that truncates the journal from a drifted slice and quarantines its pages, and an immutable start state persisted once per acquisition. A count that disagrees with its rows is requested again together with its data, once; freshness headers are recorded; and this task may modify `ingest/fetch/registry.py`, the two Task 23 tests that require an empty registry, and `tests/ingest/test_cli.py` for `--fetch` integration. Task 24 remains the NYC 311 source fetcher, and no real ingestion is authorized.
 
 ### Task 25: CFPB archive/API reconstruction fetcher
 

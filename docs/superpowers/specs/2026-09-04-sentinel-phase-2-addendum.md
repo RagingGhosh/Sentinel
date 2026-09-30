@@ -4186,3 +4186,151 @@ complete.**
 **D1–D46 are unaltered.** Plan Task 23 is extended by reference, not rewritten: its
 hardening lands after 9db0977 as two further commits. D47 changes no code, no test, no
 requirement and no CI.
+
+**D48 — Task 24's source and drift contract: a completed slice whose source has moved
+is fetched again once, through a generic rewind that truncates the journal from that
+slice and quarantines its pages; the acquisition's start state is persisted once and
+never replaced; a count that disagrees with its rows is requested again together with
+its data, once; NYC 311's freshness headers are recorded; and Task 24 may register its
+fetcher (addendum D44, D45, D46, D47; plan Tasks 23, 24).**
+*Was:* D44 (10) requires that when NYC 311's source moves during an acquisition, every
+completed slice's count is verified again and each changed slice is fetched again,
+once. Task 24's reconnaissance found that nothing in Task 23's acquisition layer can
+do that: D46's journal is append-only, `record_slice` refuses a key it already holds,
+and D47 (5) treats a repeated key as damage, so an already-journaled slice cannot be
+replaced. It found no place, other than a pseudo-slice, to keep the acquisition's
+start state across a resume, so "the start" of a resumed acquisition was undefined. A
+count that differed from the rows returned was retried only on the data side, by the
+per-request policy, which cannot help when the count is the stale side. Registering a
+fetcher touches files plan Task 24 does not list and two Task 23 tests whose
+assertions require an empty registry. And the data responses carry freshness headers
+D44 does not mention.
+*Now — (1) rewinding a drifted slice.* D44 (10) stands: when the source moves,
+completed slices are checked again, a changed slice is fetched again once, and a slice
+still inconsistent after that refuses the acquisition. To make that representable
+under D47, the acquisition layer gains one generic operation, a rewind from a named
+completed slice. It runs only in an open, incomplete acquisition held by its single
+writer (D47 (6)). It truncates the journal immediately before the named slice's line,
+so that slice and every slice journaled after it become unfinished; no line is
+rewritten in place, and no superseding or repeated line is ever written, so D47's rule
+that a key appears in the journal once holds. Pages that only the removed slices
+listed are moved at once to D47's quarantine, by the same path rule, and never
+deleted; a page a retained slice still lists stays. This is an intentional extension
+of D47 (4)'s quarantine timing, under which quarantine otherwise happens only when an
+acquisition is opened: without it, strict verification would reject the rewound
+acquisition in the same run, because the removed slices' pages would lie unlisted
+under `<source>/`. The rewind is recorded first, as one canonical line appended to
+`rewinds.jsonl` in the acquisition directory holding the named slice, the removed
+keys, the reason and the time, and only then is the journal truncated; an open that
+finds the latest rewind's named slice still journaled completes that rewind before
+anything else, so an interrupted rewind resumes deterministically. The fetch that
+follows writes fresh pages and fresh journal lines. Completion and D46's verification
+stay strict. The completed record carries every rewind, in order, under a top-level
+`rewinds` key, which D46 permits, since a record may carry more keys than it lists,
+and `record_version` stays 1. This is a deliberate extension of Task 23's generic API,
+authorized here only because Task 24 needs D44's drift rule.
+*Now — (2) the acquisition's start state.* A new acquisition records its source's
+start snapshot before its first slice, in `start.json` in the acquisition directory:
+canonical bytes under D46's rules, written once through a same-directory temporary
+file and `os.replace`. It belongs to the acquisition, not to a slice, and is never
+part of the journal. An open, a resume or a rewind never replaces it: the start of a
+resumed acquisition remains the start of its first run, and every later observation is
+an end observation. The completed record carries it unchanged as
+`source_details.start`, and completion refuses if persisted `start.json` and
+`source_details.start` differ.
+*Now — (3) a count that disagrees with its rows.* For each slice the fetcher requests
+the count, then the data. A count of 50,000 or more refuses before the data is
+requested (D44 (7)). When the rows returned differ from the count, that is a
+source-level disagreement, distinct from an HTTP retry: the fetcher requests both the
+count and the data again, once, and accepts the slice only if the second pair agrees.
+A second disagreement refuses the acquisition: no completed record is written, and the
+incomplete acquisition is kept for diagnosis and resume. The stale side is never
+silently accepted. D47's per-request retry policy still applies beneath each of those
+requests. A `unique_key` repeated within a slice's data refuses at once, without a
+source-level retry, since a second request cannot remove a duplicate the source
+publishes.
+*Now — (4) drift re-verification.* The fetcher checks the source state after its last
+unfinished slice, and again after the slices a rewind made unfinished have been
+fetched. A check takes a snapshot, `rowsUpdatedAt` and the window's `count(*)`, and
+compares it with the start snapshot and with the latest snapshot at which every
+completed slice was verified. That latest snapshot is kept for the run, and a resumed
+run begins from the start snapshot. Any difference is movement, and movement is only a
+trigger for verification, not a definition of correctness. Every completed slice is
+then checked again by requesting its `count(*)`, and a count that differs from its
+journaled count is a change. Rows and distinct `unique_key`s cannot be checked again
+without the data, and at fetch time they equalled the count. Drift verification proves
+count/identity invariants, not byte-for-byte immutability of historical rows. A slice
+whose count and distinct-key checks remain unchanged is not re-downloaded solely to
+detect same-count content substitutions. The earliest changed slice in journal order
+is the rewind point: the acquisition rewinds from it under (1) and fetches from there.
+Each changed slice is fetched again at most once: the rewind records the changed keys,
+so a slice that changes again, or that fails verification after its re-fetch, refuses
+the acquisition. A slice that appears in a previous rewind event's changed-key set
+MUST NOT be rewound a second time. If that slice is found changed again after its
+refetch, the acquisition refuses. A pass that finds no change ends the checks. Its
+snapshot's window count must then equal the sum of the slice counts, and no
+`unique_key` may appear in two slices; either failure refuses.
+*Now — (5) start and end provenance.* The completed record's `source_details` carries
+the immutable start snapshot as `start` and the snapshot of the final pass that found
+no change as `end`. Differences between them are provenance, and nothing claims the
+dataset was immutable during the run. Each slice's `verification` keeps its `count`,
+`rows` and `distinct_unique_keys` together, and nowhere else; the record keeps D46's
+slice history and the rewinds.
+*Now — (6) freshness headers.* When a snapshot's response carries
+`X-SODA2-Truth-Last-Modified` or `X-SODA2-Data-Out-Of-Date`, each value is recorded
+exactly as sent in that snapshot, as `truth_last_modified` and `data_out_of_date`.
+They are snapshot provenance only: they are not part of any slice's `verification`,
+whose semantic content stays `count`, `rows` and `distinct_unique_keys`, and they add
+no refusal.
+*Now — (7) URL encoding.* The contract is the request parameters, not any one wire
+encoding: tests assert the semantic parameters the fetcher passes to its transport,
+and the real transport encodes them as `requests` does. No request is made to settle
+whether Socrata reads a space written as `+` or as `%20`.
+*Now — (8) registration, and the files Task 24 may touch.* As D46 says, Tasks 24 and
+25 each register their own source. Task 24 may modify `ingest/fetch/registry.py` to
+register NYC 311; the two tests whose assertions require an empty registry,
+`test_task_23_registers_no_source_fetcher` in `tests/ingest/fetch/test_acquisition.py`
+and the NYC 311 case of
+`test_fetch_refuses_before_any_side_effect_while_no_fetcher_is_registered` in
+`tests/ingest/test_cli.py`; `tests/ingest/test_cli.py` for the `--fetch` integration
+tests registration makes possible; and `ingest/fetch/acquisition.py` only for (1) and
+(2): the immutable start state, the rewind from a slice, the rewind history, the
+quarantine of rewound pages and the completion of an interrupted rewind. No other
+surface is added.
+*Now — (9) the D45 boundary.* D45 stays undecided. The fetcher passes null or absent
+descriptors, negative durations and daylight-saving-edge timestamps through exactly as
+served, with no filter, repair or conversion; what normalization does with them
+remains D45's to decide, and under the current contract it refuses the run. Neither of
+D45's options is implemented.
+*Now — the NYC 311 source contract Task 24 implements.* Dataset `erm2-nwe9`, SODA 2.0,
+whose responses are bare JSON arrays. One slice per New York civil day D, with exactly
+one page per day. Each slice's data request is
+`$select=unique_key,created_date,closed_date,complaint_type,descriptor`, `$where` of
+`created_date >= 'DT00:00:00' AND created_date < 'D+1T00:00:00'`, `$order=unique_key`
+and `$limit=50000`. Its count request is `$select=count(*) AS n` with the same
+`$where`, and the count arrives as a string. No token is sent. Daylight-saving days
+use the same literals, unchanged. The record's `source_details` holds exactly:
+
+| Key | Value |
+|---|---|
+| `dataset_id` | `erm2-nwe9` |
+| `endpoint` | `https://data.cityofnewyork.us/resource/erm2-nwe9.json` |
+| `metadata_endpoint` | `https://data.cityofnewyork.us/api/views/erm2-nwe9.json`, where `rowsUpdatedAt` is read |
+| `soda_version` | `2.0` |
+| `source_api_version` | `socrata-soda2`, the adapter's constant |
+| `start` | the immutable start snapshot: `rows_updated_at` (integer seconds), `window_count`, the freshness headers when present, and the request records of its metadata and window-count requests |
+| `end` | the final snapshot, in the same form |
+
+*Now — what D48 does not change.* The adapters, normalization, `ingest/cli.py`,
+`ingest/manifest.py`, `ingest/fetch/http.py`, `ingest/fetch/canonical.py`,
+`ingest/storage.py`, `ingest/schema.py`, `ingest/roster.py` and `ingest/identity.py`
+are unchanged. D44, D46 and D47 stand as written, except for the extensions this entry
+makes explicit: quarantine at a rewind, and `start.json`, `rewinds.jsonl` and the
+record's `rewinds` key. D45 stays undecided. Task 24 remains the NYC 311 source
+fetcher; nothing here authorizes real ingestion, a download or a request to the
+source, and `FETCHERS` stays empty until Task 24 lands. **Phase 2 is not complete, and
+no document may describe it as complete.**
+*Scope:* the drift, start-state, count-disagreement, freshness, encoding and
+registration decisions Task 24 needs, recorded before it is implemented. **D1–D47 are
+unaltered.** Plan Task 24 is extended by reference, not rewritten. D48 changes no
+code, no test, no requirement and no CI.
