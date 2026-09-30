@@ -6,11 +6,13 @@ What lives here, and nothing beyond it:
     http         the transport boundary, and D44's retry, backoff and pacing policy
     acquisition  the acquisition directory, its journal, its immutable record, and
                  the verification ``ingest()`` runs before it normalizes one
-    registry     where a source registers its fetcher; empty until Tasks 24 and 25
+    nyc311       NYC 311's day-sliced, count-verified fetcher (Task 24, D48)
+    registry     where a source registers its fetcher; NYC 311 is registered, and
+                 each other source's fetcher is added by that source's own task
 
-No source-specific fetch behaviour exists in this package. A source's fetcher is a
-plain ``Fetcher`` built from a ``FetchContext``, and ``python -m ingest.cli --fetch``
-refuses every source until one is registered.
+Source-specific fetch behaviour lives only in a source's own fetcher module. A
+source's fetcher is a plain ``Fetcher`` built from a ``FetchContext``, and
+``python -m ingest.cli --fetch`` refuses every source not yet registered.
 
 Imports only the standard library and ``requests`` (D44): no pyarrow, no scipy, no
 ``ingest.cli`` and no Django. Tests never touch the network: every request goes

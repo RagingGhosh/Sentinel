@@ -15,7 +15,8 @@ import ast
 import gzip
 import hashlib
 import json
-from datetime import UTC, date, datetime
+import re
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2479,7 +2480,7 @@ def test_an_acquisition_of_another_window_refuses(tmp_path, closed_network):
     assert not (tmp_path / "other-corpus").exists()
 
 
-@pytest.mark.parametrize("source", ["cfpb", "nyc311"])
+@pytest.mark.parametrize("source", ["cfpb"])  # NYC 311 is registered by Task 24 (D48 (8))
 def test_fetch_refuses_before_any_side_effect_while_no_fetcher_is_registered(
     tmp_path, monkeypatch, closed_network, source
 ):
@@ -2557,3 +2558,121 @@ def test_without_fetch_the_command_line_passes_exactly_the_arguments_it_always_d
     assert set(seen) == {"source", "start", "end", "limit", "corpus_root"}
     arguments = ["--source", "cfpb", "--start", "2024-01-01", "--end", "2024-01-02"]
     assert build_parser().parse_args(arguments).fetch is False
+
+
+# --- Task 24: the registered NYC 311 fetcher behind --fetch (D48 (8)) ---------------------
+#
+# Nothing below patches FETCHERS: `--fetch` reaches the factory Task 24 registered, and
+# the only fake is the transport the command line's main() would otherwise build.
+
+NYC_ACQUISITION = Path("data/acquisitions/nyc311/2024-01-01_2024-01-03")
+NYC_BOUNDS = re.compile(r"created_date >= '(.{10})T00:00:00' AND created_date < '(.{10})T00:00:00'")
+NYC_METADATA = ("metadata",)
+NYC_WINDOW = ("count", "2024-01-01", "2024-01-04")
+
+
+def nyc_count(day):
+    return ("count", day, (date.fromisoformat(day) + timedelta(days=1)).isoformat())
+
+
+class SocrataTransport:
+    """NYC 311's two endpoints over `day_rows`, answering 403 to any request in `forbid`."""
+
+    identity = TEST_CLIENT
+
+    def __init__(self, forbid=()):
+        self.log = []
+        self.forbid = set(forbid)
+
+    def get(self, url, params, headers):
+        params = dict(params)
+        if url == "https://data.cityofnewyork.us/api/views/erm2-nwe9.json":
+            request, body = NYC_METADATA, {"rowsUpdatedAt": 1790559478}
+        else:
+            assert url == "https://data.cityofnewyork.us/resource/erm2-nwe9.json", url
+            first, last = NYC_BOUNDS.fullmatch(params["$where"]).groups()
+            rows = [row for day in ACQ_DAYS if first <= day < last for row in day_rows(day)]
+            if params["$select"] == "count(*) AS n":
+                request, body = ("count", first, last), [{"n": str(len(rows))}]
+            else:
+                request, body = ("data", first), rows
+        self.log.append(request)
+        if request in self.forbid:
+            return Response(status=403, headers={}, body=b"")
+        return Response(status=200, headers={}, body=json.dumps(body).encode())
+
+
+class OfflineTransport:
+    identity = TEST_CLIENT
+
+    def get(self, url, params, headers):
+        raise AssertionError("a completed acquisition is reused without a request")
+
+
+def nyc_fetch(tmp_path, monkeypatch, transport):
+    import ingest.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "RequestsTransport", lambda: transport)
+    monkeypatch.setattr(cli, "HttpClient", quiet_client)
+    monkeypatch.setattr(cli, "current_commit", lambda: TEST_COMMIT)
+    arguments = ["--source", "nyc311", "--start", "2024-01-01", "--end", "2024-01-03"]
+    return main([*arguments, "--corpus-root", str(tmp_path / "corpus"), "--fetch"])
+
+
+def test_fetch_runs_the_registered_nyc311_fetcher_end_to_end(tmp_path, monkeypatch, closed_network):
+    from ingest.fetch.nyc311 import make_nyc311_fetcher
+    from ingest.fetch.registry import FETCHERS
+
+    assert FETCHERS["nyc311"] is make_nyc311_fetcher
+    transport = SocrataTransport()
+    assert nyc_fetch(tmp_path, monkeypatch, transport) == 0
+
+    days = [(kind, day) for day in ACQ_DAYS for kind in ("count", "data")]
+    requests = [nyc_count(day) if kind == "count" else (kind, day) for kind, day in days]
+    assert transport.log == [NYC_METADATA, NYC_WINDOW, *requests, NYC_METADATA, NYC_WINDOW]
+    data = record_path(tmp_path / NYC_ACQUISITION).read_bytes()
+    record = json.loads(data)
+    assert record["source_details"]["dataset_id"] == "erm2-nwe9"
+    assert [entry["key"] for entry in record["slices"]] == list(ACQ_DAYS)
+    manifest = read_manifest("nyc311", root=tmp_path / "corpus")
+    assert manifest.acquisition_id == hashlib.sha256(data).hexdigest()
+    assert manifest.record_count == 6
+
+
+def test_a_403_under_fetch_stops_at_once_and_a_rerun_resumes_the_acquisition(
+    tmp_path, monkeypatch, closed_network
+):
+    broken = SocrataTransport(forbid={("data", "2024-01-02")})
+    with pytest.raises(FetchFailed, match="403"):
+        nyc_fetch(tmp_path, monkeypatch, broken)
+    assert broken.log[-1] == ("data", "2024-01-02")
+    assert broken.log.count(("data", "2024-01-02")) == 1, "never retried"
+    assert not record_path(tmp_path / NYC_ACQUISITION).exists()
+    assert not list((tmp_path / "corpus").rglob("manifest.json"))
+
+    resumed = SocrataTransport()
+    assert nyc_fetch(tmp_path, monkeypatch, resumed) == 0
+    assert resumed.log == [
+        nyc_count("2024-01-02"),
+        ("data", "2024-01-02"),
+        nyc_count("2024-01-03"),
+        ("data", "2024-01-03"),
+        NYC_METADATA,
+        NYC_WINDOW,
+    ], "the start snapshot and day one come from the acquisition, not the source"
+    assert read_manifest("nyc311", root=tmp_path / "corpus").record_count == 6
+
+
+def test_a_completed_nyc311_acquisition_is_reused_offline_with_zero_requests(
+    tmp_path, monkeypatch, closed_network
+):
+    assert nyc_fetch(tmp_path, monkeypatch, SocrataTransport()) == 0
+    first = read_manifest("nyc311", root=tmp_path / "corpus")
+    record = record_path(tmp_path / NYC_ACQUISITION).read_bytes()
+
+    assert nyc_fetch(tmp_path, monkeypatch, OfflineTransport()) == 0
+    again = read_manifest("nyc311", root=tmp_path / "corpus")
+    assert again.acquisition_id == first.acquisition_id
+    assert again.corpus_id == first.corpus_id
+    assert record_path(tmp_path / NYC_ACQUISITION).read_bytes() == record
