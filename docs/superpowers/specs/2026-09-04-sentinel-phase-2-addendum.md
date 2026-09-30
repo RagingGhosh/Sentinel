@@ -4334,3 +4334,140 @@ no document may describe it as complete.**
 registration decisions Task 24 needs, recorded before it is implemented. **D1–D47 are
 unaltered.** Plan Task 24 is extended by reference, not rewritten. D48 changes no
 code, no test, no requirement and no CI.
+
+**D49 — Task 25's CFPB reconstruction contract: each API day is verified when it is
+fetched and its snapshot is kept as provenance, with no drift recount and no rewind; a
+count that disagrees with its CSV is requested again together with the CSV, once; the
+verified archive pins live in the acquisition's start state, and a resume refuses a
+missing or changed export; a literal `None` Complaint ID refuses; and the served
+`_index` is provenance only (addendum D43, D44, D46, D47, D48; plan Task 25).**
+*Was:* D43 froze the reconstruction's source model, its per-field authority and its
+refusals; D44 froze its narrative filter, its archive and API retrieval, its
+completeness and its provenance; and plan Task 25 records its behaviour. Task 25's
+reconnaissance, from evidence captured on 2026-09-28 and one read-only request on
+2026-09-30, found five points none of them settles. D48's drift rule, which counts
+completed slices again and rewinds a changed one, and its rule for a count that
+disagrees with its rows are written for NYC 311 and Task 24. D44 (5) defines CFPB
+completeness per UTC day and states no drift rule, and D44 (6) calls a CSV whose row
+count differs from `hits.total` a transient body, retried alone under the per-request
+policy, which cannot help when the count is the stale side. Nothing says where the
+pins of the downloaded archive exports live across a resume, or what a resume does
+when an export is missing or its bytes have changed. D44 (4) resolves a literal `None`
+in an adapter-relevant CSV column by `GET /{complaintId}`, which cannot apply when the
+`None` is in the Complaint ID column itself. And D44 (2) records "the hit's `_index`"
+without saying what it identifies.
+*Now — the API's own state, as measured.* The API documents `_meta.last_indexed` as
+"The timestamp of the most recently indexed complaint" and `_meta.last_updated` as
+"The timestamp of the most recent complaint"; neither is a modification time of
+historical records. Between 2026-09-28 and 2026-09-30 both moved from
+2026-09-27T12:00:00-05:00 to 2026-09-30T12:00:00-05:00, and `total_record_count` grew
+from 18,040,765 to 18,091,520, while the count for UTC day 2024-11-01 stayed 9,417.
+Over the same interval the served `_index` changed from `complaint-public-v2` to
+`complaint-public-v1`. The global metadata therefore moves daily whether or not any
+window day changes, and the index name alternates.
+*Now — (1) the drift model: a snapshot per day.* CFPB does not use D48's
+count-recount-rewind model. The archive side is immutable once downloaded and
+verified, because its exact bytes are retained and pinned. Each API day is verified
+internally when it is fetched, under (2), and that day's source snapshot — its
+`hits.total`, its `_meta.last_indexed` and its served `_index` — is kept as provenance
+together with its retained raw responses. The start and end snapshots are provenance
+only. Movement of `_meta.last_indexed`, `_meta.last_updated`, a total count or the
+served `_index` does not by itself trigger a recount or a rewind, and there is no
+automatic CFPB rewind. CFPB historical stability is not asserted; reproducibility is
+established from retained, content-addressed acquisition inputs. Those inputs are the
+archive exports, pinned by SHA256, and the raw API responses, retained and digested. A
+reconstructed day reflects the API as it was when that day was fetched, and an
+acquisition may span more than one API index state, which its per-day provenance
+shows. A change to an API record that leaves every count unchanged, a same-count
+content substitution, cannot be detected. The population does not rest on the API
+holding still: it is the pinned archive's, and every included archive record is joined
+and checked when its day is fetched, under D43's refusals.
+*Now — (2) a count that disagrees with its CSV.* For each UTC day the fetcher requests
+the same-day JSON count, then the CSV. The day is accepted only when the count equals
+the CSV's rows, the distinct Complaint IDs equal the rows, and every row's
+`date_received` falls on the requested UTC day. When the rows differ from the count,
+the count and the CSV are both requested again, exactly once, and the day is accepted
+only if the second pair agrees; a second disagreement refuses the acquisition, which
+is kept incomplete for diagnosis and resume. The stale side is never silently
+accepted. D47's per-request retry policy still applies beneath each of those requests.
+A Complaint ID repeated within a day's CSV, or a row outside the requested UTC day, is
+not a count disagreement: it refuses at once, without a source-level retry. For Task
+25 this rule takes the place of D44 (6)'s example of a transient body, a CSV whose row
+count differs from `hits.total`; a CSV that cannot be parsed stays a transient body
+under D44 (6) and D47. It is a CFPB source-level rule, not a change to D48 or to the
+generic acquisition layer.
+*Now — (3) archive pins across a resume.* The verified archive pins, the URL and
+SHA256 of each export used, are persisted in the acquisition's start state (D48 (2)),
+which is written once, before the first day, and never replaced. The exports
+themselves are retained in the acquisition directory, in a subdirectory Task 25
+defines under D46 (B3). On resume the same ZIPs must be present, and the SHA256 of
+each one's bytes must equal its recorded pin; a missing or changed ZIP refuses the
+resume. An archive is never re-pinned as a replacement, and archive discovery never
+selects a new export in place of a pinned one. The start state remains immutable.
+*Now — (4) a literal `None` in the Complaint ID column.* D43's and D44 (4)'s
+resolution of a literal `None` by `GET /{complaintId}` cannot apply when the Complaint
+ID itself is `None`. A row of a day's CSV whose Complaint ID cell is the literal
+`None` refuses the acquisition as an unusable API record: without a usable identifier
+it can be neither joined to a retained archive row nor classified, so whether it
+belongs to the reconstruction's join cannot be known. No by-ID request is attempted
+without a usable requested ID, and no identifier is invented.
+*Now — (5) the served `_index`.* The `_index` each day's count response serves is
+recorded as provenance only, and never used as a stable source identity. The stable
+API identity remains `SOURCE_API_VERSION = "cfpb-ccdb-v1"`, unchanged under D44 (3),
+and the acquisition kind remains `cfpb-archive-api-reconstruction-v1`.
+*Now — the acquisition record's `source_details` for CFPB.* It holds exactly these
+keys:
+
+| Key | Holds |
+|---|---|
+| `acquisition_kind` | `cfpb-archive-api-reconstruction-v1` |
+| `source_api_version` | `cfpb-ccdb-v1`, the adapter's constant |
+| `archive` | the reading-room page's URL, SHA256 and retrieval time; for each export used, its pin and D44's pinned facts (byte size, `Last-Modified` and the ETag as served, member name and size), its role (a population export, or boundary only), and the content observed in it (header, row count and `Date received` range); and the narrative-filter predicate |
+| `api` | the base URL, the endpoints and the fixed query parameters; and for each UTC day, the margin days included, its `hits_total`, `last_indexed` and `_index`. The raw-response digests are in that day's request records and are not repeated |
+| `join` | the key, stated as exact Complaint ID string equality, and the totals `matched`, `excluded`, `archive_only`, `api_only` and `resolved_by_id` |
+| `start` | the start state as persisted under (3): the archive pins, and the API snapshot taken before the first day |
+| `end` | the API snapshot taken once every day is fetched, provenance only |
+
+An API snapshot is one same-window JSON count request's `hits.total`,
+`_meta.last_indexed`, `_meta.last_updated`, `_meta.total_record_count` and served
+`_index`, with that request's record. Each day's slice `verification` holds counts
+only, as D46 requires: `api_count`, `api_rows`, `api_distinct_ids`, `included`,
+`matched`, `excluded`, `archive_only`, `api_only` and `resolved_by_id`. Generic
+request provenance is kept once, in each slice's `requests`, and nowhere else.
+*Now — the Task 25 source contract, as reconciled.*
+
+| Rule | Contract |
+|---|---|
+| Exports | #5 to #14 are the population exports; #15 is boundary only, used solely to classify records at the window's end; all are selected from the reading room's list, and never replaced under (3) |
+| Coverage | the archive's content, not a file name alone, establishes date coverage; every window day must appear in the verified content |
+| Archive header | exactly export #8's 16 columns |
+| Archive date | `Date received` is `YYYY-MM-DD` in every row |
+| Narratives | a row whose narrative is not a string that is non-blank after `strip()` is excluded and counted (D44 (1)) |
+| API day | per UTC day D, one CSV request (`format=csv`, `no_aggs=true`, `date_received_min=D`, `date_received_max=D`) and one same-day JSON count (`size=1`, `no_aggs=true`, the same bounds), whose `hits.total.relation` must be `eq`; and one margin day at each end of the window |
+| `None` | as D43 and D44 (4) for Product, Timely response?, Date received and Date sent to company; as (4) above for Complaint ID |
+| Pages | one `SourcePage` per window day, in the adapter's `hits.hits[]._source` shape with its six fields, its rows sorted by (`date_received`, `complaint_id`) and its date strings copied exactly as served; the margin days produce no page |
+| Time | no invented time of day, offset or timezone (D43) |
+
+*Now — what D49 does not change.* D43 and D44 stand as written, except for the two
+points (2) and (4) make explicit: the archive alone is authoritative for the
+narrative, and the API alone for `date_received` and `date_sent_to_company`; records
+join on exact Complaint ID string equality; `product` and `timely` must agree, and the
+archive's date must equal the UTC calendar date of the API's `date_received`; a
+missing or unusable API record refuses, and so does a returned Complaint ID that
+differs from the one requested; the narrative filter stands; API-only records are
+recorded and are not part of the narrative population; and completeness is scoped to
+the retained archive population, never to CFPB's historical narratives. D44's and
+D47's retry, pacing, redirect and timeout policy stands, and so does D48's generic
+acquisition implementation. D45 stays undecided and is untouched.
+*Now — D49's scope and what it authorizes.* D49 is specific to Task 25. No change to
+the generic acquisition API is needed: D48's start state and rewind remain available,
+Task 25 uses the start state under (3), and it never invokes a rewind for API drift.
+Task 25 is independent of D45. D49 authorizes no real acquisition, no download and no
+request to either source: the reconnaissance plan Task 25 requires before its parser
+is frozen, which downloads about 0.77 GB of archive exports, needs its own
+authorization, and no real ingestion follows from D49. **Phase 2 is not complete, and
+no document may describe it as complete.**
+*Scope:* the five Task 25 decisions above, CFPB's `source_details`, and the Task 25
+source contract as reconciled, recorded before Task 25 is implemented. **D1–D48 are
+unaltered.** Plan Task 25 is extended by reference, not rewritten. D49 changes no
+code, no test, no requirement and no CI.

@@ -747,6 +747,7 @@ Written to metadata as `feature_distribution_shift` and reproduced in the publis
 **Acceptance:** no test touches the network; the CFPB adapter and `SOURCE_API_VERSION` are unchanged; the acquisition record carries every provenance field D43 and D44 require.
 **Commit:** `feat: CFPB archive-API reconstruction fetcher`
 **Must not change:** as Task 23.
+**Corrected by D49:** CFPB uses a snapshot per day, not D48's count-recount-rewind model: each API day is verified when it is fetched, its snapshot and raw responses are kept as provenance, and no movement of the API's metadata triggers a recount or a rewind. A count that disagrees with its CSV is requested again together with the CSV, once. The verified archive pins live in the acquisition's start state, and a resume refuses a missing or changed export. A literal `None` in the Complaint ID column refuses, the served `_index` is provenance only, and D49 fixes the `source_details` keys and the source contract as reconciled. Task 25 changes no generic acquisition code, and no real acquisition is authorized.
 
 ## V. Dependencies between tasks
 
