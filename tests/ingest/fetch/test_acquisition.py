@@ -145,9 +145,9 @@ def test_the_acquisition_directory_is_per_source_and_window():
     )
 
 
-def test_nyc311_is_the_only_registered_fetcher_until_task_25():
-    """D48 (8): Task 24 registers NYC 311; CFPB stays unregistered until its own task."""
-    assert list(FETCHERS) == ["nyc311"]
+def test_each_source_registers_its_own_fetcher():
+    """D46 (B2), D48 (8): Task 24 registered NYC 311 and Task 25 registered CFPB."""
+    assert sorted(FETCHERS) == ["cfpb", "nyc311"]
 
 
 def test_the_commit_is_read_from_git_or_is_none(tmp_path):

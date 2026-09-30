@@ -1,4 +1,5 @@
-"""Where a source registers its fetcher (D46, D48 (8)). NYC 311 is registered (Task 24).
+"""Where a source registers its fetcher (D46, D48 (8)). NYC 311 (Task 24) and CFPB (Task 25)
+are registered.
 
 A factory takes the `FetchContext` ``ingest.cli.main`` builds for a ``--fetch`` run
 and returns a plain ``Fetcher``: a callable of ``(source, start, end)`` yielding
@@ -16,6 +17,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from ingest.fetch.cfpb import make_cfpb_fetcher
 from ingest.fetch.http import ClientIdentity, HttpClient
 from ingest.fetch.nyc311 import make_nyc311_fetcher
 
@@ -39,5 +41,5 @@ class FetchContext:
 
 FetcherFactory = Callable[[FetchContext], Callable[[str, date, date], Iterable[Any]]]
 
-FETCHERS: dict[str, FetcherFactory] = {"nyc311": make_nyc311_fetcher}
-"""Source slug -> fetcher factory. Task 24 registers NYC 311; Task 25 adds CFPB."""
+FETCHERS: dict[str, FetcherFactory] = {"cfpb": make_cfpb_fetcher, "nyc311": make_nyc311_fetcher}
+"""Source slug -> fetcher factory: Task 25 registered CFPB and Task 24 NYC 311."""

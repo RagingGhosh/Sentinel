@@ -12,10 +12,13 @@ neither is re-derived here.
 """
 
 import ast
+import csv
 import gzip
 import hashlib
+import io
 import json
 import re
+import zipfile
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -2480,7 +2483,7 @@ def test_an_acquisition_of_another_window_refuses(tmp_path, closed_network):
     assert not (tmp_path / "other-corpus").exists()
 
 
-@pytest.mark.parametrize("source", ["cfpb"])  # NYC 311 is registered by Task 24 (D48 (8))
+@pytest.mark.parametrize("source", ["cfpb", "nyc311"])
 def test_fetch_refuses_before_any_side_effect_while_no_fetcher_is_registered(
     tmp_path, monkeypatch, closed_network, source
 ):
@@ -2489,6 +2492,8 @@ def test_fetch_refuses_before_any_side_effect_while_no_fetcher_is_registered(
     def forbidden(*args, **kwargs):
         raise AssertionError("nothing may be built or run before the refusal")
 
+    # Tasks 24 and 25 registered both sources, so the refusal is reached by removing one.
+    monkeypatch.delitem(cli.FETCHERS, source)
     monkeypatch.chdir(tmp_path)
     for name in ("RequestsTransport", "HttpClient", "FetchContext", "current_commit", "ingest"):
         monkeypatch.setattr(cli, name, forbidden)
@@ -2676,3 +2681,175 @@ def test_a_completed_nyc311_acquisition_is_reused_offline_with_zero_requests(
     assert again.acquisition_id == first.acquisition_id
     assert again.corpus_id == first.corpus_id
     assert record_path(tmp_path / NYC_ACQUISITION).read_bytes() == record
+
+
+# --- Task 25: the registered CFPB fetcher behind --fetch (D49) ----------------------------
+#
+# FETCHERS is not patched: `--fetch` reaches the factory Task 25 registered, and the only
+# fake is the transport, answering the reading room, the files host and the API.
+
+CFPB_ACQUISITION = Path("data/acquisitions/cfpb/2024-01-01_2024-01-03")
+CFPB_ROOM = (
+    "https://www.consumerfinance.gov/foia-requests/foia-electronic-reading-room/"
+    "cfpb-consumer-complaint-database-narratives-archive/"
+)
+CFPB_API = "https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1/"
+CFPB_FILES = "https://files.consumerfinance.gov/f/documents/"
+CFPB_EXPORTS = {
+    "2023-12": "CCDB_Export_4_December_2023.zip",
+    "2024-01": "CCDB_Export_5_January_2024.zip",
+}
+CFPB_COMPLAINTS = [
+    ("20000001", "2023-12-31", "Before the window."),
+    ("20000002", "2024-01-01", "One."),
+    ("20000003", "2024-01-02", "Two."),
+    ("20000004", "2024-01-02", ""),
+    ("20000005", "2024-01-03", "Three."),
+    ("20000006", "2024-01-04", "After the window."),
+]
+CFPB_ARCHIVE_HEADER = [
+    "Date received", "Product", "Sub-product", "Issue", "Sub-issue",
+    "Consumer complaint narrative", "Company public response", "Company", "State",
+    "ZIP code", "Tags", "Submitted via", "Date sent to company",
+    "Company response to consumer", "Timely response?", "Complaint ID",
+]  # fmt: skip
+CFPB_API_HEADER = [
+    "Date received", "Product", "Sub-product", "Issue", "Sub-issue",
+    "Company public response", "Company", "State", "ZIP code", "Tags", "Submitted via",
+    "Date sent to company", "Company response to consumer", "Timely response?",
+    "Complaint ID",
+]  # fmt: skip
+
+
+def cfpb_csv(header, rows):
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\r\n")
+    writer.writerow(header)
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8")
+
+
+class CFPBTransport:
+    """The reading room, the files host and the API over CFPB_COMPLAINTS; 403 on `forbid`."""
+
+    identity = TEST_CLIENT
+
+    def __init__(self, forbid=()):
+        self.log = []
+        self.forbid = set(forbid)
+
+    def get(self, url, params, headers):
+        params = dict(params)
+        if url == CFPB_ROOM:
+            request = ("room",)
+            links = "".join(f'<a href="{CFPB_FILES}{n}">x</a>' for n in CFPB_EXPORTS.values())
+            body = links.encode()
+        elif url.startswith(CFPB_FILES):
+            request = ("zip", url[len(CFPB_FILES) :])
+            month = next(m for m, n in CFPB_EXPORTS.items() if n == request[1])
+            rows = [
+                [day, "Credit card", "", "Problem", "", story, "", "Bank", "NY", "10001", "",
+                 "Web", day, "Closed with explanation", "Yes", cid]
+                for cid, day, story in CFPB_COMPLAINTS if day.startswith(month)
+            ]  # fmt: skip
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w") as archive:
+                info = zipfile.ZipInfo(request[1].replace(".zip", ".csv"), (2026, 9, 13, 0, 0, 0))
+                archive.writestr(info, cfpb_csv(CFPB_ARCHIVE_HEADER, rows))
+            body = buffer.getvalue()
+        else:
+            assert url == CFPB_API, url
+            first, last = params["date_received_min"], params["date_received_max"]
+            found = [c for c in CFPB_COMPLAINTS if first <= c[1] <= last]
+            if params.get("format") == "csv":
+                request = ("csv", first)
+                body = cfpb_csv(CFPB_API_HEADER, [
+                    [f"{day}T10:00:00.000Z", "Credit card", "", "Problem", "None", "None", "Bank",
+                     "NY", "10001", "None", "Web", f"{day}T10:05:00.000Z",
+                     "Closed with explanation", "Yes", cid]
+                    for cid, day, _ in found
+                ])  # fmt: skip
+            else:
+                request = ("count", first, last)
+                total = {"value": len(found), "relation": "eq"}
+                hits = [{"_index": "complaint-public-v1", "_source": {}}] if found else []
+                meta = {"last_indexed": "2026-09-30T12:00:00-05:00"}
+                body = json.dumps({"_meta": meta, "hits": {"total": total, "hits": hits}}).encode()
+        self.log.append(request)
+        if request in self.forbid:
+            return Response(status=403, headers={}, body=b"")
+        return Response(status=200, headers={}, body=body)
+
+
+def cfpb_fetch(tmp_path, monkeypatch, transport):
+    import ingest.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "RequestsTransport", lambda: transport)
+    monkeypatch.setattr(cli, "HttpClient", quiet_client)
+    monkeypatch.setattr(cli, "current_commit", lambda: TEST_COMMIT)
+    arguments = ["--source", "cfpb", "--start", "2024-01-01", "--end", "2024-01-03"]
+    return main([*arguments, "--corpus-root", str(tmp_path / "corpus"), "--fetch"])
+
+
+def test_fetch_runs_the_registered_cfpb_fetcher_end_to_end(tmp_path, monkeypatch, closed_network):
+    from ingest.fetch.cfpb import make_cfpb_fetcher
+    from ingest.fetch.registry import FETCHERS
+
+    assert FETCHERS["cfpb"] is make_cfpb_fetcher
+    transport = CFPBTransport()
+    assert cfpb_fetch(tmp_path, monkeypatch, transport) == 0
+
+    assert transport.log[:3] == [
+        ("room",),
+        ("zip", CFPB_EXPORTS["2023-12"]),
+        ("zip", CFPB_EXPORTS["2024-01"]),
+    ]
+    data = record_path(tmp_path / CFPB_ACQUISITION).read_bytes()
+    record = json.loads(data)
+    assert record["source_details"]["acquisition_kind"] == "cfpb-archive-api-reconstruction-v1"
+    assert [entry["key"] for entry in record["slices"]] == [
+        "2023-12-31", "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"
+    ]  # fmt: skip
+    manifest = read_manifest("cfpb", root=tmp_path / "corpus")
+    assert manifest.acquisition_id == hashlib.sha256(data).hexdigest()
+    assert manifest.record_count == 3
+    _, records = load_corpus("cfpb", root=tmp_path / "corpus")
+    assert sorted(r.external_id for r in records) == ["20000002", "20000003", "20000005"]
+
+
+def test_a_403_under_cfpb_fetch_stops_at_once_and_a_rerun_resumes_from_the_pins(
+    tmp_path, monkeypatch, closed_network
+):
+    broken = CFPBTransport(forbid={("csv", "2024-01-02")})
+    with pytest.raises(FetchFailed, match="403"):
+        cfpb_fetch(tmp_path, monkeypatch, broken)
+    assert broken.log.count(("csv", "2024-01-02")) == 1, "never retried"
+    assert not record_path(tmp_path / CFPB_ACQUISITION).exists()
+
+    resumed = CFPBTransport()
+    assert cfpb_fetch(tmp_path, monkeypatch, resumed) == 0
+    assert resumed.log == [
+        ("count", "2024-01-02", "2024-01-02"),
+        ("csv", "2024-01-02"),
+        ("count", "2024-01-03", "2024-01-03"),
+        ("csv", "2024-01-03"),
+        ("count", "2024-01-04", "2024-01-04"),
+        ("csv", "2024-01-04"),
+        ("count", "2024-01-01", "2024-01-03"),
+    ], "no reading room, no export and no finished day is requested again"
+    assert read_manifest("cfpb", root=tmp_path / "corpus").record_count == 3
+
+
+def test_a_completed_cfpb_acquisition_is_reused_offline_with_zero_requests(
+    tmp_path, monkeypatch, closed_network
+):
+    assert cfpb_fetch(tmp_path, monkeypatch, CFPBTransport()) == 0
+    first = read_manifest("cfpb", root=tmp_path / "corpus")
+    record = record_path(tmp_path / CFPB_ACQUISITION).read_bytes()
+
+    assert cfpb_fetch(tmp_path, monkeypatch, OfflineTransport()) == 0
+    again = read_manifest("cfpb", root=tmp_path / "corpus")
+    assert again.acquisition_id == first.acquisition_id
+    assert again.corpus_id == first.corpus_id
+    assert record_path(tmp_path / CFPB_ACQUISITION).read_bytes() == record

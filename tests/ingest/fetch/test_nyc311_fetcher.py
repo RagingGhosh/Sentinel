@@ -906,8 +906,9 @@ def test_identical_responses_give_identical_pages_and_record_bytes(tmp_path):
 # --- AE-AH: registration, the context, the network and a completed acquisition ----------
 
 
-def test_nyc311_is_the_one_registered_fetcher():
-    assert FETCHERS == {"nyc311": make_nyc311_fetcher}
+def test_nyc311_is_registered_under_its_slug():
+    assert FETCHERS["nyc311"] is make_nyc311_fetcher
+    assert sorted(FETCHERS) == ["cfpb", "nyc311"], "CFPB registered by Task 25"
 
 
 @pytest.mark.parametrize(
@@ -922,7 +923,7 @@ def test_the_registry_and_the_fetcher_import_in_either_order_and_alone(first, th
         f"import sys, {first}, {then}\n"
         "from ingest.fetch.registry import FETCHERS\n"
         "from ingest.fetch.nyc311 import make_nyc311_fetcher\n"
-        "assert FETCHERS == {'nyc311': make_nyc311_fetcher}\n"
+        "assert FETCHERS['nyc311'] is make_nyc311_fetcher\n"
         "for name in ('ingest.cli', 'ingest.sources', 'scipy', 'pyarrow', 'django'):\n"
         "    assert name not in sys.modules, name\n"
     )
