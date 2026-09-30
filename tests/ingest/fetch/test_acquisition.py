@@ -26,6 +26,8 @@ from ingest.fetch.acquisition import (
     QUARANTINE_DIR,
     RECORD_NAME,
     REQUIRED_KEYS,
+    REWINDS_NAME,
+    START_NAME,
     Acquisition,
     AcquisitionError,
     AcquisitionIncomplete,
@@ -796,3 +798,666 @@ def test_a_writer_in_another_process_is_refused(tmp_path):
     assert child.returncode == 0
     with opened(directory):
         pass
+
+
+# --- D48 (2): the acquisition's start state ---------------------------------------------
+
+START_STATE = {"snapshot": {"rows_updated_at": 1790559478, "window_count": 7}, "note": "café"}
+
+
+class TickingClock:
+    """A clock that moves one second per reading, so re-fetched lines differ in time."""
+
+    def __init__(self):
+        self.moment = NOW
+
+    def __call__(self):
+        self.moment += timedelta(seconds=1)
+        return self.moment
+
+
+def journaled(directory, keys, *, shared=None):
+    """Open a fresh writer and journal one page per key; returns (acquisition, digests)."""
+    acquisition = opened(directory)
+    digests = {}
+    for index, key in enumerate(keys):
+        page = shared if shared is not None and index % 2 else [{"unique_key": key}]
+        digests[key] = cache(directory, page)
+        acquisition.record_slice(key, requests=[], pages=[digests[key]], verification={})
+    return acquisition, digests
+
+
+def test_a_new_acquisition_has_no_start_state(tmp_path):
+    with opened(tmp_path / "acq") as acquisition:
+        assert acquisition.start_state is None
+    assert not (tmp_path / "acq" / START_NAME).exists()
+
+
+def test_the_start_state_is_written_once_canonically_and_atomically(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    written = []
+    real = module._write_atomically
+
+    def recording(path, data):
+        written.append(path.name)
+        return real(path, data)
+
+    monkeypatch.setattr(module, "_write_atomically", recording)
+    with opened(directory) as acquisition:
+        acquisition.record_start_state(START_STATE)
+        assert acquisition.start_state == START_STATE
+    assert written == [START_NAME], "through the same-directory temporary file and os.replace"
+    assert (directory / START_NAME).read_bytes() == canonical_bytes(START_STATE)
+
+
+def test_the_start_state_survives_reopen_and_is_never_replaced(tmp_path):
+    directory = tmp_path / "acq"
+    with opened(directory) as acquisition:
+        acquisition.record_start_state(START_STATE)
+    data = (directory / START_NAME).read_bytes()
+    with opened(directory) as resumed:
+        assert resumed.start_state == START_STATE
+        with pytest.raises(AcquisitionError, match="start state"):
+            resumed.record_start_state({"snapshot": "later"})
+    assert (directory / START_NAME).read_bytes() == data
+
+
+def test_a_second_start_state_is_refused_in_the_same_writer(tmp_path):
+    with opened(tmp_path / "acq") as acquisition:
+        acquisition.record_start_state(START_STATE)
+        with pytest.raises(AcquisitionError, match="start state"):
+            acquisition.record_start_state(START_STATE)
+
+
+def test_a_start_state_cannot_be_recorded_after_close_or_completion(tmp_path):
+    acquisition = opened(tmp_path / "closed")
+    acquisition.close()
+    with pytest.raises(AcquisitionError, match="closed"):
+        acquisition.record_start_state(START_STATE)
+
+    with opened(tmp_path / "done") as done:
+        done.complete({})
+        with pytest.raises(AcquisitionError, match="immutable"):
+            done.record_start_state(START_STATE)
+    assert not (tmp_path / "done" / START_NAME).exists()
+
+
+def test_the_start_state_must_be_a_float_free_object(tmp_path):
+    with opened(tmp_path / "acq") as acquisition:
+        with pytest.raises(ValueError):
+            acquisition.record_start_state({"ratio": 0.5})
+        with pytest.raises(AcquisitionError, match="object"):
+            acquisition.record_start_state(["not", "an", "object"])
+    assert not (tmp_path / "acq" / START_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [b"{not json\n", b'{"b":1, "a":2}\n', b'{"a":1}', b"[1,2]\n", b'{"x":1.5}\n'],
+)
+def test_a_corrupt_start_state_refuses_the_open_and_changes_nothing(tmp_path, damage):
+    directory = tmp_path / "acq"
+    with opened(directory):
+        pass
+    (directory / START_NAME).write_bytes(damage)
+    with pytest.raises(AcquisitionIntegrityError, match=START_NAME):
+        opened(directory)
+    assert (directory / START_NAME).read_bytes() == damage
+    assert not (directory / LOCK_NAME).exists(), "the refused open released its lock"
+
+
+def test_the_start_state_is_not_a_journal_slice(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1"])
+    acquisition.record_start_state(START_STATE)
+    acquisition.close()
+    lines = journal_path(directory).read_bytes().splitlines()
+    assert [json.loads(line)["key"] for line in lines] == ["k1"]
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"]
+        assert resumed.quarantined == ()
+
+
+# --- D48 (1): rewinding from a completed slice ---------------------------------------------
+
+
+def reason(*changed, **extra):
+    return {"changed": list(changed), **extra}
+
+
+def test_a_rewind_truncates_the_journal_immediately_before_its_slice(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3", "k4"])
+    lines = journal_path(directory).read_bytes().splitlines(keepends=True)
+
+    removed = acquisition.rewind("k2", reason=reason("k2", "k4"))
+
+    assert removed == ("k2", "k3", "k4")
+    assert journal_path(directory).read_bytes() == lines[0], "no superseding line, only a cut"
+    assert list(acquisition.completed_slices()) == ["k1"]
+    assert (directory / SOURCE / f"{digests['k1']}.json.gz").exists()
+    for key in ("k2", "k3", "k4"):
+        assert not (directory / SOURCE / f"{digests[key]}.json.gz").exists()
+    acquisition.close()
+
+
+def test_a_rewind_after_a_reopen_cuts_where_the_journal_holds_its_line(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3"])
+    acquisition.close()
+    lines = journal_path(directory).read_bytes().splitlines(keepends=True)
+    with opened(directory) as resumed:
+        assert resumed.rewind("k2", reason=reason("k2")) == ("k2", "k3")
+        assert resumed.rewinds[0]["journal_offset"] == len(lines[0])
+    assert journal_path(directory).read_bytes() == lines[0]
+
+
+def test_rewound_pages_are_quarantined_by_their_bytes_and_never_deleted(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3"])
+    before = {
+        key: (directory / SOURCE / f"{digest}.json.gz").read_bytes()
+        for key, digest in digests.items()
+    }
+    acquisition.rewind("k2", reason=reason("k2"))
+    for key in ("k2", "k3"):
+        name = f"{digests[key]}.json.gz"
+        destination = directory / QUARANTINE_DIR / hashlib.sha256(before[key]).hexdigest() / name
+        assert destination.read_bytes() == before[key]
+    assert (directory / SOURCE / f"{digests['k1']}.json.gz").read_bytes() == before["k1"]
+    acquisition.close()
+
+
+def test_a_page_a_retained_slice_still_lists_stays_active(tmp_path):
+    directory = tmp_path / "acq"
+    shared = [{"unique_key": "shared"}]
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3", "k4"], shared=shared)
+    assert digests["k2"] == digests["k4"]
+    acquisition.rewind("k3", reason=reason("k3"))
+    assert (directory / SOURCE / f"{digests['k2']}.json.gz").exists(), "k2 still lists it"
+    assert not (directory / SOURCE / f"{digests['k3']}.json.gz").exists()
+    acquisition.close()
+
+
+def test_rewound_slices_can_be_journaled_again_with_unique_keys(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3"])
+    acquisition.rewind("k2", reason=reason("k2"))
+    for key in ("k2", "k3"):
+        fresh = cache(directory, [{"unique_key": key, "fetched": "again"}])
+        acquisition.record_slice(key, requests=[], pages=[fresh], verification={})
+    keys = [json.loads(line)["key"] for line in journal_path(directory).read_bytes().splitlines()]
+    assert keys == ["k1", "k2", "k3"]
+    acquisition.complete({})
+    verify_acquisition(directory, source=SOURCE, start=START, end=END)
+
+
+def test_the_removed_keys_come_back_in_journal_order(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k3", "k1", "k4", "k2"])
+    assert acquisition.rewind("k1", reason=reason("k1", "k2")) == ("k1", "k4", "k2")
+    assert list(acquisition.completed_slices()) == ["k3"]
+    acquisition.close()
+
+
+@pytest.mark.parametrize(
+    "bad_reason, message",
+    [
+        ({}, "changed"),
+        ({"changed": []}, "changed"),
+        ({"changed": ["k3"]}, "k2"),
+        ({"changed": ["k2", "k1"]}, "k1"),
+        ({"changed": ["k2", "k2"]}, "changed"),
+        ({"changed": ["k2", 7]}, "changed"),
+        ({"changed": ["k2"], "ratio": 0.5}, "floating"),
+    ],
+)
+def test_a_rewind_reason_names_its_changed_slices_from_the_rewind_point_on(
+    tmp_path, bad_reason, message
+):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3"])
+    journal = journal_path(directory).read_bytes()
+    with pytest.raises((AcquisitionError, ValueError), match=message):
+        acquisition.rewind("k2", reason=bad_reason)
+    assert journal_path(directory).read_bytes() == journal
+    assert not (directory / REWINDS_NAME).exists()
+    acquisition.close()
+
+
+def test_a_rewind_from_an_unknown_slice_is_refused(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1"])
+    with pytest.raises(AcquisitionError, match="k9"):
+        acquisition.rewind("k9", reason=reason("k9"))
+    assert not (directory / REWINDS_NAME).exists()
+    acquisition.close()
+
+
+def test_a_closed_or_completed_acquisition_cannot_rewind(tmp_path):
+    acquisition, _ = journaled(tmp_path / "closed", ["k1"])
+    acquisition.close()
+    with pytest.raises(AcquisitionError, match="closed"):
+        acquisition.rewind("k1", reason=reason("k1"))
+
+    done, _ = journaled(tmp_path / "done", ["k1"])
+    done.complete({})
+    record = record_path(tmp_path / "done").read_bytes()
+    with pytest.raises(AcquisitionError, match="immutable"):
+        done.rewind("k1", reason=reason("k1"))
+    assert record_path(tmp_path / "done").read_bytes() == record
+    assert not (tmp_path / "done" / REWINDS_NAME).exists()
+    done.close()
+
+
+def test_a_rewind_never_replaces_the_start_state(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2"])
+    acquisition.record_start_state(START_STATE)
+    acquisition.rewind("k1", reason=reason("k1"))
+    assert acquisition.start_state == START_STATE
+    acquisition.close()
+    with opened(directory) as resumed:
+        assert resumed.start_state == START_STATE
+
+
+# --- D48 (1, 4): the rewind history and the at-most-once rule ------------------------------
+
+
+def test_the_rewind_event_is_canonical_and_holds_what_d48_names(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3"])
+    offset = len(journal_path(directory).read_bytes().splitlines(keepends=True)[0])
+    line = journal_path(directory).read_bytes().splitlines(keepends=True)[1]
+    acquisition.rewind("k2", reason=reason("k2", why="drift"))
+    data = (directory / REWINDS_NAME).read_bytes()
+    event = json.loads(data)
+    assert canonical_bytes(event) == data
+    assert event == {
+        "at": "2026-09-28T12:00:00.000000+00:00",
+        "from_key": "k2",
+        "journal_offset": offset,
+        "line_sha256": hashlib.sha256(line).hexdigest(),
+        "reason": {"changed": ["k2"], "why": "drift"},
+        "removed": ["k2", "k3"],
+    }
+    assert acquisition.rewinds == (event,)
+    acquisition.close()
+
+
+def test_the_rewind_event_is_durable_before_the_journal_is_cut(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2"])
+    steps = []
+    real_append, real_truncate = module._append_line, module._truncate
+
+    def append(path, line):
+        steps.append(("append", path.name))
+        return real_append(path, line)
+
+    def truncate(path, size):
+        steps.append(("truncate", path.name, (directory / REWINDS_NAME).exists()))
+        return real_truncate(path, size)
+
+    monkeypatch.setattr(module, "_append_line", append)
+    monkeypatch.setattr(module, "_truncate", truncate)
+    acquisition.rewind("k2", reason=reason("k2"))
+    assert steps == [("append", REWINDS_NAME), ("truncate", JOURNAL_NAME, True)]
+    acquisition.close()
+
+
+def test_appending_a_line_is_flushed_to_disk_and_taken_back_if_it_fails(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    path = tmp_path / "log.jsonl"
+    synced = []
+    real_fsync = module.os.fsync
+    monkeypatch.setattr(module.os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    module._append_line(path, b'{"a":1}\n')
+    assert synced and path.read_bytes() == b'{"a":1}\n'
+
+    def disk_full(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module.os, "fsync", disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        module._append_line(path, b'{"b":2}\n')
+    assert path.read_bytes() == b'{"a":1}\n'
+
+
+def test_a_cut_is_flushed_to_disk(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    path = tmp_path / "log.jsonl"
+    path.write_bytes(b'{"a":1}\n{"b":2}\n')
+    synced = []
+    real_fsync = module.os.fsync
+    monkeypatch.setattr(module.os, "fsync", lambda fd: synced.append(fd) or real_fsync(fd))
+    module._truncate(path, 8)
+    assert synced and path.read_bytes() == b'{"a":1}\n'
+
+
+def test_a_failed_event_append_leaves_everything_as_it_was(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2"])
+    journal = journal_path(directory).read_bytes()
+
+    def fails(path, line):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module, "_append_line", fails)
+    with pytest.raises(OSError):
+        acquisition.rewind("k2", reason=reason("k2"))
+    assert journal_path(directory).read_bytes() == journal
+    assert list(acquisition.completed_slices()) == ["k1", "k2"]
+    assert acquisition.rewinds == ()
+    acquisition.close()
+
+
+def test_rewind_events_keep_their_order_and_survive_reopen(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3", "k4"])
+    acquisition.rewind("k4", reason=reason("k4"))
+    acquisition.rewind("k2", reason=reason("k2"))
+    acquisition.close()
+    with opened(directory) as resumed:
+        assert [event["from_key"] for event in resumed.rewinds] == ["k4", "k2"]
+        assert list(resumed.completed_slices()) == ["k1"]
+
+
+def test_a_slice_already_changed_once_cannot_be_rewound_again(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3"])
+    acquisition.rewind("k2", reason=reason("k2", "k3"))
+    for key in ("k2", "k3"):
+        fresh = cache(directory, [{"unique_key": key, "fetched": "again"}])
+        acquisition.record_slice(key, requests=[], pages=[fresh], verification={})
+    journal = journal_path(directory).read_bytes()
+    events = (directory / REWINDS_NAME).read_bytes()
+
+    with pytest.raises(AcquisitionError, match="k3"):
+        acquisition.rewind("k3", reason=reason("k3"))
+    with pytest.raises(AcquisitionError, match="k2"):
+        acquisition.rewind("k2", reason=reason("k2"))
+    assert journal_path(directory).read_bytes() == journal
+    assert (directory / REWINDS_NAME).read_bytes() == events
+    acquisition.close()
+
+
+def test_the_at_most_once_rule_survives_a_resume(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3"])
+    acquisition.rewind("k2", reason=reason("k2"))
+    for key in ("k2", "k3"):
+        fresh = cache(directory, [{"unique_key": key, "fetched": "again"}])
+        acquisition.record_slice(key, requests=[], pages=[fresh], verification={})
+    acquisition.close()
+    events = (directory / REWINDS_NAME).read_bytes()
+    with opened(directory) as resumed:
+        # A rewind from k1 would remove k2, found changed once already, a second time.
+        for from_key in ("k2", "k1"):
+            with pytest.raises(AcquisitionError, match="k2"):
+                resumed.rewind(from_key, reason=reason(from_key))
+        assert (directory / REWINDS_NAME).read_bytes() == events
+        assert list(resumed.completed_slices()) == ["k1", "k2", "k3"]
+        # k3 was removed by that rewind but never found changed, so it may be.
+        assert resumed.rewind("k3", reason=reason("k3")) == ("k3",)
+
+
+def test_a_page_quarantined_again_lands_on_itself(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3"])
+    path = directory / SOURCE / f"{digests['k3']}.json.gz"
+    data = path.read_bytes()
+    acquisition.rewind("k2", reason=reason("k2"))
+    fresh = cache(directory, [{"unique_key": "k2", "fetched": "again"}])
+    acquisition.record_slice("k2", requests=[], pages=[fresh], verification={})
+    path.write_bytes(data)
+    acquisition.record_slice("k3", requests=[], pages=[digests["k3"]], verification={})
+    acquisition.rewind("k3", reason=reason("k3"))
+    destination = directory / QUARANTINE_DIR / hashlib.sha256(data).hexdigest() / path.name
+    assert destination.read_bytes() == data
+    assert len(quarantined_files(directory)) == 2, "k2's first page, and k3's page once"
+    acquisition.close()
+
+
+def test_a_trailing_partial_event_is_removed_but_a_damaged_one_refuses(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2"])
+    acquisition.rewind("k2", reason=reason("k2"))
+    acquisition.close()
+    whole = (directory / REWINDS_NAME).read_bytes()
+
+    with open(directory / REWINDS_NAME, "ab") as stream:
+        stream.write(b'{"at":"2026')
+    with opened(directory) as resumed:
+        assert len(resumed.rewinds) == 1
+    assert (directory / REWINDS_NAME).read_bytes() == whole
+
+    (directory / REWINDS_NAME).write_bytes(b'{"from_key":"k2"}\n' + whole)
+    with pytest.raises(AcquisitionIntegrityError, match=REWINDS_NAME):
+        opened(directory)
+
+
+EVENT_DAMAGE = {
+    "not utf-8": lambda event: b"\xff" + canonical_bytes(event),
+    "not canonical": lambda event: json.dumps(event).encode() + b"\n",
+    "not an object": lambda event: canonical_bytes([event]),
+    "offset a string": lambda event: canonical_bytes({**event, "journal_offset": "0"}),
+    "offset a boolean": lambda event: canonical_bytes({**event, "journal_offset": True}),
+    "offset negative": lambda event: canonical_bytes({**event, "journal_offset": -1}),
+    "digest too short": lambda event: canonical_bytes({**event, "line_sha256": "0" * 63}),
+    "digest a number": lambda event: canonical_bytes({**event, "line_sha256": 7}),
+    "reason a list": lambda event: canonical_bytes({**event, "reason": ["k2"]}),
+    "changed a string": lambda event: canonical_bytes({**event, "reason": {"changed": "k2"}}),
+    "changed empty": lambda event: canonical_bytes({**event, "reason": {"changed": []}}),
+    "changed a number": lambda event: canonical_bytes({**event, "reason": {"changed": [7]}}),
+}
+
+
+@pytest.mark.parametrize("damage", EVENT_DAMAGE.values(), ids=EVENT_DAMAGE.keys())
+def test_an_event_an_open_cannot_rely_on_refuses_the_open(tmp_path, damage):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2"])
+    acquisition.rewind("k2", reason=reason("k2"))
+    acquisition.close()
+    event = json.loads((directory / REWINDS_NAME).read_bytes())
+    (directory / REWINDS_NAME).write_bytes(damage(event))
+    journal = journal_path(directory).read_bytes()
+    with pytest.raises(AcquisitionIntegrityError, match=REWINDS_NAME):
+        opened(directory)
+    assert journal_path(directory).read_bytes() == journal
+    assert not (directory / LOCK_NAME).exists(), "the refused open released its lock"
+
+
+# --- D48 (1): an interrupted rewind is completed on the next open ---------------------------
+
+
+def test_a_rewind_interrupted_after_its_event_is_completed_on_reopen(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3"])
+    first_line = journal_path(directory).read_bytes().splitlines(keepends=True)[0]
+
+    def killed(path, size):
+        raise RuntimeError("killed before the cut")
+
+    monkeypatch.setattr(module, "_truncate", killed)
+    with pytest.raises(RuntimeError):
+        acquisition.rewind("k2", reason=reason("k2"))
+    monkeypatch.undo()
+    with pytest.raises(AcquisitionError, match="closed"):
+        acquisition.complete({})
+    assert not (directory / LOCK_NAME).exists(), "only an open completes the rewind"
+    assert not record_path(directory).exists()
+    events = (directory / REWINDS_NAME).read_bytes()
+    assert len(events.splitlines()) == 1
+    assert len(journal_path(directory).read_bytes().splitlines()) == 3, "not yet cut"
+
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"]
+        assert journal_path(directory).read_bytes() == first_line
+        assert (directory / REWINDS_NAME).read_bytes() == events, "the event is not repeated"
+        moved = {path.name for path in resumed.quarantined}
+        assert moved == {f"{digests[k]}.json.gz" for k in ("k2", "k3")}
+    with opened(directory) as again:
+        assert list(again.completed_slices()) == ["k1"]
+        assert again.quarantined == ()
+
+
+def test_only_the_latest_rewind_is_completed_on_reopen(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3"])
+    acquisition.rewind("k3", reason=reason("k3"))
+
+    def killed(path, size):
+        raise RuntimeError("killed before the cut")
+
+    monkeypatch.setattr(module, "_truncate", killed)
+    with pytest.raises(RuntimeError):
+        acquisition.rewind("k2", reason=reason("k2"))
+    monkeypatch.undo()
+
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"]
+        assert [event["from_key"] for event in resumed.rewinds] == ["k3", "k2"]
+
+
+def test_a_rewind_killed_right_after_its_cut_is_finished_on_reopen(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3"])
+    first_line = journal_path(directory).read_bytes().splitlines(keepends=True)[0]
+    real = module._truncate
+
+    def cut_then_killed(path, size):
+        real(path, size)
+        raise RuntimeError("killed after the cut")
+
+    monkeypatch.setattr(module, "_truncate", cut_then_killed)
+    with pytest.raises(RuntimeError):
+        acquisition.rewind("k2", reason=reason("k2"))
+    monkeypatch.undo()
+    with pytest.raises(AcquisitionError, match="closed"):
+        acquisition.record_slice("k2", requests=[], pages=[], verification={})
+    assert journal_path(directory).read_bytes() == first_line
+    assert not quarantined_files(directory), "no page was moved before the kill"
+
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"]
+        assert journal_path(directory).read_bytes() == first_line
+        assert len(resumed.rewinds) == 1
+        moved = {path.name for path in resumed.quarantined}
+        assert moved == {f"{digests[k]}.json.gz" for k in ("k2", "k3")}
+
+
+def test_a_rewind_interrupted_before_its_quarantine_is_finished_on_reopen(tmp_path, monkeypatch):
+    import ingest.fetch.acquisition as module
+
+    directory = tmp_path / "acq"
+    acquisition, digests = journaled(directory, ["k1", "k2", "k3"])
+    moves = []
+    real = module._quarantine_page
+
+    def killed_after_one(directory_, path):
+        if moves:
+            raise RuntimeError("killed mid-quarantine")
+        moves.append(path.name)
+        return real(directory_, path)
+
+    monkeypatch.setattr(module, "_quarantine_page", killed_after_one)
+    with pytest.raises(RuntimeError):
+        acquisition.rewind("k2", reason=reason("k2"))
+    monkeypatch.undo()
+    assert not (directory / LOCK_NAME).exists(), "the interrupted writer let go"
+
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1"]
+        assert len(resumed.rewinds) == 1
+    quarantined = sorted(p.name for p in (directory / QUARANTINE_DIR).rglob("*.json.gz"))
+    assert quarantined == sorted(f"{digests[k]}.json.gz" for k in ("k2", "k3"))
+    assert (directory / SOURCE / f"{digests['k1']}.json.gz").exists()
+
+
+def test_a_completed_rewind_is_not_repeated_once_its_slices_are_fetched_again(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition = opened(directory, now=TickingClock())
+    for key in ("k1", "k2", "k3"):
+        acquisition.record_slice(
+            key, requests=[request(1)], pages=[cache(directory, [{"k": key}])], verification={}
+        )
+    acquisition.rewind("k2", reason=reason("k2"))
+    for key in ("k2", "k3"):
+        acquisition.record_slice(
+            key,
+            requests=[request(1, "2026-09-28T13:00:00.000000+00:00")],
+            pages=[cache(directory, [{"k": key}])],
+            verification={},
+        )
+    acquisition.close()
+    journal = journal_path(directory).read_bytes()
+    with opened(directory) as resumed:
+        assert list(resumed.completed_slices()) == ["k1", "k2", "k3"]
+    assert journal_path(directory).read_bytes() == journal
+
+
+# --- D48 (1, 2): completion carries the rewinds and checks the start state -----------------
+
+
+def test_the_record_carries_an_empty_rewind_list_when_none_occurred(tmp_path):
+    directory = tmp_path / "acq"
+    complete_three_slices(directory)
+    record = json.loads(record_path(directory).read_bytes())
+    assert record["rewinds"] == []
+
+
+def test_the_record_carries_every_rewind_in_order(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1", "k2", "k3"])
+    acquisition.rewind("k3", reason=reason("k3"))
+    acquisition.rewind("k2", reason=reason("k2"))
+    for key in ("k2", "k3"):
+        fresh = cache(directory, [{"unique_key": key, "fetched": "again"}])
+        acquisition.record_slice(key, requests=[], pages=[fresh], verification={})
+    acquisition.complete({})
+    acquisition.close()
+    record = json.loads(record_path(directory).read_bytes())
+    assert [event["from_key"] for event in record["rewinds"]] == ["k3", "k2"]
+    assert record["rewinds"] == list(acquisition.rewinds)
+    assert record["record_version"] == 1
+    verify_acquisition(directory, source=SOURCE, start=START, end=END)
+
+
+def test_completion_requires_the_start_state_in_source_details(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1"])
+    acquisition.record_start_state(START_STATE)
+    for details in ({}, {"start": {"snapshot": "different"}}):
+        with pytest.raises(AcquisitionIntegrityError, match="start"):
+            acquisition.complete(details)
+        assert not record_path(directory).exists()
+    acquisition.complete({"start": START_STATE, "end": {"later": True}})
+    acquisition.close()
+    record = json.loads(record_path(directory).read_bytes())
+    assert record["source_details"]["start"] == START_STATE
+    verify_acquisition(directory, source=SOURCE, start=START, end=END)
+
+
+def test_without_a_start_state_completion_checks_nothing_about_it(tmp_path):
+    directory = tmp_path / "acq"
+    acquisition, _ = journaled(directory, ["k1"])
+    acquisition.complete({"start": {"anything": 1}})
+    acquisition.close()
+    assert json.loads(record_path(directory).read_bytes())["source_details"] == {
+        "start": {"anything": 1}
+    }
