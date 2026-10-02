@@ -4471,3 +4471,222 @@ no document may describe it as complete.**
 source contract as reconciled, recorded before Task 25 is implemented. **D1–D48 are
 unaltered.** Plan Task 25 is extended by reference, not rewritten. D49 changes no
 code, no test, no requirement and no CI.
+
+**D50 — D45 decided: every otherwise-valid NYC 311 row in one of D45's three classes is
+excluded from the corpus, never silently, typed by kind and counted by kind and New York
+civil year in manifest version 4; a row with any other refusal is still refused, the
+fetcher is unchanged, and the implementation is plan Task 26, which is authorized
+separately (addendum §1.1, §2.3, §2.4, §2.5, §3.2, §4.2, §6, §7; plan Tasks 6, 8, 24, 26;
+D21, D23, D24, D26, D27, D37, D44, D45, D46, D47, D48).**
+*Was:* D45 measured on 2026-09-28, by SoQL aggregate queries against `erm2-nwe9` and
+counts only, 47,844 rows with a null `descriptor`, 1,904 with `closed_date` before
+`created_date`, and between 1,651 and 3,107 daylight-saving-edge rows among the
+7,111,810 in D37.2's window. It recorded that one such row refuses every real NYC 311
+ingestion under §2.5 and the code, offered for each class (a) retaining the refusal or
+(b) excluding the typed rows, counted and reported, and chose neither. D48 (9) kept the
+fetcher passing these rows through untouched. A review of D45 found four points option
+(b) leaves open: which refusal a row with several problems raises, where the exclusion
+is made, where the counts are recorded, and which year an excluded row counts under.
+*Now — the decision.* **Option (b) for all three classes:** `MissingDescriptor`;
+`NegativeResolutionTime`; and `AmbiguousLocalTime` and `NonexistentLocalTime` on either
+timestamp. Only an otherwise-valid row is excluded: a row with any refusal outside
+those classes is refused, exactly as today. D45's counts are a snapshot taken by
+predicate; no corpus records them, and each run records its own under (4).
+*Now — (1) the exclusion kinds.* Each class is the complete existing adapter error
+class, and the two daylight-saving errors are counted separately for each timestamp:
+
+| Kind | Excluded when |
+|---|---|
+| `MissingDescriptor` | `descriptor` is absent, null or not text; an empty or whitespace-only descriptor is valid and kept |
+| `AmbiguousLocalTime:created_date` | `created_date`'s wall clock falls in an autumn fold |
+| `NonexistentLocalTime:created_date` | `created_date`'s wall clock falls in a spring gap |
+| `AmbiguousLocalTime:closed_date` | `closed_date`'s wall clock falls in an autumn fold |
+| `NonexistentLocalTime:closed_date` | `closed_date`'s wall clock falls in a spring gap |
+| `NegativeResolutionTime` | the closed instant precedes the created instant; a zero duration is kept |
+
+The 47,844 rows D45 measured are null descriptors. The `MissingDescriptor` kind also
+covers every other row that raises that existing typed error, an absent key or a value
+that is not text, although reconnaissance observed no such value; the class is not
+split.
+*Now — (2) precedence.* A row is classified in two stages. **Stage one** applies every
+check outside the D45 classes, in the adapter's existing relative order: `unique_key`;
+`complaint_type`; `created_date`, which must be present, ISO-8601 and without an
+offset; and `closed_date`, which is absent or null for an open request and otherwise
+must be present, ISO-8601 and without an offset. A failing check raises exactly the
+existing typed error, `MissingField`, and a row that is not a mapping fails as it does
+today. A row that fails stage one refuses the run before any write, whatever D45
+condition it also has. **Stage two** applies the D45 conditions in the adapter's
+existing relative order — the descriptor, then a `created_date` edge, then a
+`closed_date` edge, then a negative duration — and the first that applies is the row's
+single kind. The kinds are not evaluated independently: a duration is undefined when
+either timestamp has no instant; D45 (b) speaks of rows raising exactly one class's
+typed adapter error, and a row raises one; and single attribution makes the counts sum
+to the rows excluded. Per-kind counts are therefore attributions, not prevalences: a
+fold row with a null descriptor counts only as `MissingDescriptor`. For a row with a
+problem outside the D45 classes the run's outcome is unchanged: it is refused before
+any write. Only the error reported for such a row that also has a D45 condition
+changes, from the D45 error the adapter meets first today to the error outside them,
+and that change is what keeps every other refusal from being weakened.
+*Now — (3) where the exclusion is made.* The NYC 311 adapter gains a pure function
+beside `normalize`, `classify_row(row)`, which returns either the
+`(CorpusRecord, NYC311Outcome)` pair `normalize` returns or a frozen
+`Exclusion(external_id, kind, created_civil_date)`. `ingest()` in `ingest/cli.py` holds
+the policy: for NYC 311 only, it calls `classify_row`, keeps the pairs and counts the
+exclusions. `normalize`, its typed errors, `NYC311Adapter` and the `SourceAdapter`
+protocol are unchanged, so `normalize` still raises for every D45 row and plan Task 6's
+tests stand. The boundary holds four properties. *Adapter purity:* classification is a
+pure function of one row, with no I/O, clock, window or counter; the policy and the
+counting live in the command line. *One validator:* a command line that only caught
+`normalize`'s errors could not see the checks `normalize` never reached after its first
+error, so it could not honour (2) without duplicating the adapter's validation.
+*Fetcher pass-through:* nothing under `ingest/fetch/` changes, rows are cached exactly
+as served (D48 (9)), and the fetch layer filters nothing. *Acquisition guarantees:*
+classification reads only pages `verify_acquisition` has passed, and the acquisition
+record, its slices, its page digests and `acquisition_id` are unchanged and hold no
+exclusion count. CFPB is untouched, and D44 (1)'s narrative filter remains CFPB's own.
+*Now — (4) provenance: manifest version 4.* Manifest version 3 has no field for
+exclusions, and the acquisition record is immutable and written by the fetcher before
+normalization. D50 authorizes the smallest change: `MANIFEST_VERSION` becomes 4, and
+the manifest gains one field, `excluded_records`, mapping each kind to a mapping from
+New York civil year to count, serialized as `per_year_counts` is. For NYC 311 it holds
+exactly the six kinds, each listing only years with a count of at least 1, and an
+empty mapping when there are none; for CFPB it is an empty mapping, since no kind
+applies. `ingest()` passes the counts to `build_manifest`; they are never derived from
+disk, where no excluded row is. They cover every row in the window before `--limit`
+truncates anything, as D24 requires of the roster. The field is required in a version
+4 document and validated on read; a version 1, 2 or 3 manifest reads it as an empty
+mapping, which is truthful, because under those versions such a row refused the run.
+`schema_version` stays 1, and `compute_corpus_id` and what it covers are unchanged.
+The counts can be recomputed: the pure classifier over an acquisition's immutable
+pages yields the same rows. The manifest is the report of record. The command line
+prints nothing today and D50 adds no other channel; the README and the
+reproducibility guide report the counts only when real ingestion is documented (D44).
+*Now — (5) the year.* An excluded row counts under the year of its published
+`created_date` literal, read as a New York civil date (§2.4, D21), for all six kinds,
+including a `closed_date` edge and a negative duration. The year always exists,
+because stage one has validated `created_date`'s form before any D45 condition is
+applied, and it needs no UTC instant: a `created_date` edge has none, and none is
+invented. `per_year_counts` counts kept records by the UTC year of `submitted_at`, and
+the two years differ for a record created on 31 December after 19:00 New York time, so
+reconciliation is by window total, not by year: for an unbounded run, `record_count`
+plus the sum of `excluded_records` equals the rows in the window.
+*Now — (6) the window, and what still refuses.* An excluded row is in the window when
+its New York civil date lies within the run's inclusive civil dates, §2.5's frame; for
+a row that normalizes this is equivalent to the instant comparison, because New York
+midnight is never a daylight-saving transition. A row outside the window is outside
+the population, whether it would normalize or not, and is not counted; in an
+acquisition every row is in the window by construction. These still refuse before any
+write, unchanged: `InvalidDateRange`, `InvalidLimit`, `AuthoritativeCorpusExists`,
+every fetch and acquisition refusal (D44, D46, D47, D48), every stage-one error, and
+CFPB's refusals, `MissingNarrative` among them. `EmptyWindow` is raised when every
+in-window row is excluded, and its message also states the exclusion counts.
+`DuplicateExternalId` counts the `unique_key` of every in-window row, kept or
+excluded, so an exclusion cannot hide a duplicate. The timestamp diagnostic and the
+outcome sidecar are built from kept records only.
+*Now — (7) the corpus.* For a window, the NYC 311 corpus is all source rows that
+successfully normalize after excluding exactly the authorized D45 classes and still
+satisfy every other refusal and invariant: every in-window row of the verified
+acquisition, or of the raw cache when no acquisition is given, that `normalize`
+accepts, provided every row passes stage one and every other refusal passes. Each
+excluded in-window row is counted in the manifest by kind and year. The whole row is
+excluded, record and outcome, for every kind, including a `closed_date` edge or a
+negative duration whose record fields are themselves valid: D45 offers no option that
+keeps a record without its outcome. Open requests remain in the corpus (D37.3).
+*Now — (8) research consequences.* The retained population lacks rows without a text
+descriptor, rows with an edge-hour timestamp and closed rows with a negative duration,
+so every later NYC 311 quantity is computed over it: resolution-time distributions
+(§4.2, and §7's figures, which were measured before any exclusion); complaint-type
+aggregates (§6.3); breach rates (D37.7); the per-type p75 thresholds and their
+fallback (§7); `text_length` and the hour and weekday features (§3.2), and §2.3's
+histogram; the temporal split's counts (§6.1); and the risk model's training and
+evaluation population (D37), with the NYC 311 side of §5.4's probe. The exclusions are
+not random. A `closed_date` edge and a negative duration are selected on the outcome;
+a `created_date` edge removes particular local hours on four dates; and how null
+descriptors fall across complaint types was not measured. NYC 311 has no locked
+roster, so a type whose rows were all excluded would leave `label_roster` without any
+refusal, and the manifest counts exclusions by kind and year, not by type. The
+2026-09-28 snapshot puts the three classes at 47,844 to 52,855 rows, 0.67% to 0.74% of
+the window; each run records its own. Every published NYC 311 figure must state that it
+is computed over D50's population and cite the manifest's counts.
+*Now — (9) the test contract, written first by plan Task 26.* In
+`tests/ingest/test_nyc311_normalize.py`, additions only, every existing test
+unchanged: (T1) every row `normalize` accepts yields the identical pair from
+`classify_row` — fixture rows, an empty descriptor, an open request, a zero duration
+and an interval spanning a transition; (T2) a null descriptor, an absent descriptor
+key and a non-text descriptor are `MissingDescriptor`, and empty and whitespace-only
+descriptors are kept; (T3) `created_date` at 01:00:00.000, 01:30 and 01:59:59.999 on
+2024-11-03 and 2025-11-02 is `AmbiguousLocalTime:created_date`, at 02:00:00.000, 02:30
+and 02:59:59.999 on 2024-03-10 and 2025-03-09 is `NonexistentLocalTime:created_date`,
+and 00:59:59.999, 02:00:00.000 on a fold day and 03:00:00.000 on a gap day are kept;
+(T4) the same edges on `closed_date`, including the 2026-03-08 gap, give the
+`closed_date` kinds, counted under `created_date`'s year; (T5) a close one second
+before the open is `NegativeResolutionTime`, a zero duration is kept, and the
+comparison is between instants; (T6) overlaps take the first applicable kind — a null
+descriptor with a `created_date` fold is `MissingDescriptor`, a `created_date` fold
+with a `closed_date` gap is `AmbiguousLocalTime:created_date`, a `closed_date` fold
+whose wall clock precedes `created_date` is `AmbiguousLocalTime:closed_date`, and a
+null descriptor with a negative duration is `MissingDescriptor`; (T7) each check
+outside the D45 classes — `unique_key` absent, blank or not text; `complaint_type`
+absent or not text; `created_date` absent, blank, not ISO-8601 or carrying an offset;
+`closed_date` blank, not ISO-8601 or carrying an offset — combined with each kind
+raises the same `MissingField` the check raises alone, and a row that is not a mapping
+fails as it does under `normalize`; (T8) a null-descriptor row created at
+2024-12-31T23:30:00.000 counts under 2024, though its UTC instant is in 2025; (T9)
+`normalize` still raises each D45 error for every D45 row of T2 to T6; (T10)
+`classify_row` is deterministic, does not mutate its input, touches no network,
+filesystem or clock, does not filter by window and imports no new module, as
+`normalize`'s tests assert. In `tests/ingest/test_cli.py`: (C1) a raw-cache NYC 311 run
+holding valid rows and one row of each kind succeeds, writes only the valid records and
+outcomes, and records exact `excluded_records`, with `record_count` plus the excluded
+sum equal to the rows; (C2) each check outside the D45 classes, alone and combined
+with a kind, refuses before any write and leaves an existing corpus byte-identical;
+(C3) a window whose every row is excluded raises `EmptyWindow` naming the counts and
+writes nothing; (C4) under `--limit` the counts cover the whole window; (C5) a kept
+row and an excluded row sharing a `unique_key` raise `DuplicateExternalId`; (C6) a row
+of a kind outside the window is neither counted nor refused, while a row with another
+refusal outside the window still refuses; (C7) a CFPB manifest's `excluded_records` is
+empty, and a row the CFPB adapter refuses still refuses the run; (C8) a `--fetch` run
+with the network closed and a fake transport serving rows of each kind caches its
+pages exactly as served, its acquisition record holds no exclusion data and its digest
+is the manifest's `acquisition_id`, the slices' `rows` sum to `record_count` plus the
+excluded sum, and a rerun makes no request and yields the same counts and `corpus_id`.
+In `tests/ingest/test_manifest.py`: (M1) a new write emits version 4 with
+`excluded_records`, the round trip is exact, and serialization is deterministic; (M2)
+version 1, 2 and 3 documents read it as an empty mapping; (M3) a version 4 document
+without it raises `KeyError` naming it; (M4) malformed contents are refused — an
+unknown kind, a missing NYC 311 kind, a year that is not an integer, a count below 1,
+or a non-empty mapping for CFPB; (M5) `corpus_id` ignores `excluded_records`. The nine
+existing assertions that pin manifest version 3 — the same nine D46 changed from 2 to
+3, seven in `tests/ingest/test_manifest.py` and two in `tests/ingest/test_cli.py` —
+assert 4, and no other existing assertion changes. Every test under
+`tests/ingest/fetch/`, among them the test that rows reach the cache exactly as served,
+`tests/ingest/test_cfpb_normalize.py` and `tests/test_phase2_integration.py` stay
+unchanged and passing, and no test touches the network.
+*Now — (10) history.* D45 stays unaltered as the historical record of the open
+question, and **D1–D49 are unaltered**. §2.4, §2.5, §4.2 and plan Task 6 are not
+edited; D50 is their record, as D44 was for its §2.5 refusal and its manifest version.
+Task 6's "the reconnaissance measured zero negatives" and §4.2's "no negative
+durations observed" are superseded by the 1,904 rows with `closed_date` before
+`created_date` measured on 2026-09-28; that is a wall-clock predicate, so the
+adapter's own count is at most 1,904. §2.4's "a negligible loss" now describes the
+run's effect literally; its "Reject" stands at the adapter, which still raises; and
+its reason that a spring-gap value is "worth stopping for" is overridden at the run
+level, where a gap row is excluded and counted under its own kind instead. Task 26
+rewords the adapter's statements that a negative duration is never dropped and that
+both daylight-saving edges are refused, to say that `normalize` never repairs a row
+while the run excludes and counts it under D50.
+*Now — what D50 authorizes, and what it does not.* D50 decides the policy above and
+records plan Task 26, and nothing more. **Authorization to implement Task 26 is
+separate from this D50 documentation decision.** D50 does not authorize implementing
+Task 26 or any change to code, tests or manifests; real ingestion; any request to, or
+download from, either source; model training; threshold fitting; README metrics; or
+any Phase 3 wiring. D42's deferred items stay open. **Phase 2 is not complete, and no
+document may describe it as complete.**
+*Now — the next dependency.* D50; then plan Task 26, test-first, under its own
+authorization; then the hardware and resource gate, at which D44's estimated
+full-window normalization peak of 4 to 6 GB per source is measured on the first real
+run; then a separately authorized real NYC 311 acquisition and run. CFPB's real
+ingestion does not depend on D50.
+*Scope:* the treatment of D45's three NYC 311 row classes, manifest version 4's one
+field, and plan Task 26. **D1–D49 are unaltered.** D50 changes no code, no test, no
+requirement and no CI.
