@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import zipfile
+from array import array
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -576,6 +577,56 @@ def test_an_archive_complaint_id_that_is_not_a_plain_decimal_refuses(tmp_path, c
     rows[2][-1] = cid
     transport.zips[JANUARY] = january(rows)
     refuses_before_any_day(tmp_path, transport, ArchiveContentError, "Complaint ID")
+
+
+@pytest.mark.parametrize("cid", [str(1 << 41), str(1 << 63), str(1 << 64)])
+def test_an_archive_complaint_id_beyond_the_index_refuses(tmp_path, cid):
+    """The index key is a non-negative signed 64-bit integer, so an ID must be below 2**41."""
+    transport = FakeCFPB()
+    rows = january_rows(transport)
+    rows[2][-1] = cid
+    transport.zips[JANUARY] = january(rows)
+    refuses_before_any_day(tmp_path, transport, ArchiveContentError, "beyond the archive index")
+
+
+@pytest.mark.parametrize("value", ["5742-10-22", "9999-12-31"])
+def test_an_archive_date_beyond_the_index_refuses(tmp_path, value):
+    """A later day's ordinal would not fit its 21 bits and would spill into the ID."""
+    transport = FakeCFPB()
+    rows = january_rows(transport)
+    rows[1][0] = value
+    transport.zips[JANUARY] = january(rows)
+    refuses_before_any_day(tmp_path, transport, ArchiveContentError, "beyond the archive index")
+
+
+def test_the_last_id_and_day_the_index_holds_are_accepted(tmp_path):
+    transport = FakeCFPB()
+    last = complaint(str(cfpb.ID_LIMIT - 1), "5742-10-21", in_api=False)
+    transport.zips[JANUARY] = january([*january_rows(transport), archive_row(last)])
+    context, _, _ = acquire(tmp_path, transport)
+    exports = the_record(context)["source_details"]["archive"]["exports"]
+    assert exports[0]["date_max"] == "5742-10-21"
+
+
+def test_the_index_key_is_reversible_and_sorts_by_id_at_its_limits():
+    top, last = cfpb.ID_LIMIT - 1, cfpb.LAST_INDEXED_DAY
+    assert (cfpb.ID_LIMIT, last, last.toordinal()) == (1 << 41, date(5742, 10, 21), cfpb.DAY_MASK)
+    assert cfpb._index_key(0, date.min, False) == 2 and date.min.toordinal() == 1
+    assert cfpb._index_key(top, last, True) == (1 << 63) - 1
+    corners = [
+        (0, date.min, False),
+        (0, last, True),
+        (10000002, date(2024, 1, 30), True),
+        (top, date.min, False),
+        (top, last, True),
+    ]
+    for number, day, included in corners:
+        keys = array("q", [cfpb._index_key(number, day, included)])
+        index = cfpb._Archive(keys=keys, included_total=0, facts=[], spill=None)
+        assert index.lookup(str(number)) == (day.toordinal(), included)
+        assert index.lookup(str(number + 1)) is None
+    for number in (0, 10000002, top - 1):
+        assert cfpb._index_key(number, last, True) < cfpb._index_key(number + 1, date.min, False)
 
 
 def test_a_ragged_archive_row_refuses(tmp_path):

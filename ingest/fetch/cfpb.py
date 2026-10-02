@@ -140,10 +140,15 @@ SPILL_DIR = "spill"
 
 ONE_DAY = timedelta(days=1)
 DAY_BITS = 21
-"""An ordinal day fits in 21 bits until the year 5741; the index key is
-``id << 22 | ordinal << 1 | included``."""
 ID_SHIFT = DAY_BITS + 1
 DAY_MASK = (1 << DAY_BITS) - 1
+ID_LIMIT = 1 << (63 - ID_SHIFT)
+LAST_INDEXED_DAY = date.fromordinal(DAY_MASK)
+"""The archive index key is ``id << 22 | ordinal << 1 | included``, one non-negative
+signed 64-bit integer: the Complaint ID in bits 22-62 (below `ID_LIMIT`, 2**41), the
+day's ordinal in bits 1-21 (0001-01-01 through `LAST_INDEXED_DAY`, 5742-10-21) and
+inclusion in bit 0. The fields are disjoint, so a key is reversible and keys sort by ID.
+An archive row outside those ranges refuses rather than overflow or spill into the ID."""
 SPILL_FLUSH_CHARS = 32 * 1024 * 1024
 
 Page = dict[str, Any]
@@ -288,6 +293,11 @@ def _write_file(path: Path, data: bytes) -> None:
 
 def _canonical_id(value: str) -> bool:
     return value.isascii() and value.isdigit() and value == str(int(value))
+
+
+def _index_key(number: int, day: date, included: bool) -> int:
+    """One archive row's index key; `read_export` has checked both fields' ranges."""
+    return (number << ID_SHIFT) | (day.toordinal() << 1) | included
 
 
 def _date_only(value: str) -> date | None:
@@ -635,11 +645,22 @@ class _Run:
                                 f"{export.name}: row {rows}: Complaint ID {cid!r} is not a "
                                 "plain decimal string"
                             )
+                        number = int(cid)
+                        if number >= ID_LIMIT:
+                            raise ArchiveContentError(
+                                f"{export.name}: row {rows}: Complaint ID {cid} is beyond the "
+                                f"archive index's range (below {ID_LIMIT})"
+                            )
                         day = _date_only(row[at["Date received"]])
                         if day is None:
                             raise ArchiveContentError(
                                 f"{export.name}: row {rows}: Date received "
                                 f"{row[at['Date received']]!r} is not YYYY-MM-DD"
+                            )
+                        if day > LAST_INDEXED_DAY:
+                            raise ArchiveContentError(
+                                f"{export.name}: row {rows}: Date received {day} is beyond the "
+                                f"archive index's range (through {LAST_INDEXED_DAY})"
                             )
                         inside = self.in_window(day)
                         if inside and export.role == "boundary":
@@ -658,7 +679,7 @@ class _Run:
                             spill.add(day.isoformat(), ["x", cid])
                         if inside:
                             covered.add(day)
-                        keys.append((int(cid) << ID_SHIFT) | (day.toordinal() << 1) | keep)
+                        keys.append(_index_key(number, day, keep))
                         first = day if first is None or day < first else first
                         last = day if last is None or day > last else last
         except (zipfile.BadZipFile, UnicodeDecodeError, csv.Error) as exc:
