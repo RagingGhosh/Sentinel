@@ -20,12 +20,19 @@ Floating Timestamps: they carry no offset. Phase 2 reads them as
 reach the corpus uninterpreted. That interpretation is the project's reading of
 an unlabelled field, not something the source schema provides.
 
-Both daylight-saving edge cases are refused rather than resolved. In the autumn
-fold a wall clock occurs twice and nothing in the row says which; choosing one
-would assign a wrong instant to about half the affected records, invisibly. In
-the spring gap the wall clock never occurs, so a value there means the source's
-clock handling is broken or §2.4's interpretation is wrong. Roughly an hour of
-records a year in each direction: a negligible loss and a loud signal.
+`normalize` refuses both daylight-saving edge cases rather than resolving them.
+In the autumn fold a wall clock occurs twice and nothing in the row says which;
+choosing one would assign a wrong instant to about half the affected records,
+invisibly. In the spring gap the wall clock never occurs, so a value there means
+the source's clock handling is broken or §2.4's interpretation is wrong.
+
+**`normalize` never repairs a row; the run excludes and counts (addendum D50).**
+A null, absent or non-text descriptor, a daylight-saving edge on either timestamp
+and a negative duration are D45's three classes. `normalize` still raises its
+typed error for each. `classify_row` is the seam the command line uses instead: it
+applies every other check first, raising exactly what `normalize` raises, and
+then returns the one `Exclusion` the first applicable D45 condition earns, which
+the run counts by kind and civil year rather than refusing on.
 
 `to_source_local` converts a stored instant back to New York civil time. It
 exists because §2.4 requires `submitted_hour` and `submitted_weekday` to derive
@@ -42,7 +49,8 @@ Django-independent, and pure: no network, no filesystem, no clock, no database.
 """
 
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from ingest.schema import CorpusRecord, NYC311Outcome
@@ -89,10 +97,42 @@ class NonexistentLocalTime(NYC311NormalizationError):
 class NegativeResolutionTime(NYC311NormalizationError):
     """`closed_date` precedes `created_date`.
 
-    The reconnaissance measured zero negatives, so one appearing means an
-    assumption broke. Never clamped, absolute-valued, nulled or dropped: each of
-    those would turn a broken assumption into a plausible-looking number.
+    Plan Task 6 was written when the reconnaissance had measured zero negatives;
+    addendum D50 records 1,904 measured on 2026-09-28. `normalize` never clamps,
+    absolute-values or nulls the duration, since each would turn a broken
+    assumption into a plausible-looking number, and never drops the row: the run
+    excludes it as a typed, counted exclusion under D50.
     """
+
+
+EXCLUSION_KINDS = (
+    "MissingDescriptor",
+    "AmbiguousLocalTime:created_date",
+    "NonexistentLocalTime:created_date",
+    "AmbiguousLocalTime:closed_date",
+    "NonexistentLocalTime:closed_date",
+    "NegativeResolutionTime",
+)
+"""Addendum D50's six exclusion kinds, in its order of precedence.
+
+Each is the complete typed adapter error of one of D45's three classes, and the two
+daylight-saving errors are counted separately for each timestamp. A row with several
+D45 conditions takes the first kind that applies, and only that one."""
+
+
+@dataclass(frozen=True)
+class Exclusion:
+    """One otherwise-valid row the run excludes under addendum D50, and why.
+
+    `created_civil_date` is the calendar date of the row's published `created_date`
+    literal, read as New York civil time (§2.4); its year is the year the exclusion
+    is counted under. It needs no UTC instant, which a `created_date` edge does not
+    have, and none is invented.
+    """
+
+    external_id: str
+    kind: str
+    created_civil_date: date
 
 
 def rows_from_page(page: SourcePage) -> Iterator[SourceRow]:
@@ -185,7 +225,12 @@ def _local_to_utc(naive: datetime, field: str, external_id: str) -> datetime:
     return local.astimezone(UTC)
 
 
-def _timestamp(row: SourceRow, field: str, external_id: str) -> datetime:
+def _wall_clock(row: SourceRow, field: str, external_id: str) -> datetime:
+    """A Floating Timestamp's naive wall clock, checked for form only.
+
+    Text, ISO-8601 and no offset; a failure is `MissingField`, never a D45 class.
+    Where the wall clock falls in New York civil time is `_local_to_utc`'s question.
+    """
     value = row.get(field)
     if not isinstance(value, str) or not value.strip():
         raise MissingField(f"{field} is missing on unique_key {external_id}: {value!r}")
@@ -201,29 +246,36 @@ def _timestamp(row: SourceRow, field: str, external_id: str) -> datetime:
             "311 publishes Floating Timestamps, so the source shape has changed "
             "and the interpretation in addendum §2.4 may no longer apply"
         )
-    return _local_to_utc(parsed, field, external_id)
+    return parsed
 
 
-def normalize(row: SourceRow) -> tuple[CorpusRecord, NYC311Outcome]:
-    """Map one 311 row. Pure, and never partially applied."""
-    external_id = _external_id(row)
-    text = _descriptor(row, external_id)
-    label = _complaint_type(row, external_id)
-    submitted_at = _timestamp(row, "created_date", external_id)
+def _timestamp(row: SourceRow, field: str, external_id: str) -> datetime:
+    return _local_to_utc(_wall_clock(row, field, external_id), field, external_id)
 
-    closed_raw = row.get("closed_date")
-    closed_at = None if closed_raw is None else _timestamp(row, "closed_date", external_id)
 
-    resolution_hours: float | None = None
-    if closed_at is not None:
-        elapsed = (closed_at - submitted_at).total_seconds() / SECONDS_PER_HOUR
-        if elapsed < 0:
-            raise NegativeResolutionTime(
-                f"unique_key {external_id} closed {elapsed} hours after it opened: "
-                f"created {submitted_at.isoformat()}, closed {closed_at.isoformat()}"
-            )
-        resolution_hours = elapsed
+def _resolution_hours(
+    submitted_at: datetime, closed_at: datetime | None, external_id: str
+) -> float | None:
+    """Hours between the two instants, `None` for an open request; never negative."""
+    if closed_at is None:
+        return None
+    elapsed = (closed_at - submitted_at).total_seconds() / SECONDS_PER_HOUR
+    if elapsed < 0:
+        raise NegativeResolutionTime(
+            f"unique_key {external_id} closed {elapsed} hours after it opened: "
+            f"created {submitted_at.isoformat()}, closed {closed_at.isoformat()}"
+        )
+    return elapsed
 
+
+def _pair(
+    external_id: str,
+    text: str,
+    label: str,
+    submitted_at: datetime,
+    closed_at: datetime | None,
+    resolution_hours: float | None,
+) -> tuple[CorpusRecord, NYC311Outcome]:
     return (
         CorpusRecord(
             source=SOURCE_SLUG,
@@ -238,6 +290,66 @@ def normalize(row: SourceRow) -> tuple[CorpusRecord, NYC311Outcome]:
             resolution_hours=resolution_hours,
         ),
     )
+
+
+def normalize(row: SourceRow) -> tuple[CorpusRecord, NYC311Outcome]:
+    """Map one 311 row. Pure, and never partially applied."""
+    external_id = _external_id(row)
+    text = _descriptor(row, external_id)
+    label = _complaint_type(row, external_id)
+    submitted_at = _timestamp(row, "created_date", external_id)
+
+    closed_raw = row.get("closed_date")
+    closed_at = None if closed_raw is None else _timestamp(row, "closed_date", external_id)
+
+    resolution_hours = _resolution_hours(submitted_at, closed_at, external_id)
+    return _pair(external_id, text, label, submitted_at, closed_at, resolution_hours)
+
+
+def classify_row(row: SourceRow) -> tuple[CorpusRecord, NYC311Outcome] | Exclusion:
+    """`normalize`'s pair for a valid row, or the one `Exclusion` addendum D50 assigns.
+
+    **Stage one** applies every check outside D45's classes, in `normalize`'s relative
+    order -- `unique_key`, `complaint_type`, then the form of `created_date` and of a
+    present `closed_date` -- and raises exactly the error `normalize` raises, so a row
+    with any such problem is refused whatever D45 condition it also has. **Stage two**
+    applies the D45 conditions in `normalize`'s relative order -- the descriptor, a
+    `created_date` edge, a `closed_date` edge, a negative duration -- and the first that
+    applies is the row's only kind. Pure, like `normalize`, and window-blind: which
+    exclusions a run counts is the command line's to decide.
+    """
+    external_id = _external_id(row)
+    label = _complaint_type(row, external_id)
+    created = _wall_clock(row, "created_date", external_id)
+    closed_raw = row.get("closed_date")
+    closed = None if closed_raw is None else _wall_clock(row, "closed_date", external_id)
+
+    def excluded(kind: str) -> Exclusion:
+        return Exclusion(external_id=external_id, kind=kind, created_civil_date=created.date())
+
+    try:
+        text = _descriptor(row, external_id)
+    except MissingDescriptor:
+        return excluded("MissingDescriptor")
+    try:
+        submitted_at = _local_to_utc(created, "created_date", external_id)
+    except AmbiguousLocalTime:
+        return excluded("AmbiguousLocalTime:created_date")
+    except NonexistentLocalTime:
+        return excluded("NonexistentLocalTime:created_date")
+    closed_at = None
+    if closed is not None:
+        try:
+            closed_at = _local_to_utc(closed, "closed_date", external_id)
+        except AmbiguousLocalTime:
+            return excluded("AmbiguousLocalTime:closed_date")
+        except NonexistentLocalTime:
+            return excluded("NonexistentLocalTime:closed_date")
+    try:
+        resolution_hours = _resolution_hours(submitted_at, closed_at, external_id)
+    except NegativeResolutionTime:
+        return excluded("NegativeResolutionTime")
+    return _pair(external_id, text, label, submitted_at, closed_at, resolution_hours)
 
 
 class NYC311Adapter:

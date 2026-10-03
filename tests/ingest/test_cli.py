@@ -67,6 +67,8 @@ from ingest.manifest import (  # noqa: E402
 )
 from ingest.roster import RosterMismatch  # noqa: E402
 from ingest.schema import SCHEMA_VERSION  # noqa: E402
+from ingest.sources.cfpb import MissingNarrative  # noqa: E402
+from ingest.sources.nyc311 import EXCLUSION_KINDS, MissingField  # noqa: E402
 from ingest.storage import CORPUS_ROOT, iter_part_files, read_corpus  # noqa: E402
 
 # --- building synthetic source pages -----------------------------------------
@@ -2102,7 +2104,7 @@ def test_the_run_manifest_binds_both_streams(tmp_path):
     manifest, _ = a_311_run(tmp_path, [nyc311_resolved("1", closed="2024-03-15T21:00:00.000")])
     assert set(manifest.part_files) & set(manifest.outcome_part_files) == set()
     assert all("/outcomes/" in path for path in manifest.outcome_part_files)
-    assert manifest.manifest_version == 3
+    assert manifest.manifest_version == 4
 
 
 def test_corpus_identity_binds_the_outcome_bytes_end_to_end(tmp_path):
@@ -2172,7 +2174,7 @@ def test_a_cfpb_corpus_remains_loadable_without_a_311_sidecar(tmp_path):
     a_cfpb_run(tmp_path, [[cfpb_row("1")]])
     manifest = read_manifest("cfpb", root=tmp_path / "corpus")
     assert manifest.schema_version == SCHEMA_VERSION == 1
-    assert manifest.manifest_version == 3
+    assert manifest.manifest_version == 4
 
 
 # --- Task 23: the acquisition layer (addendum D44, D46) ----------------------------------
@@ -2853,3 +2855,358 @@ def test_a_completed_cfpb_acquisition_is_reused_offline_with_zero_requests(
     assert again.acquisition_id == first.acquisition_id
     assert again.corpus_id == first.corpus_id
     assert record_path(tmp_path / CFPB_ACQUISITION).read_bytes() == record
+
+
+# --- Task 26: D50's typed NYC 311 exclusions through ingest() (C1-C9) ----------------------
+#
+# Every otherwise-valid row of one of D45's three classes is excluded, counted by kind and
+# by its created_date's New York civil year, and never refuses the run; every other
+# refusal still refuses before any write. The fetcher is untouched: rows reach the cache
+# exactly as served, and classification happens only once the pages are read back.
+
+
+def without_descriptor(row):
+    return {**row, "descriptor": None}
+
+
+def kind_rows():
+    """Two valid rows and one row of each D50 kind, all created inside 2024-2025."""
+    return [
+        nyc311_resolved("v1", created="2024-03-15T09:00:00.000", closed="2024-03-15T10:00:00.000"),
+        nyc311_row("v2", created="2025-06-01T12:00:00.000"),
+        without_descriptor(nyc311_row("d1", created="2024-05-01T08:00:00.000")),
+        nyc311_row("cf", created="2024-11-03T01:30:00.000"),
+        nyc311_row("cg", created="2025-03-09T02:30:00.000"),
+        nyc311_resolved("xf", created="2025-11-01T12:00:00.000", closed="2025-11-02T01:15:00.000"),
+        nyc311_resolved("xg", created="2024-03-09T12:00:00.000", closed="2024-03-10T02:30:00.000"),
+        nyc311_resolved("ng", created="2025-02-01T12:00:00.000", closed="2025-02-01T11:00:00.000"),
+    ]
+
+
+KIND_COUNTS = {
+    "MissingDescriptor": {2024: 1},
+    "AmbiguousLocalTime:created_date": {2024: 1},
+    "NonexistentLocalTime:created_date": {2025: 1},
+    "AmbiguousLocalTime:closed_date": {2025: 1},
+    "NonexistentLocalTime:closed_date": {2024: 1},
+    "NegativeResolutionTime": {2025: 1},
+}
+NOTHING_EXCLUDED = {kind: {} for kind in EXCLUSION_KINDS}
+
+
+def excluded_total(records):
+    return sum(count for years in records.values() for count in years.values())
+
+
+def test_c1_valid_rows_are_kept_and_each_kind_is_excluded_and_counted(tmp_path):
+    rows = kind_rows()
+    manifest, _ = a_311_run(tmp_path, rows)
+    assert manifest.excluded_records == KIND_COUNTS
+    assert read_manifest("nyc311", root=tmp_path / "corpus").excluded_records == KIND_COUNTS
+    _, records = load_corpus("nyc311", root=tmp_path / "corpus")
+    assert sorted(record.external_id for record in records) == ["v1", "v2"]
+    assert sorted(outcome.external_id for outcome in loaded_outcomes(tmp_path)) == ["v1", "v2"]
+    assert manifest.record_count + excluded_total(manifest.excluded_records) == len(rows)
+
+
+def test_c1_an_exclusion_counts_under_created_date_s_civil_year(tmp_path):
+    late = "2024-12-31T23:30:00.000"
+    rows = [nyc311_row("kept", created=late), without_descriptor(nyc311_row("gone", created=late))]
+    manifest, _ = a_311_run(tmp_path, rows)
+    assert manifest.excluded_records == {**NOTHING_EXCLUDED, "MissingDescriptor": {2024: 1}}
+    assert manifest.per_year_counts == {2025: 1}, "a kept record's partition is its UTC year"
+
+
+def test_c1_exclusions_of_one_kind_in_one_year_are_summed(tmp_path):
+    rows = [nyc311_row("1")] + [
+        without_descriptor(nyc311_row(f"d{month}", created=f"2024-0{month}-15T09:00:00.000"))
+        for month in (1, 2, 3)
+    ]
+    rows.append(without_descriptor(nyc311_row("d9", created="2025-01-15T09:00:00.000")))
+    manifest, _ = a_311_run(tmp_path, rows)
+    assert manifest.excluded_records == {
+        **NOTHING_EXCLUDED,
+        "MissingDescriptor": {2024: 3, 2025: 1},
+    }
+
+
+def test_c1_a_run_with_nothing_to_exclude_records_every_kind_empty(tmp_path):
+    manifest, _ = a_311_run(tmp_path, [nyc311_row("1"), nyc311_row("2")])
+    assert manifest.excluded_records == NOTHING_EXCLUDED
+    assert manifest.record_count == 2
+
+
+NON_D45_IN_RUN = {
+    "a blank unique_key": {"unique_key": "  "},
+    "a complaint_type that is not text": {"complaint_type": 7},
+    "a created_date with an offset": {"created_date": "2024-03-15T09:00:00-04:00"},
+    "a closed_date that is not ISO-8601": {"closed_date": "soon"},
+}
+D45_IN_RUN = {
+    "no D45 condition": {},
+    "MissingDescriptor": {"descriptor": None},
+    "AmbiguousLocalTime:created_date": {"created_date": "2024-11-03T01:30:00.000"},
+    "NegativeResolutionTime": {"closed_date": "2024-03-15T08:00:00.000"},
+}
+REFUSING = [
+    (problem, condition)
+    for problem in sorted(NON_D45_IN_RUN)
+    for condition in sorted(D45_IN_RUN)
+    if not set(NON_D45_IN_RUN[problem]) & set(D45_IN_RUN[condition])
+]
+
+
+@pytest.mark.parametrize("problem, condition", REFUSING)
+def test_c2_every_other_refusal_still_refuses_before_any_write(tmp_path, problem, condition):
+    a_311_run(tmp_path, [nyc311_row("1")])
+    corpus = tmp_path / "corpus"
+    before = snapshot(corpus)
+    bad = {**nyc311_row("2"), **NON_D45_IN_RUN[problem], **D45_IN_RUN[condition]}
+    with pytest.raises(MissingField):
+        a_311_run(tmp_path, [nyc311_row("3"), bad], raw="later")
+    assert snapshot(corpus) == before
+
+
+def test_c3_a_window_whose_every_row_is_excluded_is_empty_and_names_the_exclusions(tmp_path):
+    rows = [row for row in kind_rows() if not row["unique_key"].startswith("v")]
+    with pytest.raises(EmptyWindow) as exc:
+        a_311_run(tmp_path, rows)
+    message = str(exc.value)
+    assert "zero records" in message and "1 cached page" in message
+    assert "6 rows were excluded" in message, message
+    for kind, years in KIND_COUNTS.items():
+        assert f"{kind} {sum(years.values())}" in message, message
+    corpus = tmp_path / "corpus"
+    assert not corpus.exists() or not [p for p in corpus.rglob("*") if p.is_file()]
+
+
+def test_c3_a_single_excluded_row_is_named_in_the_singular(tmp_path):
+    with pytest.raises(EmptyWindow, match="1 row was excluded under D50"):
+        a_311_run(tmp_path, [without_descriptor(nyc311_row("1"))])
+
+
+def test_c3_a_cfpb_empty_window_says_nothing_of_d50(tmp_path):
+    with pytest.raises(EmptyWindow) as exc:
+        a_cfpb_run(tmp_path, [[cfpb_row("1", received="2023-03-15T09:00:00-04:00")]])
+    assert "D50" not in str(exc.value) and "excluded" not in str(exc.value)
+
+
+def test_c4_the_counts_cover_the_whole_window_before_limit_truncates_it(tmp_path):
+    manifest, _ = a_311_run(tmp_path, kind_rows(), limit=1)
+    assert (manifest.limit, manifest.record_count) == (1, 1)
+    assert manifest.excluded_records == KIND_COUNTS
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [nyc311_row("7"), without_descriptor(nyc311_row("7", created="2024-04-01T09:00:00.000"))],
+        [
+            nyc311_row("1"),
+            without_descriptor(nyc311_row("7")),
+            nyc311_row("7", created="2024-11-03T01:30:00.000"),
+        ],
+    ],
+    ids=["kept-and-excluded", "both-excluded"],
+)
+def test_c5_an_excluded_row_cannot_hide_a_duplicate_identity(tmp_path, rows):
+    with pytest.raises(DuplicateExternalId, match="nyc311:7"):
+        a_311_run(tmp_path, rows)
+    corpus = tmp_path / "corpus"
+    assert not corpus.exists() or not [p for p in corpus.rglob("*") if p.is_file()]
+
+
+def test_c6_an_excluded_row_outside_the_window_is_neither_counted_nor_refused(tmp_path):
+    rows = [
+        nyc311_row("1"),
+        without_descriptor(nyc311_row("before", created="2023-12-31T23:59:59.999")),
+        without_descriptor(nyc311_row("first", created="2024-01-01T00:00:00.000")),
+        without_descriptor(nyc311_row("last", created="2025-12-31T23:59:59.999")),
+        without_descriptor(nyc311_row("after", created="2026-01-01T00:00:00.000")),
+        nyc311_row("fold-2023", created="2023-11-05T01:30:00.000"),
+    ]
+    manifest, _ = a_311_run(tmp_path, rows)
+    assert manifest.record_count == 1
+    assert manifest.excluded_records == {
+        **NOTHING_EXCLUDED,
+        "MissingDescriptor": {2024: 1, 2025: 1},
+    }
+
+
+def test_c6_another_refusal_outside_the_window_still_refuses(tmp_path):
+    outside = {**nyc311_row("old", created="2023-06-01T09:00:00.000"), "complaint_type": None}
+    with pytest.raises(MissingField, match="complaint_type"):
+        a_311_run(tmp_path, [nyc311_row("1"), without_descriptor(outside)])
+
+
+def test_c7_cfpb_records_no_exclusions_and_keeps_its_refusals(tmp_path):
+    manifest, _ = a_cfpb_run(tmp_path / "a", [[cfpb_row("1")]])
+    assert manifest.excluded_records == {}
+    assert read_manifest("cfpb", root=tmp_path / "a" / "corpus").excluded_records == {}
+    blank = {**cfpb_row("2"), "complaint_what_happened": "   "}
+    with pytest.raises(MissingNarrative):
+        a_cfpb_run(tmp_path / "b", [[cfpb_row("1"), blank]])
+    corpus = tmp_path / "b" / "corpus"
+    assert not corpus.exists() or not [p for p in corpus.rglob("*") if p.is_file()]
+
+
+class EdgeSocrata:
+    """NYC 311's two endpoints over fixed rows per civil day, edge rows among them."""
+
+    identity = TEST_CLIENT
+
+    def __init__(self, days):
+        self.days = days
+        self.log = []
+
+    def get(self, url, params, headers):
+        params = dict(params)
+        if url == "https://data.cityofnewyork.us/api/views/erm2-nwe9.json":
+            self.log.append(NYC_METADATA)
+            body = json.dumps({"rowsUpdatedAt": 1790559478}).encode()
+            return Response(status=200, headers={}, body=body)
+        assert url == "https://data.cityofnewyork.us/resource/erm2-nwe9.json", url
+        first, last = NYC_BOUNDS.fullmatch(params["$where"]).groups()
+        rows = [row for day in sorted(self.days) if first <= day < last for row in self.days[day]]
+        if params["$select"] == "count(*) AS n":
+            self.log.append(("count", first, last))
+            return Response(
+                status=200, headers={}, body=json.dumps([{"n": str(len(rows))}]).encode()
+            )
+        self.log.append(("data", first))
+        return Response(status=200, headers={}, body=json.dumps(rows).encode())
+
+
+def edge_fetch(tmp_path, monkeypatch, transport, start, end):
+    import ingest.cli as cli
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "RequestsTransport", lambda: transport)
+    monkeypatch.setattr(cli, "HttpClient", quiet_client)
+    monkeypatch.setattr(cli, "current_commit", lambda: TEST_COMMIT)
+    arguments = ["--source", "nyc311", "--start", start, "--end", end, "--fetch"]
+    return main([*arguments, "--corpus-root", str(tmp_path / "corpus")])
+
+
+EDGE_WINDOWS = {
+    "spring": (
+        "2024-03-09",
+        "2024-03-11",
+        {
+            "2024-03-09": [
+                nyc311_resolved(
+                    "m1", created="2024-03-09T09:00:00.000", closed="2024-03-09T10:00:00.000"
+                ),
+                without_descriptor(nyc311_row("m2", created="2024-03-09T11:00:00.000")),
+                nyc311_resolved(
+                    "m3", created="2024-03-09T12:00:00.000", closed="2024-03-10T02:30:00.000"
+                ),
+            ],
+            "2024-03-10": [
+                nyc311_row("m4", created="2024-03-10T02:30:00.000"),
+                nyc311_row("m5", created="2024-03-10T03:00:00.000"),
+                nyc311_resolved(
+                    "m6", created="2024-03-10T12:00:00.000", closed="2024-03-10T11:00:00.000"
+                ),
+            ],
+            "2024-03-11": [
+                nyc311_resolved(
+                    "m7", created="2024-03-11T09:00:00.000", closed="2024-11-03T01:30:00.000"
+                ),
+                nyc311_row("m8", created="2024-03-11T10:00:00.000"),
+            ],
+        },
+        {
+            **NOTHING_EXCLUDED,
+            "MissingDescriptor": {2024: 1},
+            "NonexistentLocalTime:created_date": {2024: 1},
+            "AmbiguousLocalTime:closed_date": {2024: 1},
+            "NonexistentLocalTime:closed_date": {2024: 1},
+            "NegativeResolutionTime": {2024: 1},
+        },
+    ),
+    "autumn": (
+        "2024-11-02",
+        "2024-11-04",
+        {
+            "2024-11-02": [
+                nyc311_row("n1", created="2024-11-02T09:00:00.000"),
+                nyc311_resolved(
+                    "n2", created="2024-11-02T12:00:00.000", closed="2024-11-03T01:30:00.000"
+                ),
+                nyc311_resolved(
+                    "n3", created="2024-11-02T15:00:00.000", closed="2024-11-02T14:00:00.000"
+                ),
+            ],
+            "2024-11-03": [
+                nyc311_row("n4", created="2024-11-03T01:30:00.000"),
+                nyc311_row("n5", created="2024-11-03T03:00:00.000"),
+                without_descriptor(nyc311_row("n6", created="2024-11-03T10:00:00.000")),
+            ],
+            "2024-11-04": [
+                nyc311_row("n7", created="2024-11-04T09:00:00.000"),
+                nyc311_resolved(
+                    "n8", created="2024-11-04T09:30:00.000", closed="2025-03-09T02:30:00.000"
+                ),
+            ],
+        },
+        {
+            **NOTHING_EXCLUDED,
+            "MissingDescriptor": {2024: 1},
+            "AmbiguousLocalTime:created_date": {2024: 1},
+            "AmbiguousLocalTime:closed_date": {2024: 1},
+            "NonexistentLocalTime:closed_date": {2024: 1},
+            "NegativeResolutionTime": {2024: 1},
+        },
+    ),
+}
+
+
+def keys_of(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from keys_of(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from keys_of(item)
+
+
+@pytest.mark.parametrize("window", sorted(EDGE_WINDOWS))
+def test_c8_fetched_edge_rows_are_cached_as_served_then_excluded_and_counted(
+    tmp_path, monkeypatch, closed_network, window
+):
+    start, end, days, expected = EDGE_WINDOWS[window]
+    assert edge_fetch(tmp_path, monkeypatch, EdgeSocrata(days), start, end) == 0
+
+    directory = tmp_path / "data" / "acquisitions" / "nyc311" / f"{start}_{end}"
+    data = record_path(directory).read_bytes()
+    record = json.loads(data)
+    assert [entry["key"] for entry in record["slices"]] == sorted(days)
+    for entry in record["slices"]:
+        [digest] = entry["pages"]
+        with gzip.open(directory / "nyc311" / f"{digest}.json.gz", "rt", encoding="utf-8") as page:
+            assert json.load(page) == days[entry["key"]], "cached exactly as served"
+    assert not [key for key in keys_of(record) if "exclu" in key.lower()]
+
+    manifest = read_manifest("nyc311", root=tmp_path / "corpus")
+    assert manifest.acquisition_id == hashlib.sha256(data).hexdigest()
+    assert manifest.excluded_records == expected
+    rows = sum(entry["verification"]["rows"] for entry in record["slices"])
+    assert rows == manifest.record_count + excluded_total(expected)
+
+    assert edge_fetch(tmp_path, monkeypatch, OfflineTransport(), start, end) == 0
+    again = read_manifest("nyc311", root=tmp_path / "corpus")
+    assert again.excluded_records == manifest.excluded_records
+    assert (again.corpus_id, again.acquisition_id) == (manifest.corpus_id, manifest.acquisition_id)
+    assert record_path(directory).read_bytes() == data
+
+
+def test_c8_the_two_windows_cover_every_kind():
+    covered = {
+        kind
+        for _, _, _, expected in EDGE_WINDOWS.values()
+        for kind, years in expected.items()
+        if years
+    }
+    assert covered == set(EXCLUSION_KINDS)

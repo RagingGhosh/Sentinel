@@ -31,6 +31,7 @@ from ingest.manifest import (  # noqa: E402
     write_manifest,
 )
 from ingest.schema import SCHEMA_VERSION, CorpusRecord  # noqa: E402
+from ingest.sources.nyc311 import EXCLUSION_KINDS  # noqa: E402
 from ingest.storage import iter_part_files, write_partition  # noqa: E402
 
 
@@ -288,7 +289,7 @@ def test_manifest_carries_no_operational_complaint_data(tmp_path):
 
 def test_the_manifest_carries_the_three_contract_fields(tmp_path):
     m = a_corpus(tmp_path, limit=500)
-    assert m.manifest_version == MANIFEST_VERSION == 3
+    assert m.manifest_version == MANIFEST_VERSION == 4
     assert m.limit == 500
     assert m.timestamp_diagnostic == DIAGNOSTIC
 
@@ -345,7 +346,7 @@ def test_write_manifest_emits_the_three_new_keys(tmp_path):
     write_manifest(m, root=tmp_path)
     raw = (tmp_path / "cfpb" / f"v{SCHEMA_VERSION}" / "manifest.json").read_text(encoding="utf-8")
     payload = json.loads(raw)
-    assert payload["manifest_version"] == 3
+    assert payload["manifest_version"] == 4
     assert payload["limit"] == 250
     assert payload["timestamp_diagnostic"] == DIAGNOSTIC
 
@@ -355,7 +356,7 @@ def test_read_manifest_reconstructs_the_new_fields_exactly(tmp_path):
     write_manifest(m, root=tmp_path)
     back = read_manifest("cfpb", root=tmp_path)
     assert back == m
-    assert back.manifest_version == 3
+    assert back.manifest_version == 4
     assert back.limit == 7
     assert back.timestamp_diagnostic == DIAGNOSTIC
 
@@ -979,19 +980,19 @@ def test_a_version_one_manifest_without_the_new_field_still_reads(tmp_path):
 def test_a_version_one_manifest_is_read_only_compatibility(tmp_path):
     """D37.16: reading v1 is supported; every new write emits v2."""
     manifest = a_311_corpus(tmp_path, with_sidecar=False)
-    assert manifest.manifest_version == 3
+    assert manifest.manifest_version == 4
     write_manifest(manifest, root=tmp_path)
     payload = json.loads(
         (tmp_path / "nyc311" / f"v{SCHEMA_VERSION}" / "manifest.json").read_text(encoding="utf-8")
     )
-    assert payload["manifest_version"] == 3
+    assert payload["manifest_version"] == 4
     assert "outcome_part_files" in payload
 
 
 def test_a_source_with_no_outcome_stream_writes_an_empty_outcome_map(tmp_path):
     """D37.16: v2 carries the field, which may legitimately be empty."""
     manifest = a_corpus(tmp_path)
-    assert manifest.manifest_version == 3
+    assert manifest.manifest_version == 4
     assert manifest.outcome_part_files == {}
 
 
@@ -999,7 +1000,7 @@ def test_the_record_schema_version_is_untouched_by_the_manifest_bump(tmp_path):
     """D37.16: the two version numbers version different things (§G)."""
     manifest = a_311_corpus(tmp_path)
     assert manifest.schema_version == SCHEMA_VERSION == 1
-    assert manifest.manifest_version == 3
+    assert manifest.manifest_version == 4
 
 
 def test_outcome_part_files_has_a_default_and_is_not_a_strict_required_key(tmp_path):
@@ -1193,3 +1194,207 @@ def test_version_one_and_two_ignore_a_stray_acquisition_id(tmp_path):
 
     _rewrite_payload(path, to_version_two)
     assert read_manifest("cfpb", root=tmp_path).acquisition_id is None
+
+
+# --- D50: manifest version 4 and `excluded_records` (M1-M5) ----------------------------
+#
+# Each kind maps New York civil years to counts of excluded rows. NYC 311 holds exactly
+# the six kinds, CFPB holds none, and versions 1 to 3 predate the field.
+
+NO_EXCLUSIONS: dict[str, dict[int, int]] = {kind: {} for kind in EXCLUSION_KINDS}
+SOME_EXCLUSIONS: dict[str, dict[int, int]] = {
+    **NO_EXCLUSIONS,
+    "MissingDescriptor": {2024: 3, 2025: 1},
+    "NonexistentLocalTime:closed_date": {2025: 1},
+    "NegativeResolutionTime": {2025: 2},
+}
+
+
+def a_311_manifest(root, excluded_records=None):
+    """`a_311_corpus`'s partitions, described with the given exclusion counts."""
+    a_311_corpus(root)
+    return build_manifest(
+        source="nyc311",
+        window_start=datetime(2024, 1, 1, tzinfo=UTC),
+        window_end=datetime(2025, 12, 31, tzinfo=UTC),
+        source_api_version="v1",
+        limit=None,
+        timestamp_diagnostic=DIAGNOSTIC,
+        root=root,
+        excluded_records=excluded_records,
+    )
+
+
+def test_m1_a_new_write_emits_version_four_with_excluded_records(tmp_path):
+    path = write_manifest(a_311_manifest(tmp_path, SOME_EXCLUSIONS), root=tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["manifest_version"] == MANIFEST_VERSION == 4
+    assert payload["excluded_records"] == {
+        **{kind: {} for kind in EXCLUSION_KINDS},
+        "MissingDescriptor": {"2024": 3, "2025": 1},
+        "NonexistentLocalTime:closed_date": {"2025": 1},
+        "NegativeResolutionTime": {"2025": 2},
+    }
+
+
+def test_m1_excluded_records_round_trip_exactly(tmp_path):
+    manifest = a_311_manifest(tmp_path, SOME_EXCLUSIONS)
+    write_manifest(manifest, root=tmp_path)
+    back = read_manifest("nyc311", root=tmp_path)
+    assert back == manifest
+    assert back.excluded_records == SOME_EXCLUSIONS
+    assert all(isinstance(year, int) for years in back.excluded_records.values() for year in years)
+
+
+def test_m1_excluded_records_serialise_deterministically(tmp_path):
+    import dataclasses
+
+    manifest = a_311_manifest(tmp_path, SOME_EXCLUSIONS)
+    first = write_manifest(manifest, root=tmp_path).read_bytes()
+    assert write_manifest(manifest, root=tmp_path).read_bytes() == first
+    reordered = dataclasses.replace(
+        manifest,
+        excluded_records={
+            kind: dict(reversed(list(years.items())))
+            for kind, years in reversed(list(manifest.excluded_records.items()))
+        },
+    )
+    assert write_manifest(reordered, root=tmp_path).read_bytes() == first
+    text = first.decode("utf-8")
+    assert text.index('"2024": 3') < text.index('"2025": 1'), "years are written in order"
+
+
+def test_m1_a_run_that_excluded_nothing_records_every_nyc311_kind_empty(tmp_path):
+    manifest = a_311_manifest(tmp_path)
+    assert manifest.excluded_records == NO_EXCLUSIONS
+    write_manifest(manifest, root=tmp_path)
+    assert read_manifest("nyc311", root=tmp_path).excluded_records == NO_EXCLUSIONS
+
+
+def test_m1_a_cfpb_manifest_records_no_exclusions(tmp_path):
+    manifest = a_corpus(tmp_path)
+    assert manifest.excluded_records == {}
+    payload = json.loads(write_manifest(manifest, root=tmp_path).read_text(encoding="utf-8"))
+    assert payload["excluded_records"] == {}
+    assert read_manifest("cfpb", root=tmp_path) == manifest
+
+
+@pytest.mark.parametrize("stray", [True, False], ids=["stray-field", "no-field"])
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_m2_versions_one_to_three_read_excluded_records_as_empty(tmp_path, version, stray):
+    path = write_manifest(a_311_manifest(tmp_path, SOME_EXCLUSIONS), root=tmp_path)
+
+    def downgrade(payload):
+        payload["manifest_version"] = version
+        if version < 3:
+            del payload["acquisition_id"]
+        if version < 2:
+            del payload["outcome_part_files"]
+        if not stray:
+            del payload["excluded_records"]
+
+    _rewrite_payload(path, downgrade)
+    back = read_manifest("nyc311", root=tmp_path)
+    assert back.manifest_version == version
+    assert back.excluded_records == {}
+
+
+@pytest.mark.parametrize("source", ["nyc311", "cfpb"])
+def test_m3_a_version_four_manifest_without_excluded_records_is_refused(tmp_path, source):
+    manifest = a_311_manifest(tmp_path) if source == "nyc311" else a_corpus(tmp_path)
+    path = write_manifest(manifest, root=tmp_path)
+    _rewrite_payload(path, lambda payload: payload.pop("excluded_records"))
+    with pytest.raises(KeyError, match="excluded_records"):
+        read_manifest(source, root=tmp_path)
+
+
+def _set_years(kind, years):
+    return lambda records: records.__setitem__(kind, years)
+
+
+MALFORMED_ON_DISK = {
+    "an unknown kind": lambda records: records.__setitem__("MissingNarrative", {}),
+    "a missing kind": lambda records: records.pop("NegativeResolutionTime"),
+    "years that are not a mapping": _set_years("MissingDescriptor", [2024]),
+    "a year that is not an integer": _set_years("MissingDescriptor", {"twenty24": 1}),
+    "a year with a fraction": _set_years("MissingDescriptor", {"2024.0": 1}),
+    "a padded year": _set_years("MissingDescriptor", {" 2024": 1}),
+    "a zero-padded year": _set_years("MissingDescriptor", {"02024": 1}),
+    "a year in superscript digits": _set_years("MissingDescriptor", {"²⁰²⁴": 1}),
+    "a negative year": _set_years("MissingDescriptor", {"-2024": 1}),
+    "a zero count": _set_years("MissingDescriptor", {"2024": 0}),
+    "a negative count": _set_years("MissingDescriptor", {"2024": -1}),
+    "a boolean count": _set_years("MissingDescriptor", {"2024": True}),
+    "a fractional count": _set_years("MissingDescriptor", {"2024": 1.5}),
+    "a text count": _set_years("MissingDescriptor", {"2024": "3"}),
+    "a null count": _set_years("MissingDescriptor", {"2024": None}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED_ON_DISK))
+def test_m4_malformed_nyc311_excluded_records_are_refused(tmp_path, case):
+    path = write_manifest(a_311_manifest(tmp_path, SOME_EXCLUSIONS), root=tmp_path)
+    _rewrite_payload(path, lambda payload: MALFORMED_ON_DISK[case](payload["excluded_records"]))
+    with pytest.raises(CorpusIntegrityError, match="excluded_records"):
+        read_manifest("nyc311", root=tmp_path)
+
+
+@pytest.mark.parametrize("value", [[], None, "MissingDescriptor", 0], ids=repr)
+def test_m4_excluded_records_that_are_not_a_mapping_are_refused(tmp_path, value):
+    path = write_manifest(a_311_manifest(tmp_path), root=tmp_path)
+    _rewrite_payload(path, lambda payload: payload.update(excluded_records=value))
+    with pytest.raises(CorpusIntegrityError, match="excluded_records"):
+        read_manifest("nyc311", root=tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value", [{"MissingDescriptor": {}}, NO_EXCLUSIONS, {"MissingDescriptor": {"2024": 1}}]
+)
+def test_m4_a_cfpb_manifest_holding_any_kind_is_refused(tmp_path, value):
+    path = write_manifest(a_corpus(tmp_path), root=tmp_path)
+    _rewrite_payload(path, lambda payload: payload.update(excluded_records=value))
+    with pytest.raises(CorpusIntegrityError, match="excluded_records"):
+        read_manifest("cfpb", root=tmp_path)
+
+
+MALFORMED_IN_MEMORY = {
+    "an unknown kind": {**NO_EXCLUSIONS, "MissingNarrative": {}},
+    "a missing kind": {k: v for k, v in NO_EXCLUSIONS.items() if k != "MissingDescriptor"},
+    "a text year": {**NO_EXCLUSIONS, "MissingDescriptor": {"2024": 1}},
+    "a boolean year": {**NO_EXCLUSIONS, "MissingDescriptor": {True: 1}},
+    "a zero count": {**NO_EXCLUSIONS, "MissingDescriptor": {2024: 0}},
+    "a boolean count": {**NO_EXCLUSIONS, "MissingDescriptor": {2024: True}},
+    "years that are not a mapping": {**NO_EXCLUSIONS, "MissingDescriptor": [2024]},
+    "not a mapping": [("MissingDescriptor", {2024: 1})],
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED_IN_MEMORY))
+def test_m4_build_manifest_refuses_malformed_excluded_records(tmp_path, case):
+    with pytest.raises(ValueError, match="excluded_records"):
+        a_311_manifest(tmp_path, MALFORMED_IN_MEMORY[case])
+
+
+def test_m4_build_manifest_refuses_a_cfpb_exclusion(tmp_path):
+    a_corpus(tmp_path)
+    with pytest.raises(ValueError, match="excluded_records"):
+        build_manifest(
+            source="cfpb",
+            window_start=datetime(2024, 1, 1, tzinfo=UTC),
+            window_end=datetime(2024, 12, 31, tzinfo=UTC),
+            source_api_version="v1",
+            limit=None,
+            timestamp_diagnostic=DIAGNOSTIC,
+            root=tmp_path,
+            excluded_records=NO_EXCLUSIONS,
+        )
+
+
+def test_m5_corpus_id_ignores_excluded_records(tmp_path):
+    without = a_311_manifest(tmp_path)
+    with_counts = a_311_manifest(tmp_path, SOME_EXCLUSIONS)
+    assert with_counts.excluded_records != without.excluded_records
+    assert with_counts.corpus_id == without.corpus_id
+    assert with_counts.corpus_id == compute_corpus_id(
+        {**with_counts.part_files, **with_counts.outcome_part_files}
+    )

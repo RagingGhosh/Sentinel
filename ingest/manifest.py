@@ -33,13 +33,15 @@ from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ingest.schema import SCHEMA_VERSION, CFPBOutcome, CorpusRecord, NYC311Outcome
 
 # The slug rather than a second literal: one source of truth for the name, and
 # the adapter is pure, so this adds no weight and no cycle.
 from ingest.sources.cfpb import SOURCE_SLUG as CFPB_SOURCE
+from ingest.sources.nyc311 import EXCLUSION_KINDS
+from ingest.sources.nyc311 import SOURCE_SLUG as NYC311_SOURCE
 from ingest.storage import (
     CORPUS_ROOT,
     iter_outcome_part_files,
@@ -63,15 +65,48 @@ def _valid_acquisition_id(value: object) -> bool:
     return value is None or (isinstance(value, str) and _SHA256.fullmatch(value) is not None)
 
 
-MANIFEST_VERSION = 3
-"""Version 3 adds `acquisition_id` (D44, D46); version 2 added `outcome_part_files` (D37.16).
+def no_exclusions(source: str) -> dict[str, dict[int, int]]:
+    """`excluded_records` for a run that excluded nothing (D50).
+
+    Every NYC 311 kind with no year counted, and an empty mapping for any other
+    source, to which no kind applies.
+    """
+    return {kind: {} for kind in EXCLUSION_KINDS} if source == NYC311_SOURCE else {}
+
+
+def _excluded_records_problem(source: str, value: object) -> str | None:
+    """Why `value` is not a valid `excluded_records` for `source`, or `None` (D50).
+
+    Exactly the NYC 311 kinds for NYC 311 and none for any other source; each kind
+    maps integer New York civil years to counts of at least 1.
+    """
+    if not isinstance(value, dict):
+        return f"is {value!r}, not a mapping of kinds"
+    expected = set(EXCLUSION_KINDS) if source == NYC311_SOURCE else set()
+    if set(value) != expected:
+        return f"holds the kinds {sorted(value)}, not {sorted(expected)}"
+    for kind, years in value.items():
+        if not isinstance(years, dict):
+            return f"maps {kind} to {years!r}, not a mapping of years"
+        for year, count in years.items():
+            if isinstance(year, bool) or not isinstance(year, int):
+                return f"counts {kind} under {year!r}, which is not an integer year"
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                return f"counts {count!r} {kind} in {year}, not a whole number of at least 1"
+    return None
+
+
+MANIFEST_VERSION = 4
+"""Version 4 adds `excluded_records` (D50); version 3 added `acquisition_id` (D44, D46);
+version 2 added `outcome_part_files` (D37.16).
 
 Only the manifest document changed each time, so `schema_version` stays 1 and
 every record partition stays exactly where it is: plan section G separates the
 two numbers for precisely this case. A v1 manifest still reads, its absent
 `outcome_part_files` becoming an empty mapping; a v1 or v2 manifest reads with
-`acquisition_id` as `None`; nothing else is reinterpreted. That compatibility is
-read-only; every new write emits 3.
+`acquisition_id` as `None`; a v1, v2 or v3 manifest reads with `excluded_records`
+as an empty mapping; nothing else is reinterpreted. That compatibility is
+read-only; every new write emits 4.
 """
 """The manifest document's own shape (plan §G).
 
@@ -171,6 +206,15 @@ class CorpusManifest:
     both enforce (D47). Last, and defaulted, for the same reason as
     `outcome_part_files`."""
 
+    excluded_records: dict[str, dict[int, int]] = field(default_factory=dict)
+    """D50's typed exclusions: kind -> New York civil year of `created_date` -> rows.
+
+    For NYC 311, exactly the six `EXCLUSION_KINDS`, counted over the whole window
+    before `--limit`; for CFPB, empty. Passed in by `ingest()`, never derived from
+    disk, where no excluded row is. Not part of `corpus_id`. Empty in every v1, v2 or
+    v3 manifest, which predates the field: under those versions such a row refused
+    the run."""
+
 
 def sha256_file(path: Path) -> str:
     """Digest a file's bytes, read in chunks so a large part file is not loaded."""
@@ -207,17 +251,24 @@ def build_manifest(
     root: Path = CORPUS_ROOT,
     ingested_at: datetime | None = None,
     acquisition_id: str | None = None,
+    excluded_records: dict[str, dict[int, int]] | None = None,
 ) -> CorpusManifest:
     """Describe the corpus currently on disk for one source.
 
     Counts come from a streaming read, so building a manifest costs one pass and
-    no more memory than reading does.
+    no more memory than reading does. `excluded_records` is the one count that
+    cannot come from disk, where no excluded row is: `ingest()` passes it, and
+    `None` means nothing was excluded (D50).
     """
     if not _valid_acquisition_id(acquisition_id):
         raise ValueError(
             f"acquisition_id must be null or a SHA-256 digest of 64 lowercase hexadecimal "
             f"characters (D47), not {acquisition_id!r}"
         )
+    excluded = no_exclusions(source) if excluded_records is None else excluded_records
+    problem = _excluded_records_problem(source, excluded)
+    if problem is not None:
+        raise ValueError(f"excluded_records {problem} (D50)")
     root = Path(root)
     part_checksums = {
         path.relative_to(root).as_posix(): sha256_file(path)
@@ -257,6 +308,7 @@ def build_manifest(
         limit=limit,
         timestamp_diagnostic=timestamp_diagnostic,
         acquisition_id=acquisition_id,
+        excluded_records={kind: dict(sorted(years.items())) for kind, years in excluded.items()},
     )
 
 
@@ -272,6 +324,10 @@ def write_manifest(manifest: CorpusManifest, root: Path = CORPUS_ROOT) -> Path:
     payload["window_end"] = manifest.window_end.isoformat()
     payload["ingested_at"] = manifest.ingested_at.isoformat()
     payload["per_year_counts"] = {str(year): n for year, n in manifest.per_year_counts.items()}
+    payload["excluded_records"] = {
+        kind: {str(year): n for year, n in sorted(years.items())}
+        for kind, years in manifest.excluded_records.items()
+    }
 
     path = manifest_path(manifest.source_slug, root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -291,6 +347,36 @@ def write_manifest(manifest: CorpusManifest, root: Path = CORPUS_ROOT) -> Path:
     return path
 
 
+def _read_excluded_records(path: Path, source: str, value: object) -> dict[str, dict[int, int]]:
+    """A v4 manifest's `excluded_records`, its year keys back to integers (D50).
+
+    A year is written as its decimal digits, so anything else -- a fraction, a sign,
+    padding -- is refused rather than coerced.
+    """
+    if isinstance(value, dict):
+        value = {kind: _years_from_json(path, kind, years) for kind, years in value.items()}
+    problem = _excluded_records_problem(source, value)
+    if problem is not None:
+        raise CorpusIntegrityError(f"{path}: excluded_records {problem} (D50)")
+    return cast(dict[str, dict[int, int]], value)
+
+
+def _years_from_json(path: Path, kind: str, years: object) -> object:
+    """One kind's year counts with their keys back to integers; anything else as found."""
+    if not isinstance(years, dict):
+        return years
+    counts: dict[int, object] = {}
+    for year, count in years.items():
+        canonical = isinstance(year, str) and year.isascii() and year.isdigit()
+        if not canonical or year != str(int(year)):
+            raise CorpusIntegrityError(
+                f"{path}: excluded_records counts {kind} under {year!r}, which is not an "
+                "integer year (D50)"
+            )
+        counts[int(year)] = count
+    return counts
+
+
 def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
     path = manifest_path(source, root)
     if not path.is_file():
@@ -307,6 +393,13 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
                 f"{path}: acquisition_id {acquisition_id!r} is neither null nor a SHA-256 "
                 "digest of 64 lowercase hexadecimal characters (D47)"
             )
+    # Required from v4 on, and validated (D50); a v1, v2 or v3 manifest predates the
+    # field and reads it as empty, whatever it holds.
+    excluded_records: dict[str, dict[int, int]] = {}
+    if payload["manifest_version"] >= 4:
+        excluded_records = _read_excluded_records(
+            path, payload["source_slug"], payload["excluded_records"]
+        )
     return CorpusManifest(
         manifest_version=payload["manifest_version"],
         schema_version=payload["schema_version"],
@@ -326,6 +419,7 @@ def read_manifest(source: str, root: Path = CORPUS_ROOT) -> CorpusManifest:
         limit=payload["limit"],
         timestamp_diagnostic=dict(payload["timestamp_diagnostic"]),
         acquisition_id=acquisition_id,
+        excluded_records=excluded_records,
     )
 
 

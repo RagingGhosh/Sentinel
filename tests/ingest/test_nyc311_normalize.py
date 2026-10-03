@@ -12,7 +12,7 @@ depend on the machine's clock or its local zone.
 """
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -21,15 +21,18 @@ import pytest
 from ingest.schema import CFPBOutcome, CorpusRecord, NYC311Outcome
 from ingest.sources.base import SourceAdapter
 from ingest.sources.nyc311 import (
+    EXCLUSION_KINDS,
     SOURCE_API_VERSION,
     SOURCE_SLUG,
     SOURCE_TIMEZONE,
     AmbiguousLocalTime,
+    Exclusion,
     MissingDescriptor,
     MissingField,
     NegativeResolutionTime,
     NonexistentLocalTime,
     NYC311Adapter,
+    classify_row,
     normalize,
     rows_from_page,
     to_source_local,
@@ -533,3 +536,412 @@ def test_normalizing_the_whole_fixture_yields_the_expected_split():
         ("60000005", "NegativeResolutionTime"),
         ("60000006", "MissingDescriptor"),
     ]
+
+
+# --- D50: classify_row, the typed exclusion of D45's three classes (T1-T10) -----------
+#
+# `normalize` is unchanged and still raises for every row below; `classify_row` is the
+# seam the command line uses (addendum D50 (3)). Stage one applies every check outside
+# the D45 classes and raises exactly what `normalize` raises; stage two returns one
+# `Exclusion`, the first D45 condition that applies, in D50 (2)'s order.
+
+ABSENT = object()
+"""Marks a key to remove from a row, as opposed to setting it to null."""
+
+
+def variant(key: str = "60000001", **changes) -> dict:
+    """A fixture row with fields replaced, or removed when given `ABSENT`."""
+    source = dict(row(key))
+    for field, value in changes.items():
+        if value is ABSENT:
+            source.pop(field, None)
+        else:
+            source[field] = value
+    return source
+
+
+def excluded(source: dict, kind: str, civil: date) -> Exclusion:
+    return Exclusion(external_id=source["unique_key"], kind=kind, created_civil_date=civil)
+
+
+def test_the_six_exclusion_kinds_in_precedence_order():
+    assert EXCLUSION_KINDS == (
+        "MissingDescriptor",
+        "AmbiguousLocalTime:created_date",
+        "NonexistentLocalTime:created_date",
+        "AmbiguousLocalTime:closed_date",
+        "NonexistentLocalTime:closed_date",
+        "NegativeResolutionTime",
+    )
+
+
+def test_an_exclusion_is_frozen():
+    import dataclasses
+
+    exclusion = Exclusion(
+        external_id="1", kind="MissingDescriptor", created_civil_date=date(2024, 1, 15)
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        exclusion.kind = "NegativeResolutionTime"  # type: ignore[misc]
+
+
+# T1: every row normalize accepts classifies to the identical pair.
+ACCEPTED = {
+    "a closed request": lambda: row("60000001"),
+    "an open request without closed_date": lambda: row("60000002"),
+    "a closed request in summer": lambda: row("60000003"),
+    "an open request with a null closed_date": lambda: row("60000004"),
+    "an empty descriptor": lambda: variant(descriptor=""),
+    "a whitespace-only descriptor": lambda: variant(descriptor="   "),
+    "a zero duration": lambda: variant(
+        created_date="2024-01-15T09:30:00.000", closed_date="2024-01-15T09:30:00.000"
+    ),
+    "an interval spanning the autumn transition": lambda: variant(
+        created_date="2024-11-02T12:00:00.000", closed_date="2024-11-03T12:00:00.000"
+    ),
+    "an interval spanning the spring transition": lambda: variant(
+        created_date="2024-03-09T12:00:00.000", closed_date="2024-03-10T12:00:00.000"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ACCEPTED))
+def test_t1_an_accepted_row_classifies_to_exactly_what_normalize_returns(case):
+    source = ACCEPTED[case]()
+    assert classify_row(source) == normalize(source)
+
+
+# T2: the whole MissingDescriptor class, and nothing beyond it.
+@pytest.mark.parametrize(
+    "descriptor",
+    [None, ABSENT, 42, 1.5, True, ["Loud Music"], {"text": "Loud Music"}],
+    ids=["null", "absent", "int", "float", "bool", "list", "object"],
+)
+def test_t2_a_null_absent_or_non_text_descriptor_is_missing_descriptor(descriptor):
+    source = variant(descriptor=descriptor)
+    assert classify_row(source) == excluded(source, "MissingDescriptor", date(2024, 1, 15))
+
+
+def test_t2_the_fixture_s_null_descriptor_row_is_missing_descriptor():
+    source = row("60000006")
+    assert classify_row(source) == excluded(source, "MissingDescriptor", date(2024, 5, 20))
+
+
+@pytest.mark.parametrize("descriptor", ["", " ", "   ", "\t\n"])
+def test_t2_an_empty_or_whitespace_only_descriptor_is_kept_verbatim(descriptor):
+    record, _ = classify_row(variant(descriptor=descriptor))
+    assert record.text == descriptor
+
+
+# T3: created_date edges, at and around their boundaries.
+CREATED_EDGES = [
+    (f"{day}T{clock}", kind)
+    for day, kind in (
+        ("2024-11-03", "AmbiguousLocalTime:created_date"),
+        ("2025-11-02", "AmbiguousLocalTime:created_date"),
+    )
+    for clock in ("01:00:00.000", "01:30:00.000", "01:59:59.999")
+] + [
+    (f"{day}T{clock}", kind)
+    for day, kind in (
+        ("2024-03-10", "NonexistentLocalTime:created_date"),
+        ("2025-03-09", "NonexistentLocalTime:created_date"),
+    )
+    for clock in ("02:00:00.000", "02:30:00.000", "02:59:59.999")
+]
+EDGE_NEIGHBOURS = [
+    f"{day}T{clock}"
+    for day in ("2024-11-03", "2025-11-02")
+    for clock in ("00:59:59.999", "02:00:00.000")
+] + [
+    f"{day}T{clock}"
+    for day in ("2024-03-10", "2025-03-09")
+    for clock in ("01:59:59.999", "03:00:00.000")
+]
+
+
+@pytest.mark.parametrize("value, kind", CREATED_EDGES)
+def test_t3_a_created_date_edge_is_its_own_kind(value, kind):
+    source = variant(created_date=value, closed_date=ABSENT)
+    assert classify_row(source) == excluded(source, kind, date.fromisoformat(value[:10]))
+
+
+@pytest.mark.parametrize("value", EDGE_NEIGHBOURS)
+def test_t3_a_created_date_beside_an_edge_is_kept(value):
+    source = variant(created_date=value, closed_date=ABSENT)
+    assert classify_row(source) == normalize(source)
+
+
+# T4: closed_date edges, counted under created_date's civil date.
+CLOSED_EDGES = (
+    [
+        ("2024-11-02T12:00:00.000", f"2024-11-03T{clock}", "AmbiguousLocalTime:closed_date")
+        for clock in ("01:00:00.000", "01:30:00.000", "01:59:59.999")
+    ]
+    + [
+        ("2025-11-01T12:00:00.000", "2025-11-02T01:15:00.000", "AmbiguousLocalTime:closed_date"),
+    ]
+    + [
+        ("2024-03-09T12:00:00.000", f"2024-03-10T{clock}", "NonexistentLocalTime:closed_date")
+        for clock in ("02:00:00.000", "02:30:00.000", "02:59:59.999")
+    ]
+    + [
+        ("2025-03-08T12:00:00.000", "2025-03-09T02:30:00.000", "NonexistentLocalTime:closed_date"),
+        ("2025-12-31T12:00:00.000", "2026-03-08T02:30:00.000", "NonexistentLocalTime:closed_date"),
+    ]
+)
+
+
+@pytest.mark.parametrize("created, closed, kind", CLOSED_EDGES)
+def test_t4_a_closed_date_edge_counts_under_created_date(created, closed, kind):
+    source = variant(created_date=created, closed_date=closed)
+    assert classify_row(source) == excluded(source, kind, date.fromisoformat(created[:10]))
+
+
+@pytest.mark.parametrize("value", EDGE_NEIGHBOURS)
+def test_t4_a_closed_date_beside_an_edge_is_kept(value):
+    source = variant(created_date="2024-03-01T00:00:00.000", closed_date=value)
+    assert classify_row(source) == normalize(source)
+
+
+# T5: a negative duration, measured between instants.
+def test_t5_a_close_one_second_before_the_open_is_negative_resolution_time():
+    source = variant(created_date="2024-02-01T12:00:00.000", closed_date="2024-02-01T11:59:59.000")
+    assert classify_row(source) == excluded(source, "NegativeResolutionTime", date(2024, 2, 1))
+
+
+def test_t5_the_fixture_s_negative_row_is_negative_resolution_time():
+    source = row("60000005")
+    assert classify_row(source) == excluded(source, "NegativeResolutionTime", date(2024, 2, 1))
+
+
+def test_t5_a_zero_duration_is_kept():
+    _, outcome = classify_row(
+        variant(created_date="2024-01-15T09:30:00.000", closed_date="2024-01-15T09:30:00.000")
+    )
+    assert outcome.resolution_hours == 0.0
+
+
+def test_t5_the_duration_is_measured_between_instants():
+    """00:50 EDT to 02:00 EST is 2h10m between instants, 1h10m by the wall clock."""
+    _, outcome = classify_row(
+        variant(created_date="2024-11-03T00:50:00.000", closed_date="2024-11-03T02:00:00.000")
+    )
+    assert outcome.resolution_hours == pytest.approx(2 + 10 / 60)
+
+
+# T6: one row with several D45 conditions takes exactly one kind, the first that applies.
+OVERLAPS = {
+    "null descriptor and a created fold": (
+        dict(descriptor=None, created_date="2024-11-03T01:30:00.000", closed_date=ABSENT),
+        "MissingDescriptor",
+    ),
+    "null descriptor and a closed gap": (
+        dict(descriptor=None, closed_date="2024-03-10T02:30:00.000"),
+        "MissingDescriptor",
+    ),
+    "null descriptor and a negative duration": (
+        dict(descriptor=None, closed_date="2024-01-15T09:00:00.000"),
+        "MissingDescriptor",
+    ),
+    "a created fold and a closed gap": (
+        dict(created_date="2024-11-03T01:30:00.000", closed_date="2025-03-09T02:30:00.000"),
+        "AmbiguousLocalTime:created_date",
+    ),
+    "a created gap and a closed fold": (
+        dict(created_date="2024-03-10T02:30:00.000", closed_date="2024-11-03T01:30:00.000"),
+        "NonexistentLocalTime:created_date",
+    ),
+    "a created fold whose wall clock follows the close": (
+        dict(created_date="2024-11-03T01:30:00.000", closed_date="2024-11-03T00:30:00.000"),
+        "AmbiguousLocalTime:created_date",
+    ),
+    "a created gap whose wall clock follows the close": (
+        dict(created_date="2024-03-10T02:30:00.000", closed_date="2024-03-10T01:00:00.000"),
+        "NonexistentLocalTime:created_date",
+    ),
+    "a closed fold whose wall clock precedes the open": (
+        dict(created_date="2024-11-03T02:30:00.000", closed_date="2024-11-03T01:30:00.000"),
+        "AmbiguousLocalTime:closed_date",
+    ),
+    "a closed gap whose wall clock precedes the open": (
+        dict(created_date="2024-03-10T03:30:00.000", closed_date="2024-03-10T02:30:00.000"),
+        "NonexistentLocalTime:closed_date",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(OVERLAPS))
+def test_t6_overlapping_conditions_take_the_first_applicable_kind(case):
+    changes, kind = OVERLAPS[case]
+    source = variant(**changes)
+    civil = date.fromisoformat(source["created_date"][:10])
+    assert classify_row(source) == excluded(source, kind, civil)
+
+
+# T7: every check outside the D45 classes still refuses, whatever D45 condition is present.
+NON_D45 = {
+    "unique_key absent": dict(unique_key=ABSENT),
+    "unique_key blank": dict(unique_key="   "),
+    "unique_key not text": dict(unique_key=60000001),
+    "complaint_type absent": dict(complaint_type=ABSENT),
+    "complaint_type not text": dict(complaint_type=7),
+    "created_date absent": dict(created_date=ABSENT),
+    "created_date blank": dict(created_date="  "),
+    "created_date not text": dict(created_date=20240115),
+    "created_date not ISO-8601": dict(created_date="the fifteenth of January"),
+    "created_date with an offset": dict(created_date="2024-01-15T09:30:00-05:00"),
+    "closed_date blank": dict(closed_date=""),
+    "closed_date not text": dict(closed_date=5),
+    "closed_date not ISO-8601": dict(closed_date="soon"),
+    "closed_date with an offset": dict(closed_date="2024-01-15T19:18:00+00:00"),
+}
+D45_CONDITIONS = {
+    "MissingDescriptor": dict(descriptor=None),
+    "AmbiguousLocalTime:created_date": dict(created_date="2024-11-03T01:30:00.000"),
+    "NonexistentLocalTime:created_date": dict(created_date="2024-03-10T02:30:00.000"),
+    "AmbiguousLocalTime:closed_date": dict(closed_date="2024-11-03T01:30:00.000"),
+    "NonexistentLocalTime:closed_date": dict(closed_date="2024-03-10T02:30:00.000"),
+    "NegativeResolutionTime": dict(closed_date="2024-01-15T09:00:00.000"),
+}
+NON_D45_WITH_D45 = [
+    (problem, condition)
+    for problem in sorted(NON_D45)
+    for condition in D45_CONDITIONS
+    if not set(NON_D45[problem]) & set(D45_CONDITIONS[condition])
+]
+
+
+def failure(function, source) -> tuple[type, str]:
+    try:
+        function(source)
+    except Exception as exc:  # the comparison is the point: type and message
+        return type(exc), str(exc)
+    raise AssertionError(f"{function.__name__} accepted {source!r}")
+
+
+@pytest.mark.parametrize("problem, condition", NON_D45_WITH_D45)
+def test_t7_a_non_d45_problem_refuses_as_it_does_alone(problem, condition):
+    alone = failure(normalize, variant(**NON_D45[problem]))
+    assert alone[0] is MissingField
+    assert failure(classify_row, variant(**NON_D45[problem], **D45_CONDITIONS[condition])) == alone
+
+
+@pytest.mark.parametrize("problem", sorted(NON_D45))
+def test_t7_a_non_d45_problem_alone_refuses_exactly_as_normalize_does(problem):
+    source = variant(**NON_D45[problem])
+    assert failure(classify_row, source) == failure(normalize, source)
+
+
+def test_t7_the_cross_product_covers_every_kind_and_every_problem():
+    assert {condition for _, condition in NON_D45_WITH_D45} == set(EXCLUSION_KINDS)
+    assert {problem for problem, _ in NON_D45_WITH_D45} == set(NON_D45)
+
+
+@pytest.mark.parametrize("source", [[], "a row", 5, None], ids=["list", "str", "int", "none"])
+def test_t7_a_row_that_is_not_a_mapping_fails_as_it_does_under_normalize(source):
+    assert failure(classify_row, source) == failure(normalize, source)
+
+
+# T8: the year is created_date's New York civil year, never a UTC instant's.
+def test_t8_a_row_created_late_on_new_year_s_eve_counts_under_its_civil_year():
+    source = variant("60000006", created_date="2024-12-31T23:30:00.000", closed_date=ABSENT)
+    instant = datetime(2024, 12, 31, 23, 30, tzinfo=NY).astimezone(UTC)
+    assert instant.year == 2025, "the UTC instant falls in the next year"
+    exclusion = classify_row(source)
+    assert exclusion == excluded(source, "MissingDescriptor", date(2024, 12, 31))
+    assert exclusion.created_civil_date.year == 2024
+
+
+def test_t8_an_edge_row_takes_its_literal_s_civil_date_though_it_has_no_instant():
+    source = variant(created_date="2024-03-10T02:30:00.000", closed_date=ABSENT)
+    assert classify_row(source).created_civil_date == date(2024, 3, 10)
+
+
+# T9: normalize still raises the original typed error for every D45 row above.
+ERROR_OF_KIND = {
+    "MissingDescriptor": MissingDescriptor,
+    "AmbiguousLocalTime:created_date": AmbiguousLocalTime,
+    "NonexistentLocalTime:created_date": NonexistentLocalTime,
+    "AmbiguousLocalTime:closed_date": AmbiguousLocalTime,
+    "NonexistentLocalTime:closed_date": NonexistentLocalTime,
+    "NegativeResolutionTime": NegativeResolutionTime,
+}
+D45_ROWS = (
+    [(f"descriptor {i}", lambda d=d: variant(descriptor=d), "MissingDescriptor")
+     for i, d in enumerate([None, ABSENT, 42])]
+    + [(f"created {v}", lambda v=v: variant(created_date=v, closed_date=ABSENT), k)
+       for v, k in CREATED_EDGES]
+    + [(f"closed {c}", lambda o=o, c=c: variant(created_date=o, closed_date=c), k)
+       for o, c, k in CLOSED_EDGES]
+    + [("negative", lambda: row("60000005"), "NegativeResolutionTime")]
+    + [(f"overlap {case}", lambda case=case: variant(**OVERLAPS[case][0]), OVERLAPS[case][1])
+       for case in sorted(OVERLAPS)]
+)  # fmt: skip
+
+
+@pytest.mark.parametrize("case, make, kind", D45_ROWS, ids=[case for case, _, _ in D45_ROWS])
+def test_t9_normalize_still_raises_the_d45_error_classify_row_names(case, make, kind):
+    source = make()
+    assert classify_row(source).kind == kind
+    with pytest.raises(ERROR_OF_KIND[kind]):
+        normalize(source)
+
+
+# T10: pure, deterministic, window-blind, and importing nothing new.
+def test_t10_classify_row_is_deterministic():
+    for source in (row("60000001"), row("60000005"), row("60000006")):
+        assert classify_row(source) == classify_row(source)
+
+
+def test_t10_classify_row_does_not_mutate_its_input():
+    for key in ("60000001", "60000005", "60000006"):
+        source = row(key)
+        before = json.dumps(source, sort_keys=True)
+        classify_row(source)
+        assert json.dumps(source, sort_keys=True) == before
+
+
+def test_t10_classify_row_touches_no_network_and_no_filesystem(monkeypatch):
+    import socket
+
+    def boom(*args, **kwargs):
+        raise AssertionError("classify_row must be pure")
+
+    sources = [row("60000001"), row("60000005"), row("60000006")]
+    monkeypatch.setattr(socket, "socket", boom)
+    monkeypatch.setattr(socket, "create_connection", boom)
+    monkeypatch.setattr(Path, "open", boom)
+    results = [classify_row(source) for source in sources]
+    assert isinstance(results[0], tuple)
+    assert [r.kind for r in results[1:]] == ["NegativeResolutionTime", "MissingDescriptor"]
+
+
+def test_t10_classify_row_does_not_filter_by_window():
+    record, _ = classify_row(variant(created_date="2019-06-01T00:00:00.000", closed_date=ABSENT))
+    assert record.submitted_at.year == 2019
+    source = variant("60000006", created_date="2019-06-01T00:00:00.000", closed_date=ABSENT)
+    assert classify_row(source).created_civil_date == date(2019, 6, 1)
+
+
+def test_t10_classify_row_imports_nothing_and_the_module_only_the_standard_library():
+    import ast
+    import sys
+
+    tree = ast.parse(Path("ingest/sources/nyc311.py").read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "classify_row"
+    )
+    assert not [n for n in ast.walk(function) if isinstance(n, ast.Import | ast.ImportFrom)]
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    } | {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+    for module in imported:
+        assert module in {"ingest.schema", "ingest.sources.base"} or (
+            module.split(".")[0] in sys.stdlib_module_names
+        ), module

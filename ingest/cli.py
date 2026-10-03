@@ -9,7 +9,9 @@ The order of operations is load-bearing::
       -> refuse a --limit run into a root holding an authoritative corpus (D26)
       -> fetch (or reuse the raw cache, or a completed acquisition)
       -> verify the acquisition, when one is given (D46)
-      -> normalize through the source's adapter, filtered to the window
+      -> normalize through the source's adapter, filtered to the window; NYC 311
+         rows are classified, and an otherwise-valid row of a D45 class inside the
+         window is excluded and counted by kind and civil year instead (D50)
       -> refuse an empty window (D23)
       -> assert the label roster over the whole window   <-- before the corpus changes
       -> refuse a duplicate (source, external_id) in the window (D44)
@@ -89,6 +91,7 @@ from ingest.manifest import (
     build_manifest,
     clear_corpus,
     manifest_path,
+    no_exclusions,
     read_manifest,
     write_manifest,
 )
@@ -306,11 +309,40 @@ def resolve_window(source: str, start: date, end: date) -> tuple[datetime, datet
 
 def _normalize_source(
     source: str, pages: Iterable[SourcePage]
-) -> Iterator[tuple[CorpusRecord, CFPBOutcome | NYC311Outcome]]:
-    adapter = cfpb if source == "cfpb" else nyc311
+) -> Iterator[tuple[CorpusRecord, CFPBOutcome | NYC311Outcome] | nyc311.Exclusion]:
+    """Each row's normalized pair, or, for NYC 311 only, the row's D50 `Exclusion`.
+
+    NYC 311 rows go through `classify_row`, which refuses every problem outside D45's
+    classes exactly as `normalize` does. CFPB has no D50 class and is unchanged.
+    """
     for page in pages:
-        for row in adapter.rows_from_page(page):
-            yield adapter.normalize(row)
+        if source == "cfpb":
+            for row in cfpb.rows_from_page(page):
+                yield cfpb.normalize(row)
+        else:
+            for row in nyc311.rows_from_page(page):
+                yield nyc311.classify_row(row)
+
+
+def _exclusion_counts(
+    source: str, exclusions: Iterable[nyc311.Exclusion]
+) -> dict[str, dict[int, int]]:
+    """D50's `excluded_records`: kind -> created_date's civil year -> rows excluded."""
+    counts = no_exclusions(source)
+    for exclusion in exclusions:
+        years = counts[exclusion.kind]
+        year = exclusion.created_civil_date.year
+        years[year] = years.get(year, 0) + 1
+    return {kind: dict(sorted(years.items())) for kind, years in counts.items()}
+
+
+def _exclusion_summary(excluded_records: dict[str, dict[int, int]]) -> str:
+    """The exclusion counts, for a refusal message that must state them (D50)."""
+    totals = {kind: sum(years.values()) for kind, years in excluded_records.items()}
+    total = sum(totals.values())
+    were = "row was" if total == 1 else "rows were"
+    detail = ", ".join(f"{kind} {count}" for kind, count in totals.items())
+    return f"{total} {were} excluded under D50 ({detail}). "
 
 
 def _local_hour_source(source: str) -> Callable[[datetime], datetime]:
@@ -598,19 +630,31 @@ def ingest(
 
     # The complete window, before any truncation. --limit bounds persistence
     # only (D24), so the roster below is derived from every candidate record.
+    # D50: an otherwise-valid NYC 311 row of a D45 class is excluded rather than kept.
+    # It is counted when its created_date's civil date lies in the window's civil
+    # dates -- for a row that normalizes, the same test as the instant comparison --
+    # and, like any row outside the window, it is not counted when it does not.
     pages_read = 0
     window: list[tuple[CorpusRecord, CFPBOutcome | NYC311Outcome]] = []
+    exclusions: list[nyc311.Exclusion] = []
     for page in iter_cached_pages(source, raw_root):
         pages_read += 1
-        for record, outcome in _normalize_source(source, [page]):
+        for item in _normalize_source(source, [page]):
+            if isinstance(item, nyc311.Exclusion):
+                if start <= item.created_civil_date <= end:
+                    exclusions.append(item)
+                continue
+            record, outcome = item
             if window_start <= record.submitted_at <= window_end:
                 window.append((record, outcome))
+    excluded_records = _exclusion_counts(source, exclusions)
 
     if not window:
         raise EmptyWindow(
             f"{source}: zero records fell inside "
             f"{window_start.isoformat()} .. {window_end.isoformat()} "
             f"({pages_read} cached page{'' if pages_read == 1 else 's'} read). "
+            f"{_exclusion_summary(excluded_records) if source == 'nyc311' else ''}"
             "Nothing was written."
         )
 
@@ -625,8 +669,10 @@ def ingest(
 
     # D44: a record's identity is (source, external_id), so two records sharing one
     # refuse the run rather than one of them being kept. Still before any write; after
-    # the roster, so a taxonomy failure is reported as the taxonomy failure it is.
+    # the roster, so a taxonomy failure is reported as the taxonomy failure it is. An
+    # excluded row keeps its identity, so it cannot hide a duplicate (D50).
     identities = Counter((record.source, record.external_id) for record, _ in window)
+    identities.update((source, exclusion.external_id) for exclusion in exclusions)
     duplicates = {key: count for key, count in identities.items() if count > 1}
     if duplicates:
         shown = ", ".join(
@@ -699,6 +745,7 @@ def ingest(
         timestamp_diagnostic=diagnostic,
         root=corpus_root,
         acquisition_id=acquisition_id,
+        excluded_records=excluded_records,
     )
     write_manifest(manifest, root=corpus_root)
     return manifest
