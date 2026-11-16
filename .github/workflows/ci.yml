@@ -65,3 +65,20 @@ jobs:
           python -c "import pyarrow.parquet; print('pyarrow', pyarrow.__version__)"
           python -c "import numpy; print(numpy.__version__)"
           pytest tests/ingest/test_storage.py tests/ingest/test_manifest.py tests/ingest/test_cli.py tests/ingest/test_cfpb_outcomes.py tests/ml/training/test_features.py tests/ml/training/test_labels.py tests/ml/training/test_metrics.py tests/ml/training/test_artifacts.py
+
+      # Plan Task 27. The suite-wide no-network guard's own tests are not marked
+      # 'ml' either: they exercise no model artifact. Most of them need only the
+      # application tier and already run in the app job. Two do not: the cases
+      # that call 'ingest.cli.main --fetch' import ingest.cli, which needs scipy
+      # and pyarrow, so in the app job they skip. Without this step those two
+      # would run in neither job, for the same reason as the step above.
+      #
+      # Selected by path, with no '-m' filter, so every test in the module runs
+      # here. The import checks first turn a missing scipy or pyarrow into a hard
+      # failure; otherwise importorskip would skip the two cases and the step
+      # would go green without having run them.
+      - name: Network guard tests (the --fetch cases require the training tier)
+        run: |
+          python -c "import scipy.stats, scipy; print('scipy', scipy.__version__)"
+          python -c "import pyarrow.parquet; print('pyarrow', pyarrow.__version__)"
+          pytest tests/test_network_guard.py
