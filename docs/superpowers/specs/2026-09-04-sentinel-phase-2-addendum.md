@@ -4690,3 +4690,2682 @@ ingestion does not depend on D50.
 *Scope:* the treatment of D45's three NYC 311 row classes, manifest version 4's one
 field, and plan Task 26. **D1–D49 are unaltered.** D50 changes no code, no test, no
 requirement and no CI.
+
+**D51 — The resource-readiness framework for real acquisition. The measured environment
+and its test gate are recorded. Every real run, offline rerun, archive replay and
+continuation is conducted under an external harness that becomes usable only when its
+validation passes, with stage-specific, fail-closed network and integrity guards; CFPB
+by-ID requests are checked, before each is sent, against the run's own production archive
+keys and the active API day, so no separate index is built. Launch requires every sample
+of a ten-minute quiet period to show system commit headroom of at least 6,000,000,000
+bytes plus the variation observed in it; during a run, triggers request a graceful
+interruption at the next safe checkpoint, a trigger and not a cap. Every execution has its
+own run identifier, reserved by an exclusive-create claim, and ends in exactly one
+outcome, classified from a dedicated terminal artifact verified against its launch file
+and the orchestrator's own evidence; an invalid artifact or a demonstrated contradiction
+is an unclassified termination, which can never be continued. An eligible interruption may
+be continued only by a new execution, under a fresh explicit authorization and a new run
+identifier. A CFPB-first sequence of separately authorized stages — A, A′, A2, the further
+measurement, B, then C — is frozen; Stage B's peak-memory projection is unsupported, so
+Stage B, and with it Stage C, cannot be authorized under this decision. The identity of
+the measured process (U6) blocks every measured execution, and no acquisition is
+authorized (addendum §2.5; plan §F, §S, §U, Tasks 20, 22–26; D24, D26, D27, D37.2, D40,
+D41, D42, D43, D44, D46, D47, D48, D49, D50).**
+*Was:* D44 made real ingestion conditional on "a separate authorization of the hardware
+and of the run" and recorded a full-window normalization peak of about 4 to 6 GB per
+source as an estimate to be measured on the first real run; D50 named that hardware and
+resource gate as the next dependency. Task 20's figures, the only measured resource
+figures, come from one Windows machine (Intel Family 6 Model 154, 12 cores, Python
+3.13.3). The working copy has since moved to a second Windows machine. Nothing in the
+repository measures an acquisition's own cost: `ingest.cli` records no memory or timing,
+and `RequestRecord` keeps only the response each request finally used, so failed attempts,
+retried statuses and backoff waits leave no evidence.
+
+*Decision record (2026-11-16):* The owner conditionally approved D51 on 2026-11-16 as a
+specification for future external harness development and for the conduct of separately
+authorized executions. The approval applies to the specification only. It does not
+authorize harness construction; validation activities; acquisition, offline reruns or
+archive replays; any measured execution; or any repository modification beyond the
+separately authorized D51 documentation entry. All prerequisites, technical blockers,
+owner decisions, platform limitations and stage restrictions documented in D51 remain in
+force. Every subsequent activity requires its own explicit authorization, and no
+validation result or framework approval automatically authorizes an execution. Stage B and
+Stage C remain prohibited under D51. Continuations remain prohibited until the
+requirements of E6 are satisfied.
+
+*Now — (0) Conventions.*
+
+**Status words.**
+- *Conditionally approved*: the status of everything in D51 since the owner's decision of
+  2026-11-16 (17). It means approved as a specification only; it implements, validates and
+  authorizes nothing.
+- *Proposed*: the status of D51 before that decision. Where D51 still says that it
+  "proposes" a procedure or method, it means one that D51 specifies; the word no longer
+  means that D51 awaits approval.
+- *Measured*: recorded on this machine on the date stated; a snapshot, not a guarantee.
+- *Estimate*: not measured.
+- *Specified*: a requirement D51 places on the harness, which does not exist.
+- *Unverified*: a platform, library or mechanism property D51 relies on; each is listed in
+  (18), and none is established.
+
+**No test, validation, source review, measurement or acquisition described in D51 has been
+built, run or performed.**
+
+**Processes.** The *orchestrator* is the external harness process that prepares, launches,
+observes and classifies an execution. The *child* is a fresh interpreter performing
+exactly one measured run, the one measurement D41 allows a process.
+
+**Run kinds.** A run kind is fixed by the execution's authorization and recorded in its
+launch file (11.1). It is one of:
+- a *real run*: `ingest.cli.main` with source contact;
+- an *offline rerun*: `ingest.cli.main` with `--fetch` on a completed acquisition, reusing
+  it with zero requests;
+- an *archive replay* (13.9).
+
+**Executions and run identifiers.** Every execution — of any run kind, first or
+continuation — has its own *run identifier* (11.1). It is named in that execution's own
+explicit authorization, is reserved by an exclusive-create *identifier claim* (11.1a), is
+never reused, and is never derived from another identifier. A *continuation* is a new
+execution, under its own fresh authorization and run identifier, that continues an earlier
+execution whose outcome was an eligible interruption (12.7). No execution is ever resumed
+under the authorization or run identifier of the execution it continues.
+
+**Two kinds of activity.** A *validation activity* is a unit test, a mock validation of
+(4.6), or a Windows filesystem integration test (4.6a). A *measured execution* is a real
+run, an offline rerun, an archive replay or a continuation. (4.6a) keeps them apart.
+
+**Time.** Fields ending `_qpc` are performance-counter readings, and they alone order
+events across processes (10.1). Fields ending `_utc` are for audit only.
+
+**Evidence classes.** A *contradiction* is well-formed evidence that conflicts with other
+well-formed evidence. An *evidence defect*, written **E**, is evidence that is missing,
+malformed, unusable, or whose ordering cannot be established. An *unclassified
+termination* is the outcome of an invalid terminal artifact or of any contradiction
+(12.3).
+
+**Other terms**, each defined once: the refusal and trigger-stop exceptions (4.5); the
+active API-day context, the integrity latch and the exit record (4.4); the terminal marker
+(6.1); checkpoints, check events and the forced-action rule (9.2, 9.4, 10.3); the delivery
+medium (9.3); the launch lifecycle, lifecycle nonce, identifier claim and run-directory
+states (11.1a); the claims directory (11.1b); the terminal artifact, launch file, exit
+snapshot and classification record (11); the acquisition manifest (11.9); the outcome
+categories (12.6).
+
+*Now — (1) The environment, as measured on 2026-10-10.*
+
+These are measured snapshots, not guarantees about the machine at any later time.
+
+| Item | Measured |
+|---|---|
+| Machine | Alienware 16 Area-51 AA16250; Windows 11 Home Single Language 25H2, build 26200.9168 |
+| CPU | Intel Core Ultra 9 275HX (Family 6 Model 198), 24 cores, 24 logical processors |
+| Memory | 34,359,738,368 bytes installed; in two snapshots, 8.0–8.5 GB available and 91–92% of a 54,284,386,304-byte commit limit in use, leaving 4,507,217,920 and 4,756,672,512 bytes of commit headroom, with `llama-server`, LM Studio and Ollama holding about 16.3 GB of private memory |
+| Storage | `C:\sentinel` on the internal NVMe SSD (NTFS), about 1.7 TB free |
+| Network | Cloudflare WARP installed with its tunnel disconnected; no proxy in the environment, WinINet or WinHTTP; direct route over Wi-Fi |
+| Power | on AC; the active plan sleeps after 600 seconds idle on AC |
+| Python | CPython 3.13.13 at `C:\venvs\sentinel-py313`; the 57 pins of `requirements/train.txt` and `requirements/dev.txt` installed exactly; `requests` 2.34.2 and `urllib3` 2.7.0, with neither brotli nor zstandard installed |
+| Venv launcher (measured 2026-10-11) | `C:\venvs\sentinel-py313\Scripts\python.exe` is byte-identical to the standard library's `venvlauncher.exe` (SHA256 `e6c07188984d41b80f822dcdaeaceeb217cdf977f18f79c421a3a53edba895c3`) |
+
+**Stage A cannot start on this evidence.** The latest headroom evidence is two historical
+snapshots taken on 2026-10-10: 4,507,217,920 and 4,756,672,512 bytes of commit headroom,
+each below the 6,000,000,000-byte minimum on its own, with substantial memory held by
+local model servers. No ten-minute quiet-period evaluation under (7) has been performed,
+so the launch gate has **not been evaluated**. The snapshots indicate it would not have
+passed under the conditions recorded then. Only a fresh quiet-period evaluation,
+immediately before launch, can decide it.
+
+Two gates stand before Stage A. Its authorization may be sought only once every
+authorization prerequisite of (16) has been met, and they are not: the harness does not
+exist, so its validation has not passed, and the process-identity blocker U6 (4.2) is
+unresolved. Its launch, once authorized, further requires the full lifecycle of (11.1a).
+Neither gate is met now. Nothing here assumes the servers' memory use has changed, and
+nothing terminates them.
+
+*Now — (2) The test gate on this machine.*
+
+`LongPathsEnabled` is 0. Under the default temporary directory, 47 tests failed on paths
+of 260 to 266 characters. With a process-local short `TEMP` and `TMP` and a short
+`--basetemp`, the full suite passed 2,417 tests, and ruff, mypy on both platforms, the
+migrations check and the diff checks passed. No code change and no persistent registry or
+user-environment change is required. Every test run on this machine uses that
+process-local workaround. Paths that a real acquisition under `C:\sentinel` creates are
+estimated at about 161 characters at most.
+
+*Now — (3) What remains estimated or unknown.*
+
+**Estimates.** These are all estimates:
+- the 4 to 6 GB normalization peak (D44);
+- the owner's conservative estimate of about 17 GB of disk for a full CFPB run, covering
+  inputs, retained acquisition evidence, intermediate files and corpus. It was supplied
+  with the 2026-10-10 migration task, appears in no repository document, and has
+  components that are not yet measured;
+- every projection from either figure.
+
+**Reconnaissance drivers used in (13).**
+- Narrative-bearing records held: 10,050 in A's window, 43,920 in A2's and 2,036,435 in
+  the full window, a count fixed by the pinned export bytes.
+- Normalization pages: 7, 31 and 731, the largest holding 1,936, 1,993 and 20,524 records.
+- API days and their rows: 9 days and 37,422 rows for A; 33 and 150,837 for A2; 733 and
+  8,188,022 for the full window. The largest day is 6,958 rows and 2,398,980 bytes in A2's
+  span, against 34,091 rows and 9,962,247 bytes in the full window.
+- The full window's partitions: 814,385 records in 2024 and 1,222,050 in 2025.
+- Archive rows: 945,532 in export #5; 1,038,383 in the largest export by rows (#15);
+  8,643,971 in the full window's ten exports before the last; 9,682,354 across all eleven.
+- Export bytes: 773,033,865.
+
+**The archive key array.** The production archive's key array, which `read_archive` builds
+in the measured child and the by-ID guard of (6.8) searches, holds one signed 64-bit
+integer per archive row: 7,564,256 bytes of keys for export #5 and 77,458,832 bytes for
+the eleven exports, by arithmetic on those row counts. That arithmetic is not a
+measurement of the array's footprint, nor of `read_archive`'s retained or peak cost, which
+are measured under (5) and are unknown. The cost of the guard's lookups is unknown.
+
+**Other unknowns.** NYC 311's raw and processed disk requirements, request counts and
+duration are unknown. No real acquisition's peak, duration, retry rate or interruption
+latency has been measured on any machine.
+
+*Now — (4) The measurement harness, conditionally approved as a specification.*
+
+*(4.1) Components.*
+
+Every measured execution is conducted under an external harness kept outside the
+repository, at `C:\sentinel-tools\acqmeter`. Each run record holds a copy of every harness
+script and its SHA256.
+
+The orchestrator:
+- runs the launch lifecycle of (11.1a): L0 for a continuation, then L1 to L5 for every
+  execution;
+- prepares an archive replay's inputs (13.9);
+- takes the readings of (5) from outside the measured process;
+- fires and delivers the triggers of (9);
+- verifies the terminal artifact (11.6), runs the postflight and classifies the outcome
+  (12);
+- writes the run record.
+
+A fresh child performs exactly one measured run of its run kind, with the hooks of (4.3).
+The harness does not import `ml/training/measure.py`, whose dependencies would inflate the
+measured baseline.
+
+*(4.2) Child process identity — blocker U6.*
+
+The venv's `python.exe` is byte-identical to `venvlauncher.exe` (1). CPython's own
+`multiprocessing` treats that file as a redirector, and bypasses it by launching
+`sys._base_executable` with `__PYVENV_LAUNCHER__` set
+(`Lib/multiprocessing/popen_spawn_win32.py`, bpo-35797). That starting it yields a second,
+interpreter process is **unverified** platform behaviour.
+
+**Specified.** The measured child is the interpreter process itself. It is launched as the
+base interpreter with `__PYVENV_LAUNCHER__` set to the venv's `python.exe`, or by an
+equivalent method, so that each of the following refers to that interpreter process:
+- the orchestrator's process handle;
+- its once-per-second readings;
+- the budget trigger;
+- the terminal artifact's `child_pid`.
+
+The child's first event reports its own PID, its `sys.prefix` and the argument vector it
+received. Validation must show that the orchestrator's handle and the child's self-report
+name the same PID (MV-10).
+
+**U6 is an independent blocker. No measured execution may be authorized or launched until
+this requirement is designed, implemented and validated.**
+
+*(4.3) Hooks.*
+
+These are pass-through hooks in the child:
+
+| Hook | Records | Behaviour |
+|---|---|---|
+| H1 `RequestsTransport` subclass | For every attempt: timing (counter and UTC); the host as taken from the URL H6 validated; the request class of (6.7); the parameters; the sanitized representation of (6.3) — never the raw prepared request, and no request-header value outside H6's permitted pairs; the status; the harness response metadata of (6.3), and no other response-header value; the body size; any transport error and whether it is transient; the child's counters of (5) at the attempt's start and end; and the active context's sequence number, if any. For a by-ID attempt, also: the active API day, the guard's decision under (6.8) and, when a lookup ran, the number of keys carrying the ID, with the matched key's inclusion bit and archive date — never a copy of the archive or its keys. For a refused attempt: the refusal event of (6.1), written before the refusal is raised. | Inherits the session and identity. Passes the same arguments to the real `get`, whose result or exception it returns unchanged, unless a guard of (6) refuses before the call. |
+| H2 `HttpClient` subclass | Each logical request, its attempts and retries, validator rejections, and each wait, classed as pacing or backoff and checked against D44's and D47's policy. For each successful logical request, the `response_sha256` of the production `RequestRecord` it returns, and the active context's sequence number, if any. | The same constructor defaults; the original `time.sleep` with the same durations. It overrides `get` exactly once, which MV-5 confirms from the built source. |
+| H3 stage wrappers on `ingest.cli`'s fetch, verification, page, roster, write and manifest functions, and on the CFPB fetcher's `discover`, `download`, `read_archive`, `read_export`, `snapshot` and `fetch_day` | The child's counters of (5) at every stage boundary, with the counter brackets of (5.3), and each instance's driver value. | Arguments, pages and results are passed through unchanged, and exceptions propagate. The `read_archive` and `fetch_day` wrappers also do what (4.4) specifies. |
+| H4 resolver allowlist | The addresses each permitted host resolved to. | Refuses any host outside the stage's allowlist of (6.6). |
+| H5 event log | Every event, appended and flushed as it occurs. Each child event carries a contiguous `seq` (10.3). Request and response details come only from the sanitized representations of (6.3), and exception information only through the descriptors of (11.5). A refusal event is flushed before the refusal is raised. | — |
+
+*(4.4) The active API-day context, cleanup and the integrity latch.*
+
+*The integrity latch.* At startup the child creates one integrity latch. It is owned by
+the child, is independent of every context, and holds scalars only:
+- `cleanup_failed` and `cleanup_verified`, both initially false;
+- a reason, `primary_raised` or `primary_readback_failed`;
+- the failing context's sequence number and ISO day.
+
+It holds no reference to a context, a run, the archive, its keys or a day. Each flag can
+only change from false to true, and nothing resets it within the process.
+
+*The exit record.* A scalar exit record is overwritten at every `fetch_day` exit. It holds
+the sequence number and, as integers, the identities of any exception in flight and of its
+`__cause__` and `__context__`.
+
+*The `read_archive` wrapper.*
+- It records a weak reference (`weakref.ref`) to the archive it returns, in the run's
+  guard state on the H1 transport, and keeps no strong reference. `_Archive` is a plain
+  `@dataclass` without `slots` (`ingest/fetch/cfpb.py`). That such an instance supports
+  weak references is CPython behaviour, which is unverified (D-5).
+- No cache, registry or module-level object holds the archive or its keys.
+- It refuses, by raising the refusal exception, if the weak reference cannot be created,
+  or if a weak reference from an earlier return in the same run is still alive. Production
+  calls `read_archive` once per run.
+
+*The `fetch_day` wrapper*, in this order:
+1. It takes the stage-boundary reading of (5).
+2. It locates the guarded transport through the run's own client,
+   `run.context.http._transport`. It refuses if any of these holds:
+   - that object is not an H1 instance;
+   - its context slot is occupied;
+   - no weak reference is recorded for the run;
+   - the weak reference has expired;
+   - dereferencing it does not yield, by identity, the `archive` argument. The
+     dereferenced object is used only in that comparison and is bound to no name that
+     outlives it.
+
+   A refusal records and flushes a refusal event, then raises the refusal exception
+   without calling the original.
+3. It stores a new context in the slot. The context holds scalar evidence — a sequence
+   number and the ISO day — and references to the run, the `day` and the `archive`, never
+   a copy of the keys.
+4. It calls the original with the same arguments.
+5. **Cleanup** runs before anything else, on every exit, normal or exceptional. It has
+   three parts:
+   - *detach:* the slot, which must hold this context, is emptied;
+   - *clear:* the context's references to the run, the day and the archive are set to
+     none, and its scalars are kept;
+   - *release:* the wrapper's own locals holding the context, the day and the archive are
+     set to none.
+
+   The **primary** cleanup detaches and clears through the context's own methods, then
+   reads back the slot and the three fields. If the primary raises, or its read-back
+   fails, the wrapper:
+   1. sets `cleanup_failed` and the reason first;
+   2. attempts to set the transport's terminal marker (6.1);
+   3. attempts the **fallback** — the four stores made directly and separately, whatever
+      the primary achieved — and reads them back;
+   4. sets `cleanup_verified` only if that read-back confirms all four.
+
+   Release always follows. On an exceptional exit the wrapper re-raises with a bare
+   `raise`, so it holds no local reference to the exception.
+6. **Outcomes of cleanup.**
+   - *Primary verified:* a normal exit returns the original's result unchanged; an
+     exceptional exit re-raises the original exception object, with its class, message,
+     `__cause__` and `__context__` unchanged and its traceback extended only by the
+     wrapper's own entry.
+   - *Primary failed:* the latch is set before anything propagates. A normal exit raises
+     the refusal exception, with its integrity attribute set, instead of returning. An
+     exceptional exit re-raises the original exception unchanged.
+   - *`cleanup_verified` still false:* the wrapper records, where it can, only what its
+     read-backs showed, and claims nothing more. Neither it nor any later record states
+     that the context is empty or that its references are cleared.
+
+*The outermost harness frame.* It receives the run's normal return or its propagating
+exception, holding the exception through its own local only. Before any ordinary
+classification it checks:
+- the latch;
+- the transport's slot, read directly;
+- whether the exception is the refusal exception with its integrity attribute set.
+
+Any indication, or any failure to complete these checks, makes the terminal state
+`integrity`, whatever the exception's ordinary classification. The frame then:
+- **On `integrity`:**
+  1. it attempts to write the terminal artifact of (11) — guarded, and with a failure
+     ignored — with state `integrity`, the integrity exit status, the latch's scalars, the
+     exception descriptor of (11.5), and whether the exception's identity equals the exit
+     record's;
+  2. it does not modify, wrap, chain, annotate or re-raise the exception;
+  3. it ends the process at once with the integrity exit status, without normal
+     interpreter shutdown (for example via `os._exit`), so that no finalizer, generator
+     `close()` or `atexit` handler runs, and no reading, stage or request follows.
+- **Otherwise:**
+  1. it takes the exit stage's final reading of (5);
+  2. it determines the ordinary terminal state;
+  3. it writes the `terminal_begin` event (10.3) and then the terminal artifact;
+  4. it exits with that state's status.
+
+Failure to write the artifact never prevents termination. If no valid artifact exists, the
+orchestrator classifies the execution as an unclassified termination (11.8).
+
+*(4.5) Harness exceptions.*
+
+The refusal exception and the trigger-stop exception are dedicated, ordinary exceptions.
+Each derives directly from `Exception`, and from no class that any handler on the fetch
+path catches: in particular not from `TransportError` or `InvalidResponse`, which
+`HttpClient` catches (`ingest/fetch/http.py`), nor from `FetchFailed`, which `by_id`
+catches (`ingest/fetch/cfpb.py`). Every broad `except BaseException` on the path cleans up
+and re-raises (`ingest/cli.py`, `ingest/fetch/acquisition.py`), so either exception
+propagates out of the fetcher unchanged and ends the run.
+
+The refusal exception carries an in-process boolean integrity attribute, which is never
+persisted. The trigger-stop exception is raised by the checkpoint routine when it acts
+(9.4) at a checkpoint that is not the run kind's end checkpoint (9.2).
+
+*(4.6) Mock validation.*
+
+Mock validation:
+- runs with the network closed, in a scratch directory outside the repository;
+- runs at the commit and harness digests its validation authorization names (4.6a);
+- uses the repository's own fake transports, or the real `RequestsTransport` over a
+  mounted fake adapter where the session's own behaviour is under test, together with
+  synthetic exports, mock authorization fixtures and a fixture-owned fake delivery medium
+  (9.3).
+
+Each class is judged by its own standard. Hooked and unhooked runs are not required to
+match when a guard, trigger, fault or interruption is triggered on purpose.
+
+| Class | Scenarios | Passes when |
+|---|---|---|
+| MV-1 Passive equivalence — nothing fires | A clean run; HTTP 429 with `Retry-After`; repeated 5xx; a timeout; a validator rejection; HTTP 403; a 3xx; exhausted retries; a repeated count disagreement; a by-ID resolution the active-day guard of (6.8) permits; the production resume (D46) of an incomplete acquisition, exercised by launching the hooked child directly in mock mode, outside the continuation lifecycle; a rerun of a completed acquisition with zero requests; an archive replay of a completed acquisition's fake exports | Hooked and unhooked runs are identical in request URLs, parameters, application headers and their order, waits requested, acquisition contents with wall-clock fields masked, corpus records and outcomes, and exit status. Every prepared request carries exactly the headers (6.2) permits. The 3xx produces exactly one request and a `FetchFailed`. The replay's spill files and archive facts equal the fetch run's on the same exports. No fault is injected and no production code is substituted. After every `fetch_day` exit, the primary cleanup succeeds and no prohibited reference (MV-5) exists. The latch is clear at the end. Every hooked run ends with a valid terminal artifact (11.6) whose exit status matches its state. Where the unhooked run raises, the hooked run's exception meets MV-5's comparison. |
+| MV-2 Network guards | For each stage's allowlist: a fake source or command leading the fetcher to a disallowed host, endpoint, export, parameter, date or by-ID identifier; a redirect to a host outside the allowlist; an altered export body; three independent header cases (a prohibited header such as `Authorization`, an unexpected value of a permitted header such as a different `User-Agent`, an explicit `Host`), each with a fresh session, its own fake adapter and log, and a distinctive synthetic value; two independent cookie cases, matching and non-matching, each with a fresh session, adapter and log | Every refusal is raised before the adapter receives the request, as its log proves. A redirect target is neither resolved nor requested. H7 refuses before the body reaches the fetcher, and no later request is made. Each header case is refused, with its record keeping the header's name, its presence and the refusal, never the value. In the matching cookie case the second request is refused before the adapter, and the cookie's name, domain and path are recorded without its value. In the non-matching case the second request reaches the adapter with no `Cookie` header. In each case, no retained artifact contains that case's synthetic value. Every stage's allowlist refuses each request that only another stage's allowlist permits. |
+| MV-3 Active-day guard | Through the real `RequestsTransport` over a fake adapter, with synthetic exports read by the production `read_archive`, and — where production never sends the request — a U3 substitute for `_Run.values`: included and excluded IDs; blank narratives; IDs outside the window; another day and a margin day; IDs absent, repeated (synthetic archive), below the first key, above the last, at the first and last key, and between present neighbours; non-canonical IDs; IDs at or above 2^41; malformed by-ID URLs; no context, two contexts, a non-H1 transport, an expired or mismatched weak reference; a `fetch_day` that returns and one that raises; transient failures of a permitted by-ID request; one synthetic export read under A's and A2's windows; day counts and CSVs for the active day and for another; window snapshots inside and outside a context; discovery and downloads inside a context; a single-day window; a set terminal marker; the exact-day audit's six failure cases (6.9) | Permitted cases reach the adapter exactly as unhooked, retries included. Every other case is refused before the adapter, with the refusal event flushed first, the dedicated refusal exception, no further attempt and no backoff wait. A request made while the terminal marker is set is refused before any other rule. A row inside A2's window and outside A's is permitted only in A2. Each audit failure is a refusal-class integrity event. |
+| MV-4 Triggers | Simulated system-floor, budget and disk readings injected at every safe checkpoint of (9.2) and inside every stretch without one, including the corpus write | The child stops at the next safe checkpoint, never inside a request, a non-atomic write or the corpus-write sequence. Evidence is retained. The outcome is classified as (12) defines. A budget trigger during the corpus write ends in "Completion, not compliant". A budget trigger is a refusal, so no continuation is ever eligible after one. Each checkpoint's latency is recorded in counter ticks. The continuation cases MV-4a to MV-4f are in the lifecycle table below. |
+| MV-5 Exception preservation | (a) a normal return; (b) production exceptions in hooked and unhooked runs — exhausted retries (`FetchFailed`, no cause), a non-transient transport error (a `FetchFailed` caused by a `TransportError`), HTTP 403, and a synthetic `FieldDisagreement`; (c) an H6 refusal (U3 substitute) | (a) The slot is empty, the context's references are cleared, its scalars are retained, the latch is clear, and no prohibited reference exists. Prohibited means no reference to the archive, its keys or the day held by: the transport's slot; the context's fields; the locals of the H3, H1 or H6 frames, whether live or retained by a traceback; or any harness record, registry or module object. Legitimate holders are production frames and objects, test-fixture objects registered by identity, and the inspecting code's temporaries. The evidence, kept separate, is source review, direct assertions on slot and fields, direct inspection of harness frame locals, and identity checks through the weak reference; `gc.get_referrers` is supporting only, and a traced allocation peak below `8 × len(keys)` during one check is a diagnostic only. (b) Within the hooked run, the exit record's identity equals that of the object the outermost frame receives. Across runs, the class, `str()`, `args`, cause and context are compared in-process against fixture-supplied, synthetic expectations, and only booleans and descriptors are persisted. The production- and fixture-owned traceback entries, from `ingest.cli.main` to the raise site, are equal in code location and order. The only additional entries are: two H3 entries (the `ingest.cli` fetch wrapper and the `fetch_day` wrapper) in every case; one H2 `get` entry in the first three cases; and one H1 `get` entry in the `TransportError`'s own traceback in the second. (c) The dedicated refusal exception; the refusal event, naming condition 5 of (6.8), flushed before the outcome; zero adapter attempts; no backoff; a verified cleanup; and an ordinary refusal exit status. No unhooked counterpart is required. |
+| MV-6 Cleanup failure | Each case on a normal return and on an exceptional exit, with the mock child run as a subprocess. The fixture keeps its own adapter log and an `atexit` marker. (a) The primary fails and the fallback verifies. (b) Every cleanup store fails. (c) Every harness event write fails as well, combined in turn with (a) and (b). | (a) and (b): the latch is set before propagation, as event order shows and as source review confirms the latch is set only on the wrapper's cleanup path. The outermost frame records the latch it observed. For (b), records state only read-back results and never claim cleanup. A normal return raises the integrity refusal instead of returning. An exceptional exit preserves the original exception's identity and descriptors. The state is `integrity`, with the integrity exit status. There are no adapter entries after the fault, no corpus or manifest file and no `atexit` marker. Where a cleanup failure follows a failed check, its cleanup and latch events are among those (10.3) permits as P2. (c): the integrity exit status still results. If the artifact write succeeded, the outcome is Refused; if it also failed, the outcome is an unclassified termination. No harness event is required to exist. |
+| MV-7 Observation binding | A fixture-owned delivery medium that logs, for every call and by calling process, its own count and the exact tuple returned. Adversarial (U3) defective children that insert a published but unreturned request, omit a returned one, substitute one ID for another, mutate the list after its digest, or read the medium twice. Medium results that raise, are non-tuples, contain non-integers, contain IDs below 1 or contain duplicates. After a failed check (U3): a further check event, a request attempt, or a later-stage boundary event. | A-1: the check events whose kind involved a medium call match the fixture's entries one for one and in order; each `observed_request_ids` equals the sorted tuple returned; there is no **child** access to the medium outside the single read function, and orchestrator operations M-op1 to M-op3 are recorded separately and excluded. A-2: a medium that returns different data to any second read does not change A-1's result. Every adversarial variant fails A-1, and so fails P-T6. A mutation after the digest is also contradictory under (10.3). Each failure kind produces the event of (10.7): it is the last check event, followed only by the events (10.3) permits, with exactly one fixture entry where its kind requires one and no acting decision; the state is `refused` and the outcome is Refused. Each adversarial sequence after a failed check is an unclassified termination. |
+| MV-8 Timing and visibility | Causally ordered exchanges between the two processes; a request delivered before `check_started_qpc`; a mock-only delay injected between `check_started_qpc` and the read, with a delivery inside it; a stale request planted before launch; a medium written by a non-orchestrator process; deliveries completing before `read_started_qpc`, starting after `read_returned_qpc` (defective child) and overlapping the read; V3 alone; V3 together with a digest mismatch, an O1 omission or an ordinal gap; V3 with P-T6 marked not established | P-T1: no causally later reading is ever the smaller. P-T2\*: the request completed before the boundary is returned, and both outcomes are accepted for the in-delay delivery. P-T4 and (9.3)(a) to (d): the stale request is detected by M-op2 and the child is not launched; the foreign write is refused; neither M-op2 nor the child's read removes a request; the orchestrator never publishes before launch. Classifications are V1 compatible, V2 contradictory and V3 E. V3 alone is E. V3 together with a contradiction is an unclassified termination. V3 with P-T6 unestablished is E. |
+| MV-9 Terminal artifact and classification | One valid artifact; envelope failures (missing, partial only, wrong magic, truncated, appended bytes, wrong length, wrong digest, a non-ASCII byte); payload failures (non-canonical form, a duplicate key, a float, NaN, a missing or extra field); a valid envelope with contradictory content (run ID, launch digest, status against state, status against exit code, PID, latch against state, trigger against exit snapshot, a contradicting child event); launch-file faults (missing at T1, T2 or TV2, changed after T1, changed between T2 and TV2, non-canonical, wrong run ID, authorization reference, harness digest or run kind, a wrong or duplicate status mapping); a synthetic secret in an exception's message, `args`, cause and context; an invalid class name; a deep chain; one case per mapping rule and branch of (12.5); one violation of each invariant of (12.2); the evidence files modified after TV7 and before re-check 1; the same files modified after the classification record is written; post-exit events appended after a valid artifact; the child killed abruptly | Only the valid artifact, including the case with later appended events, is classified under its state. Every other artifact case is an unclassified termination, except a launch-file fault detected at T1, which prevents launch. The secret appears in no artifact, log or output. The invalid class name and the deep chain map under rule 6. **Before initial classification:** re-check 1 finds E-pre; the first mapping records an unclassified termination, and the classification record names the mismatch. **After classification:** a later re-check finds E-post; the classification record is unchanged; the event records both check times and claims no time of modification; the file is preserved; the evidence is marked compromised; acceptance, prerequisite use and continuation are refused. The lifecycle and continuation cases MV-9a to MV-9z30 are in the table below. |
+| MV-10 Child identity | The launch method of (4.2) | The orchestrator's handle and the child's self-reported PID are the same process, and `sys.prefix` is the venv's. |
+| MV-11 Sample attribution | Orchestrator samples whose brackets fall inside, across and between child boundary brackets | Attribution follows (5.4) exactly, and samples that are ambiguous at a boundary are excluded from every stage. |
+
+**Lifecycle, identity and continuation cases (Level 1).** These use mock authorization
+fixtures, which authorize nothing.
+
+| # | Case | Passes when |
+|---|---|---|
+| MV-4a | A first execution | It runs under its own mock authorization and unique run identifier; its claim is created and owned; its directory is created exclusively at L1; TV2 and TV5 bind its identity. |
+| MV-4b, MV-4c | A continuation after a reviewed interruption, and after an ordinary one | It runs under a fresh mock authorization and a new run identifier, with a `continues` binding; L0 to L5 pass; D46 to D49 continuity holds; its final acquisition (wall-clock fields masked), corpus records and outcomes equal an uninterrupted hooked run's. |
+| MV-4d | The prior evidence is preserved | The prior `terminal/` directory is byte-identical before and after; its run record changed only by appended audit and evidence-status entries. |
+| MV-4e | After L0 passes, a change before L4 to the acquisition directory, the authorization file, the commit, the harness or the package freeze | Refused at L4; a launch-refusal record is written; the run identifier is consumed. |
+| MV-4f | A later continuation after MV-4e's launch-refused directory | E3 does not count the launch-refused directory. |
+| MV-9a to MV-9l | Refusals before launch: (a) the original authorization or run identifier; (b) a missing or mismatched authorization; (c) a missing, mismatched or unverifiable prior classification; (d) a prior refusal, unclassified termination, non-compliant completion or budget refusal; (e) compromised prior evidence; (f) a missing or mismatched owner's review record; (g) a reused identifier, refused at the claim create before any directory check, or a pre-existing directory; (h) a differing command, run kind, window, corpus root, commit, harness digest or package freeze; (i) an acquisition directory that differs from the prior manifest; (j) a second continuation of one prior run, or a concurrent execution; (k) a prior execution with no classification record; (l) a child writing into another execution's directory (refusal-class) | Each is refused, and each failed check is named in the record. |
+| MV-9m | An L0 failure | A preflight-refusal record in `_preflight/`, named by its own SHA-256; no run directory. |
+| MV-9n | A foreign preparing or indeterminate directory naming the same prior run | E3 refuses. |
+| MV-9o, MV-9p, MV-9q, MV-9w | Manifest policy: missing, added, renamed and changed entries; an added empty directory; a missing, unavailable, non-canonical or digest-mismatched prior manifest; a wrong count or sum; duplicate or unsorted paths; a missing parent; a wrong `run_id` or `acquisition_dir`; every rejected path form of (11.9); the prior manifest changed after classification | Each fails as (11.9) and (12.7.5) define; the last is E-post. Ordinary names are accepted. These establish the validator's decisions only, and nothing about Windows. |
+| MV-9r | The prior `terminal/` directory across L0 to L5 | Byte-identical. |
+| MV-9s | No E6 acceptance: every continuation, whatever else holds | Refused at L0, with E6 among the recorded failures and a preflight-refusal record. No continuation reaches L1 while O-2 is unresolved. Once E6's evidence is defined, a second variant — acceptance present at L0 but absent at L4 — must be refused at L4. |
+| MV-9t, MV-9u, MV-9v | F1 to F4; a launch-refusal record that cannot be written; a refusal whose `_preflight/` record cannot be written safely | F1 to F4 are recorded as found, launch-refused, with the identifier consumed and no outcome. The second leaves the directory indeterminate. The third launches nothing and reports that no durable refusal record exists. |
+| MV-9x, MV-9y | An E-post event; a launch-start argument vector that differs from the child's first event | The event records both check times and claims no modification time. The mismatch is contradictory at TV2. |
+| MV-9z1, MV-9z2 | Another instance presents a valid-looking preparing directory; the orchestrator restarts between L1 and L4 | E1b fails in both: the in-memory nonce does not hash to `nonce_sha256`, or no nonce is held. Nothing is adopted or launched; the directory is indeterminate to every observer. |
+| MV-9z3 | Reserved. Its former content is covered by MV-9z30. | — |
+| MV-9z4 | F0-a to F0-f | Each is recorded as its own case, with the identifier's status as (11.1a) states. |
+| MV-9z5 | The L0 and L4 fresh manifests | Their bytes are persisted where (11.9) states, and match their recorded digests. |
+| MV-9z6, MV-9z7, MV-9z8 | A search of every artifact for the raw nonce; `preparing.json` replaced with a different `nonce_sha256`; a mismatch in `preparing_record.A_D`, `launch_file.authorization_ref`, `launch-start record.A_D`, or between the claim's and the preparing record's `A_D` or `nonce_sha256` | The raw nonce appears nowhere. The creator fails E1b and writes a launch-refusal record. Each mismatch detectable at L4 is refused there; a launch-start mismatch is contradictory at TV2. |
+| MV-9z9 | Two lifecycles reserve the same identifier at once | Exactly one owns the claim. The other is refused as F0-a and creates no directory. |
+| MV-9z10 | Another lifecycle attempts the same identifier after the first has reserved it, and writes a preflight-refusal record | The second lifecycle's claim create fails (F0-a). Its record never reserves or consumes anything. The first lifecycle is unaffected. |
+| MV-9z11 | A crash after the claim file is created and before its content is complete | The identifier is consumed. A later lifecycle naming it is refused as F0-a. No directory is ever created for it. |
+| MV-9z12 | A claim owned by another lifecycle, with a valid-looking preparing directory | E1b fails; nothing is adopted. |
+| MV-9z13 | The five provisioning cases of (11.1b); an unreadable run directory | Each provisioning case behaves as its table row states. The unreadable directory refuses the lifecycle (F0-d). |
+| MV-9z14 | An uppercase or mixed-case new identifier; each reserved name in any case; an identifier that collides by case with an existing claim, run directory, `run_id`, `continues.prior_run_id` or `prior_run_id` | The first two are refused before any filesystem action. A collision with an existing claim is detected at E1a step 3, before any create. Each other collision is refused as already used. |
+| MV-9z15 | Under `run-records`: a stray file; a directory with a non-conforming name; a reparse point | The lifecycle refuses in each case. |
+| MV-9z16 | The seven steps of E1a, with a fault injected at each | Each failure is classified as (12.7.5) states. A failure at step 5 leaves the claim in place, creates no run directory, and is recorded as F0-c. No step runs out of order. |
+| MV-9z17 | `_claims` holding, in turn: a valid complete claim; a valid empty claim; a valid claim with invalid content; a claim in another case; a subdirectory; a file with a wrong suffix; a file whose identifier part is non-conforming; a reserved name | The first four each mark their identifier as used. Each of the others makes the enumeration untrustworthy, and the lifecycle refuses before creating a claim. |
+| MV-9z18 | A launched directory with a valid `launch.json` whose `continues.prior_run_id` names P, and a matching valid `continuation-eligibility.json` | P is marked as already continued. A continuation naming P has E3 among its recorded failures; a lifecycle naming an unrelated prior run does not, on account of this directory. |
+| MV-9z19 | A launched directory whose `launch.json` is malformed, non-canonical or truncated | The lifecycle refuses (F0-d). The record is never read as "no binding". |
+| MV-9z20 | A launched directory with a valid `launch.json` whose `continues` is an object, and a `continuation-eligibility.json` that is malformed, missing, or names a different `prior_run_id` | The lifecycle refuses (F0-d) in each variant. |
+| MV-9z21 | A launched directory with a valid `launch.json` whose `continues` is null, and no `continuation-eligibility.json` | Accepted as a first execution. With a `continuation-eligibility.json` present, the lifecycle refuses. |
+| MV-9z22 | A preparing directory with `preparing.json` valid and `launch.json` absent (Case A) | A first-execution lifecycle is not refused at E1a step 6 on this ground. A continuation lifecycle is refused at step 6 (F0-d). A present but invalid record refuses both. |
+| MV-9z23 | A launch-refused directory holding a partial `launch.json` left by F2 | Not a refusal. The directory's name marks its identifier as used, and it does not count under E3. |
+| MV-9z24 | A launch-refused directory with a valid `launch.json` whose `continues.prior_run_id` names P | P is recorded as an observed historical reference. This directory does not put E3 among the failures of a continuation naming P. Its own identifier stays consumed. |
+| MV-9z25 | A preparing directory with `continues` null and a `continuation-eligibility.json` present | The lifecycle refuses (F0-d). |
+| MV-9z26 | A preparing directory whose `continues.prior_run_id` and `prior_run_id` differ | The lifecycle refuses (F0-d). |
+| MV-9z27 | A preparing directory with `continuation-eligibility.json` present and `launch.json` absent | The lifecycle refuses (F0-d). |
+| MV-9z28 | An indeterminate directory with contradictory bindings | The lifecycle refuses (F0-d) in each variant. |
+| MV-9z29 | E3's decision logic (Case B): a preparing directory, and separately an indeterminate one, with a valid `launch.json` naming P and no `continuation-eligibility.json`. Two scanning continuations, one naming P and one naming an unrelated Q. | Both pass E1a step 6. The continuation naming P has E3 among its recorded L0 failures. The continuation naming Q does **not** have E3 among them on account of this directory. Both are still refused at L0, because E6 is unresolved; neither reaches L1 or L4. |
+| MV-9z30 | O-3, through a first execution: an otherwise eligible first-execution lifecycle, with a foreign preparing directory, and separately a foreign indeterminate one, present | The lifecycle is not refused at E1a on this ground. It is refused at L4 under (8), with a launch-refusal record. |
+
+**E6-dependent cases.** Any case that requires a continuation to pass L0 — MV-4b, MV-4c,
+MV-4e and MV-4f, the second variant of MV-9s, and the passing branch of MV-9z5 — cannot be
+built until E6's evidence is defined (O-2). Every other case, including every continuation
+refusal case, can be: L0 records every check that fails, so a refusal case is judged by
+which checks appear among the recorded failures.
+
+*(4.6a) Validation activities and measured executions.*
+
+**Three validation levels.**
+- **Level 1, unit and mock tests.** These establish the policy decisions, the fail-closed
+  logic and the lifecycle rules. They establish nothing about operating-system behaviour.
+- **Level 2, Windows filesystem integration tests** (class MV-W). These use actual Windows
+  filesystem calls on real fixtures. They are the only evidence that can resolve the
+  filesystem parts of D-5.
+- **Level 3, authorization of a measured execution.** It is possible only after the
+  applicable Level 1 and Level 2 evidence exists (16).
+
+**Validation activities** are the unit tests, the mock validation of (4.6) and class MV-W.
+- **Their own authorization.** They may run only under their own explicit **validation
+  authorization**, which names the commit, the harness digests and the test classes to be
+  run. D51 does not grant it.
+- **No production data and no network.** They never read or write `data/`, including
+  `data/recon/`, any acquisition directory, any corpus or any run record. They never
+  contact a source or the network.
+- **Isolated fixtures only.** They run only in isolated temporary directories outside the
+  repository, on fixtures they create themselves. They change no tracked file, and they
+  remove only what they created.
+- **No system change.** They change no Windows privilege, system policy, registry setting,
+  power setting or security configuration to make a test pass.
+- **An unavailable fixture has not passed.** A test whose fixture cannot be built is
+  recorded as **unestablished**. It is never counted as passing, skipped as passing, or
+  replaced by a mock.
+- **They are not runs.** A validation activity is not a measured execution, produces no
+  outcome under (12), and consumes no run identifier.
+
+**Measured executions** remain prohibited until every validation prerequisite that applies
+to them has passed, been reviewed, and been recorded at the authorized commit and harness
+digests — and each then still needs its own explicit authorization under (13) and (16).
+**Completing any validation activity authorizes nothing.**
+
+**Class MV-W.** Each test uses real fixtures in an isolated temporary directory.
+
+| # | Fixture | Acceptance criterion |
+|---|---|---|
+| MV-W1 | Exclusive creation of a directory, and of a file: create a new one; create it again; two processes create the same name at once | The first create succeeds. Every later or losing create fails without altering what exists, and exactly one of two concurrent creators succeeds. This establishes concurrency only, not durability. |
+| MV-W2 | Reserved names, with and without extensions and in mixed case; names ending in a dot or a space. In the fixture's stand-ins for `run-records` and `_claims`: a directory named each reserved name, and a file named `<name>.claim`, in lowercase, uppercase and mixed case | The test records what the filesystem does with each. The rejection lists of (11.1) and (11.9) must cover every name the filesystem alters, refuses or maps to a device. If the filesystem treats any further name as reserved, the lists are corrected by a later document change. |
+| MV-W3 | Two names differing only in ASCII case, as files, as claim files and as directories | The test records whether both can exist in the fixture's directory. Either way, the comparison rule of (11.1) must report them as one identifier, and the manifest's case-collision rule must reject any pair the filesystem treats as one name. |
+| MV-W4 | A symbolic link to a file, a symbolic link to a directory, a junction, and any other reparse-point type the test can create, each as an entry and as an ancestor | Each is detected from the opened handle and makes the manifest unavailable. Capture never follows one. |
+| MV-W5 | An entry whose final on-disk path lies outside the acquisition directory, reached through each fixture of MV-W4 | The handle-based final path shows the escape, and the manifest is unavailable. No path-string check is relied on. |
+| MV-W6 | A captured directory, then separately: a file added, removed, renamed and changed in content; an empty directory added and removed | A second manifest differs from the first in exactly the affected entries. |
+| MV-W7 | During capture: a file is modified, replaced, renamed or deleted; an entry is added; an ancestor is swapped for a reparse point | Capture reports the manifest unavailable in every case. It never returns a manifest that mixes two states. |
+| MV-W8 | Rename without overwrite onto an existing file, and `fsync` of the files D51 writes, including a newly created file | Rename fails and leaves the destination unchanged. The test records what the calls return. It states explicitly that it does **not** establish the durability of a file's directory entry across an OS crash or power loss, and performs no such test. |
+| MV-W9 | Claims-directory path integrity. (a) Each of the four components — the fixture's stand-ins for `C:\sentinel`, `data`, `run-records` and `_claims` — in turn as a junction and as a symbolic link. (b) While all four handles are held: an attempt to rename, delete and replace each component in turn. (c) A claim created relative to the verified `_claims` handle, while a path-based create of the same name would have been redirected. (d) A handle that cannot be opened in the required mode. (e) A claim whose final path differs from the expected one. (f) The same traversal for `_preflight`; `_preflight` absent with `run-records` populated. (g) A claim read back through a handle verified by the traversal. | (a) Each reparse point is detected from its own handle, and the lifecycle refuses before any claim is created. (b) **Every attempt fails**, and the directory is unchanged; a run in which any attempt succeeds does not pass, whatever is detected afterwards. (c) The claim is created in the directory the handle refers to, and nowhere else. (d) The lifecycle refuses, and no claim file exists afterwards. (e) Refused after creation, as F0-c; this part is evidence for the additional safeguard only and cannot stand in for (b). (f) The record is written under verified handles, and `_preflight` is created without triggering the claims refusal; with an unsafe ancestor, no record is written and the absence of a durable record is reported. (g) The read-back reads the file the lifecycle created. |
+| MV-W10 | Process-crash persistence: a process creates a claim and is killed (a) before writing content, (b) mid-write, (c) before closing | The claim file exists afterwards in every case, and a second creator fails. The test records the file's state as found. It makes no claim about OS crashes. |
+| MV-W11 | A stand-in `_claims` directory containing a regular file, an empty file, a subdirectory, a junction, a symbolic link to a file and to a directory, and files with mixed-case names and suffixes | Handle-based enumeration reports every entry, with its type and its exact name. No entry is missed, and no reparse point is followed. The harness's classification of each entry matches the contract of (11.1b). |
+
+- A symbolic-link fixture may need a privilege the account lacks. The harness obtains
+  none. If a fixture cannot be built, its case stays unestablished (O-4).
+- If MV-W9(b) cannot be established on this platform, the protection is unestablished, D-5
+  stays open, and a later decision is needed. D51 offers no weaker substitute.
+- The results are evidence for this machine, this Windows build and this volume only.
+- Where a recorded behaviour differs from what D51 assumes, the rule is corrected by a
+  later document change. The test is never weakened to fit.
+
+*(4.7) Isolation of mock-only behaviour (U3).*
+
+Any substitute for production code (such as `_Run.values`), injected fault, injected
+delay, defective-child variant or in-process comparator:
+- exists only in the mock test suite, outside the harness scripts whose digests an
+  execution's authorization names;
+- runs only with synthetic exports, a fake adapter and a closed network;
+- never appears in MV-1, or in any measured execution.
+
+At the start of a measured execution, the harness refuses unless `_Run.values` is, by
+identity, the function `ingest.fetch.cfpb` defines at the authorized commit, and unless no
+mock-test module is loaded. Every artifact of an adversarial test is marked as
+adversarial. If this separation cannot be maintained, the affected cases are tested only
+by calling H6's decision function directly, and the gap in integration coverage is
+recorded.
+
+*(4.8) Status and recorded limits.*
+
+**None of these tests exists. Every criterion above is specified, not established, and
+each test is described as passing only once the harness has been built and the test has
+been run under a validation authorization.** Until the applicable validation passes, no
+measured execution may be conducted under the harness, and none may be conducted without
+it. Simulated readings exist only in mock mode, and the harness refuses a measured
+execution that would use them.
+
+Mock mode records the hooks' timing overhead. It builds no index of any kind, and no mock
+reading is a measurement of any production cost.
+
+The harness's recorded limits stand: response sizes are decoded sizes; NYC 311's fetch
+sub-stage times are inferred from the request timeline; and writes outside the repository
+and the run's temporary directory are not observed.
+
+*Now — (5) Memory readings, stages and sample attribution.*
+
+*(5.1) Counters.*
+
+Process readings are `GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX` on the
+measured child (4.2). The definitions below are as Microsoft documents them and D40.2
+adopted; they are not re-verified here (D-5).
+- `WorkingSetSize` is the **current resident working set**.
+- `PrivateUsage` is the **current private commit charge**, whether resident or paged out.
+- `PeakWorkingSetSize` and `PeakPagefileUsage` are the **lifetime peaks** of those two;
+  neither resets at a stage boundary.
+
+A read-only file mapping is expected to add pages to the working set and nothing to the
+commit; D51 relies on the counters, not on that expectation.
+
+System readings are `GetPerformanceInfo`'s `CommitTotal`, `CommitLimit` and
+`PhysicalAvailable`, multiplied by its page size. System headroom is `CommitLimit` minus
+`CommitTotal`.
+
+*(5.2) Who reads.*
+
+The orchestrator reads the four process counters, the three system values and free disk on
+C: once per second, from the child's launch to its exit, from outside the child. The child
+reads its own four counters at every stage boundary below, and at the start and end of
+every request attempt.
+
+A current reading, however frequent, is never evidence of a stage's exact peak. A
+difference of current readings is memory held across an interval. A difference of lifetime
+peaks is not a stage's usage (D41).
+
+*(5.3) Stages.*
+
+The stages are contiguous: each begins at the boundary reading where the previous one
+ends.
+
+*For a CFPB real run with a new acquisition,* the stages are:
+- imports, from interpreter start to after imports (`B0`);
+- setup, to `fetch_into_cache`'s entry;
+- discovery, to the first `download`'s entry;
+- one download stage per export, from its `download`'s entry to the next one's, or to
+  `read_archive`'s entry;
+- one stage per export but the last, from its `read_export`'s entry to the next one's,
+  including its sort;
+- the last export and the merge, from the last `read_export`'s entry to `read_archive`'s
+  exit;
+- the start snapshot, to the first `fetch_day`'s entry;
+- one stage per API day, from its `fetch_day`'s entry to the next one's or, for the last,
+  to the end `snapshot`'s entry. It includes the caching and journaling of its page and
+  the by-ID guard's lookups of (6.8), which read the archive's existing keys and must
+  retain nothing after the stage's `fetch_day` returns;
+- finishing, to `fetch_into_cache`'s exit, covering the end snapshot, reconciliation,
+  completion of the record and release of the fetcher's state;
+- verification, to `iter_cached_pages`' entry;
+- one stage per normalization page, from the request for that page to the request for the
+  next or, for the last, to the pass's end;
+- the post-normalization checks, to `clear_corpus`' entry;
+- clearing the corpus, to the first partition writer's entry;
+- one stage per partition write (record or outcome), from its writer's entry to the next
+  writer's, or to `build_manifest`'s entry;
+- the manifest, to `write_manifest`'s exit;
+- exit, to the final reading.
+
+The archive keys the guard searches are built within the archive stages — each export's
+sorted part in that export's stage, and the merged array in the last export and the merge
+— and are held from `read_archive`'s exit until finishing releases the fetcher's state.
+The guard adds no copy.
+
+*An offline rerun* has no fetch stage and sends no request: setup runs from `B0` to
+verification's start. *An archive replay's* stages are: imports; setup, to the first
+`read_export`'s entry; one stage per export but the last; the last export and the merge,
+to `read_archive`'s exit; and exit. *NYC 311's* stage list is not yet defined, and is a
+prerequisite of Stage C's own authorization (18).
+
+Every boundary reading is bracketed by counter readings, `boundary_pre_qpc` immediately
+before the counters are read and `boundary_post_qpc` immediately after; `*_utc` is kept
+for audit.
+
+*(5.4) Attribution of orchestrator samples.*
+
+Each orchestrator sample is bracketed by `sample_pre_qpc` and `sample_post_qpc` around its
+reads. A sample is attributed to stage `s` only if:
+- `sample_pre_qpc` is later than the `boundary_post_qpc` of `s`'s opening boundary; and
+- `sample_post_qpc` is earlier than the `boundary_pre_qpc` of `s`'s closing boundary.
+
+A sample whose bracket overlaps a boundary bracket is **boundary-ambiguous**. It is
+retained and used for triggers and run-level maxima, but is attributed to no stage.
+Excluding it can only lower a stage's lower bound, never invalidate it. Attribution relies
+on P-T1 (18). UTC is never used to attribute a sample.
+
+*(5.5) Stage quantities.*
+
+For each stage `s`:
+- `S_s` is the current commit at its start.
+- `Δ_s`, its **retained change**, is the current commit at its end less `S_s`.
+- Its **peak** `P_s` is exact when the lifetime peak at its end exceeds the lifetime peak
+  at its start; `P_s` is then that end-boundary lifetime peak. Otherwise it is an
+  interval, bounded below by the largest current reading attributed to the stage and above
+  by the lifetime peak at its start.
+- Its **transient excess** is `X_s = P_s − S_s`, exact only when `P_s` is.
+
+Because the stages are contiguous, `S_(s+1) = S_s + Δ_s`.
+
+For a repeated stage type: `m` is its number of instances; `r_i` is instance `i`'s driver
+value; `R_k` is the cumulative driver through instance `k`; `R` is the total; `C_k` is the
+cumulative retained change through instance `k`; and `Q = C_m`. For normalization pages,
+`p_k` is page `k`'s row count and `n` is the manifest's `record_count`.
+
+Every quantity is computed the same way for the working set, from `WorkingSetSize` and
+`PeakWorkingSetSize`, and reported beside the commit.
+
+*Now — (6) The stage-specific guards.*
+
+*(6.1) H6.*
+
+- **What it permits.** H6 permits a request only if it matches the stage's allowlist
+  exactly and, for a CFPB stage, the request-class and by-ID rules of (6.7) and (6.8). It
+  refuses anything else before the transport adapter receives it.
+- **The terminal marker.** While the guarded transport's terminal marker is set, H6
+  refuses every request before evaluating any other rule. Only H3's cleanup sets the
+  marker, on a cleanup failure (4.4), and nothing clears it within the process. It is
+  defence in depth: fail-closed termination does not depend on it.
+- **How a refusal is recorded.** A refusal is recorded before it is raised:
+  1. H1 derives the request's sanitized representation (6.3);
+  2. H5 appends and flushes a refusal event holding it, the rule that failed, and the
+     context's sequence number and active day if a context exists;
+  3. only then is the refusal exception raised.
+
+  By-ID refusals identify the rule by its condition number in (6.8). Every other refusal
+  records its rule as unavailable until D-6 is resolved. The check returns a decision and
+  raises nothing itself; the exception is raised from a frame that holds no reference to
+  the archive or its keys.
+- **Why a refusal ends the run.** Because the refusal precedes the real transport's call,
+  the adapter receives no attempt. Because the exception is not a `TransportError`, it
+  leaves `HttpClient.get` at once, with no further attempt and no backoff wait; the pacing
+  wait that precedes every attempt has already been taken, as in production.
+- **If the refusal event cannot be written,** the refusal is still raised, and the missing
+  event makes the run a measurement that could not be completed as specified.
+
+*(6.2) Headers.*
+
+- **What the request carries.** The application supplies exactly one header, Sentinel's
+  `User-Agent`. `requests` adds exactly `Accept-Encoding: gzip, deflate`, `Accept: */*`
+  and `Connection: keep-alive` in this environment. `Host` is not part of the prepared
+  request: the connection layer adds it from the URL's host when the request is sent,
+  after H6 has checked that URL.
+- **What H6 checks.** Before H1 hands a request to the real transport, H6 prepares it from
+  the transport's own session, exactly as the transport's call would, and checks that
+  actual prepared request, unredacted and in memory.
+- **What it refuses.** H6 refuses any other header or any different value: among them
+  `Authorization`, `Proxy-Authorization`, an app token, an explicit `Host`, and an
+  outgoing `Cookie`.
+- **Cookies.** The session's cookie jar gains cookies only from responses, so no cookie
+  can be added between the check and the call. An incoming `Set-Cookie` is not itself
+  refused. The session keeps such a cookie, as `requests` always does. Whether a later
+  request carries it depends on its domain, path, `Secure` flag and expiry. If a prepared
+  request carries it as an outgoing `Cookie` header, H6 refuses that request. Provided H6
+  checks every outgoing request this way, no stored cookie is ever sent.
+
+*(6.3) Sanitized records.*
+
+- **Order of work.** H6 decides on the actual prepared request before anything about it is
+  recorded; only then does H1 derive the sanitized representations that H1 and H5 persist.
+- **The request.** The representation keeps the URL and every header's name. It persists a
+  header's value only when that exact name-and-value pair is one H6 permits: `User-Agent`
+  with Sentinel's value, `Accept-Encoding: gzip, deflate`, `Accept: */*` or
+  `Connection: keep-alive`. Every other request-header value is redacted before
+  persistence, keeping only the name and the fact that a value was present. The host
+  recorded is the one taken from the URL H6 validated, never one from a header.
+- **The response.** H6's request allowlist does not apply. The harness persists only its
+  **harness response metadata**: the status; the values of `retry-after`, `content-length`
+  and `content-encoding`; and, for each `Set-Cookie`, the cookie's name, domain and path.
+  It never persists a `Set-Cookie` value or any other response header's value.
+- **Redaction applies everywhere.** It happens in memory before any record, log line or
+  event is written, and applies equally to run records, the event log, refusal messages,
+  captured output, test artifacts and the terminal artifact. H6 never evaluates a
+  sanitized copy. The session's jar and the raw prepared request are never persisted.
+- **Production acquisition evidence is unchanged by D51.** It holds no request headers.
+  Among response headers it persists only `etag` and `last-modified` in each CFPB export's
+  pin (`download` in `ingest/fetch/cfpb.py`), and NYC 311's `x-soda2-truth-last-modified`
+  and `x-soda2-data-out-of-date` in its snapshots (`ingest/fetch/nyc311.py`). It reads
+  `content-length` and `retry-after` only to check a body's size and to time a retry.
+- **No existing repository test covers cookie handling or this redaction.** MV-2 is
+  intended to cover them once built and passed.
+
+*(6.4) Redirects are never followed.*
+
+`RequestsTransport` sends every request with `allow_redirects=False`, so no redirected
+request is ever prepared or sent, and `HttpClient` refuses every 3xx as permanent (D47),
+which is a `FetchFailed`. The repository's
+`test_the_real_transport_never_follows_a_redirect` drives `requests`' own session
+machinery to one request and no second. H4 would in any case refuse to resolve a redirect
+target outside the allowlist.
+
+*(6.5) H7.*
+
+H7 compares each pinned artifact's byte count and SHA256 with its pin when its download
+attempt returns, before the body reaches the fetcher, and refuses on any difference, so no
+later request is made.
+
+*(6.6) Allowlist files.*
+
+Each execution's allowlist is a file generated from that execution's authorization alone
+and named in it by digest. For each permitted request, it states whether the request is
+permitted outside or inside an active `fetch_day` context. The harness refuses to start
+without the file, or if its digest does not match. No stage inherits, merges or defaults
+to another stage's allowlist, and H4 resolves only the hosts the allowlist names.
+
+*(6.7) CFPB request classes.*
+
+H6 classifies each prepared request by its exact shape, and refuses a request of no class.
+
+*Outside an active `fetch_day` context*, the permitted requests are:
+- `GET` the reading room,
+  `https://www.consumerfinance.gov/foia-requests/foia-electronic-reading-room/cfpb-consumer-complaint-database-narratives-archive/`,
+  with no parameters;
+- `GET` each export of the stage's roster at its exact
+  `https://files.consumerfinance.gov/f/documents/` URL, with no parameters;
+- the **window snapshot**: `GET`
+  `https://www.consumerfinance.gov/data-research/consumer-complaints/search/api/v1/` with
+  exactly `date_received_min` and `date_received_max` equal to the window's start and end,
+  `size=1`, `no_aggs=true` and `no_highlight=true`.
+
+*Inside an active `fetch_day` context*, the permitted requests are:
+- the **day count**: the same count, with both dates equal to the active API day;
+- the **day CSV**: exactly `date_received_min` and `date_received_max` both equal to the
+  active API day, `format=csv` and `no_aggs=true`;
+- the **by-ID request**: the search API's URL followed by a canonical decimal Complaint
+  ID, with no parameters, under (6.8).
+
+The active API day must be a permitted API day: from the day before the window to the day
+after it.
+
+These phases are exactly those in which the fetcher issues each request
+(`ingest/fetch/cfpb.py`):
+- discovery, the downloads and the start snapshot happen before the first `fetch_day`, and
+  only on a new acquisition;
+- the day count, the day CSV and every by-ID request happen inside `fetch_day`;
+- the end snapshot happens after the last `fetch_day`.
+
+When the window is a single day, a window snapshot and a day count carry the same
+parameters, and are distinguished by context alone.
+
+*(6.8) The by-ID guard.*
+
+- **When the fetcher sends one.** The fetcher sends a by-ID request only from inside
+  `fetch_day`; only for an API row of that day whose Complaint ID is among the day's
+  included archive rows, which it reads from the day's spill file; and only when that row
+  carries a literal `None` in a field the join needs (`fetch_day`, `values` and `by_id` in
+  `ingest/fetch/cfpb.py`).
+- **H6's separate check.** H6 adds a check against the production archive's keys,
+  `_Archive.keys`: the signed 64-bit array that `read_archive` returns, sorted ascending
+  by its merge, before the first `fetch_day`, and which nothing modifies afterwards.
+- **The key layout.** Each key is `id << ID_SHIFT | ordinal << 1 | included`, with
+  `ID_SHIFT` = 22 and `DAY_MASK` = 2^21 − 1. Bits 22 to 62 hold the Complaint ID. Bits 1
+  to 21 hold the received date's ordinal. Bit 0 holds the production inclusion flag, set
+  when the row is dated inside the run's window and its narrative is not blank after
+  `strip()`. The flag depends on the window, so each run's guard uses that run's own
+  archive.
+- **The active API-day context** belongs to one run and one guarded transport (4.4). Every
+  attempt of a request, retries included, runs synchronously inside the `HttpClient.get`
+  call that issued it, and `fetch_day` returns before the fetcher yields its page. So
+  every by-ID attempt lies inside the `fetch_day` call that issued it.
+
+H6 evaluates these conditions in order, and refuses at the first that fails:
+1. The URL is exactly the search API's URL followed by one path segment and nothing else.
+   The segment satisfies the production `_canonical_id` rule, and `n = int(segment)` is
+   below `ID_LIMIT` (2^41).
+2. Exactly one context is active on this transport. Its day is a `date`. Its archive's
+   `keys` is an `array` of typecode `q`. The archive is, by identity, this run's
+   `read_archive` result, confirmed through the weak reference of (4.4).
+3. The active day lies inside the stage's window.
+4. With `lo = bisect_left(keys, n << ID_SHIFT)` and
+   `hi = bisect_left(keys, (n + 1) << ID_SHIFT)`, on the existing array, `hi − lo == 1`.
+   Let `k = keys[lo]`.
+5. `k & 1 == 1`.
+6. `(k >> 1) & DAY_MASK` equals the active day's ordinal.
+7. The request satisfies every other allowlist rule, headers included.
+
+Because the keys are ascending, `hi − lo` is exactly the number of keys carrying `n`.
+Anything missing, malformed, nested, inconsistent or ambiguous is refused before the
+adapter. The check copies no key and retains nothing.
+
+**Limitations.**
+- The count is exact only if the array is sorted, which follows from `read_archive`'s
+  merge and is not re-verified by the guard.
+- H6 cannot observe which run issued a request. The association rests on the context being
+  held by the transport that run's own client calls, and on D41's rule of one measured run
+  per child.
+- H3's use of the private attribute `HttpClient._transport` fails closed.
+- **The check is not independent of the parser.** The spill that triggers a by-ID request
+  and the keys H6 consults come from the same production parse of the same pinned bytes.
+  H6 establishes agreement with the fetcher's own archive facts, not their correctness,
+  which rests on H7's pins and on D43's, D44's and D49's validation and reconciliation.
+
+**No separate index of the archive is built, copied, written or mapped.**
+
+*(6.9) The guard's cost, and the exact-day audit.*
+
+*Cost.* The archive keys are part of `read_archive`'s cost, measured in the archive stages
+of (5). The guard's lookups lie within the API-day stages. No part of the guard runs
+before the child starts or outside it.
+
+*The audit.* For every by-ID attempt, H1 records the active API day and the context's
+sequence number. For every successful logical request, H2 records `response_sha256`, which
+names the retained response; a day CSV is retained at `api/<response_sha256>.csv.gz`. For
+each by-ID request that reached the transport, the postflight:
+1. takes the last day CSV completed in the same context before that request, whose dates
+   both equal the active day;
+2. confirms that the retained response's decompressed bytes match its digest;
+3. requires the requested Complaint ID to appear in its Complaint ID column;
+4. where the day was journaled, requires the day's slice to record that same CSV.
+
+Each of these is a refusal-class integrity event:
+- no recorded active day;
+- no day CSV before the request in its context;
+- dates differing from the active day;
+- a missing or mismatched retained response;
+- an absent ID;
+- a slice naming a different CSV.
+
+The audit checks the API side. It complements H6's pre-send check, and neither of them is
+the spill, which is what triggers the request. No request in any stage has a permitted
+date that is unknown before it is sent, so no date exception exists.
+
+*(6.10) Stage allowlists and pins.*
+
+| Stage | Hosts | Window and permitted days | Artifacts and pins (H7) |
+|---|---|---|---|
+| A | `www.consumerfinance.gov`, `files.consumerfinance.gov` | 2024-01-08 to 2024-01-14; API days 2024-01-07 to 2024-01-15 | export #5 alone: 100,880,669 bytes, `993747363e52239e4762b804662d7f604f976a139de4f729f613329d3d8c7206`; by-ID guard over A's own archive keys |
+| A′ and every offline rerun | none: every resolution and connection refused | none | none; any attempt is a refusal |
+| Archive replay | none: every resolution and connection refused | the replayed window, for selecting exports and spill days only | the replayed exports, copied from `data/recon/` and each verified against its pin by the orchestrator before the child starts; any attempt is a refusal |
+| A2 | `www.consumerfinance.gov`, `files.consumerfinance.gov` | 2024-01-01 to 2024-01-31; API days 2023-12-31 to 2024-02-01 | export #5 alone, as for A; by-ID guard over A2's own archive keys, whose inclusion bits follow A2's window |
+| B | `www.consumerfinance.gov`, `files.consumerfinance.gov` | 2024-01-01 to 2025-12-31 (D37.2); API days 2023-12-31 to 2026-01-01 | the eleven exports below, #5 to #14 as population and #15 as boundary only (D49); by-ID guard over B's own archive keys |
+| C | `data.cityofnewyork.us` alone; no CFPB host | New York civil days 2024-11-02 to 2024-11-04; no margin days | none: NYC 311 publishes no pinned artifact and C sends no by-ID request, so the by-ID guard does not apply; integrity rests on the fetcher's count, key and reconciliation checks (D44, D48) and on D46's verification |
+
+| Export (B) | Bytes | SHA256 |
+|---|---|---|
+| #5 September 2023 – March 2024 | 100,880,669 | `993747363e52239e4762b804662d7f604f976a139de4f729f613329d3d8c7206` |
+| #6 April – July 2024 | 77,142,558 | `c8a6fb0d98287958e2c19b47e1a4211c4e43225d27123a3ca08d730a2b4ae0a5` |
+| #7 August – October 2024 | 71,365,591 | `f053000c342bfd08bc6f8f382290f623e34b166cb56760c0726ed15e296a6d74` |
+| #8 November – December 2024 | 52,563,546 | `24b3326a954c0edeff33318b157d12eef5a59547f6f274f9236f1ceaba988a74` |
+| #9 January – February 2025 | 75,475,199 | `11c18bb0973eed8f5e4f66e2979346af0671a3aefcb5a6b9eec73009d53cff64` |
+| #10 March – April 2025 | 68,866,998 | `356822a5e9f295398f2e75bfff25b4760365845432c31e87e689be2c2c0c88ef` |
+| #11 May – June 2025 | 74,546,009 | `b7c8475a183e5a01f72aec794d6bc9d8a12a98cce272b3b406d9a0b067479adb` |
+| #12 July – August 2025 | 84,153,614 | `dcc75521581b124f13d6d4b62c2947ccd06a017a09b1dfa7ddeb2d73548554fa` |
+| #13 September – October 2025 | 67,340,083 | `4a48c4e32ab78d8b1c3c910c4e14a62cd9fb50355e60708c1f85e5601858bc9f` |
+| #14 November – December 2025 | 63,867,562 | `44fd05c01c9e90ae1abd6e0659898ec7362e7a6a53740e6b18a8d0a0ff3749e7` |
+| #15 January – February 2026 (boundary) | 36,832,036 | `437eee7adcc3e4342d1eafd8d716c4ef149e29c6a68c5ce3c379d1dc82c14b22` |
+
+These pins are the bytes retained at reconnaissance. If the source has republished an
+export, H7 refuses, and re-pinning is its own decision, never a guard's.
+
+For C, the permitted requests are:
+- `GET https://data.cityofnewyork.us/api/views/erm2-nwe9.json`, with no parameters;
+- `GET https://data.cityofnewyork.us/resource/erm2-nwe9.json` as a count — exactly
+  `$select=count(*) AS n` and a `$where` of `created_date` bounds from one permitted day's
+  `T00:00:00` to the next day's, or from 2024-11-02 to 2024-11-05;
+- or the same endpoint as data — exactly
+  `$select=unique_key,created_date,closed_date,complaint_type,descriptor`, one permitted
+  day's `$where`, `$order=unique_key` and `$limit=50000`.
+
+No other dataset, endpoint or parameter is permitted.
+
+*Now — (7) Memory contention and the quiet-period gate.*
+
+- **Contention.** The operator, never the harness, stops `llama-server`, LM Studio and
+  Ollama before resource measurement, and keeps them stopped through an authorized
+  execution. The harness refuses to launch while any of them runs, records any that start
+  during a run, and never terminates a process.
+- **The quiet period.** After contention is resolved, the orchestrator reads system
+  headroom once per second for ten minutes. **The ten-minute duration is an operational
+  policy, not an empirically established fact.** The margin is the largest headroom read
+  minus the smallest.
+- **The gate.** **Launch is permitted only if every reading, and the final pre-launch
+  reading, are at least 6,000,000,000 bytes — the upper end of D44's estimate — plus that
+  margin.** A failed or missing reading fails the gate.
+- **The pagefile** is system-managed and grew during measurement. Headroom is always read
+  against the commit limit in force, and growth that has not happened is never counted as
+  headroom.
+
+*Now — (8) The other launch conditions.*
+
+These are evaluated at **L4** of (11.1a), immediately before every launch, including the
+launch of a continuation.
+
+- **Repository state.** The repository is at the authorized commit, on `phase-2` and equal
+  to `origin/phase-2`, with no tracked change and only the untracked blueprint.
+- **Test gate.** The test gate is green at that commit.
+- **Validation.** The applicable validation (16) has passed at that commit and harness
+  digest.
+- **The allowlist file** is present and matches the digest the authorization names.
+- **The run directory.** `data/run-records/<run-id>/` was created exclusively at L1. It
+  holds only records the orchestrator has written. It holds no launch-start or
+  launch-refusal record. Its state is **preparing**, this orchestrator instance holds its
+  nonce, and this lifecycle owns the identifier claim (E1b).
+- **The terminal directory.** Its `terminal/` directory holds exactly `launch.json`, which
+  passes T1. There is no `outcome.rec` and no `outcome.rec.partial`.
+- **The delivery medium.** M-op2 of (9.3) has confirmed, immediately before launch, that
+  the run-unique medium holds no request.
+- **The launch method** is the one of (4.2), as validated under MV-10.
+- **For a continuation:** `continuation-eligibility.json` is present and matches its
+  recorded digest, and E2 to E6 of (12.7.5) pass when repeated now.
+- **Disk.** Free disk on C: is recorded, and is at least the declared disk requirement:
+  the larger of the owner's estimate of about 17 GB (3) and any higher measured or
+  projected requirement, including a replay's copied exports.
+- **Network**, for an execution with permitted hosts: WARP is disconnected, no proxy is
+  configured, and the direct route is recorded.
+- **Power.** The machine is on AC power, with sleep prevented for the harness's lifetime
+  by a process-scoped request and no persistent power-setting or registry change. The
+  operator prevents manual sleep and lid-close interruption.
+- **Nothing else running.** No other acquisition, ingestion, rerun, replay or continuation
+  is running. No run directory other than this execution's own is in the preparing or
+  indeterminate state (interim rule, O-3).
+- **Directories.** The working directory is `C:\sentinel`, and the run has a fresh, empty,
+  process-local temporary directory outside the repository.
+
+The orchestrator checks the WARP state and the default route throughout the run, at an
+interval its run record states; neither may change during a run. HTTP 403 stops the run at
+once and is never answered by switching route and retrying.
+
+*Now — (9) In-run triggers, checkpoints and graceful interruption.*
+
+*(9.1) Triggers.*
+
+| Trigger | Counter | Read | Fires on |
+|---|---|---|---|
+| System commit floor | system headroom | by the orchestrator, once per second | the first reading below the quiet-period margin of (7) |
+| Acquisition commit budget | the child's `PeakPagefileUsage` | by the orchestrator once per second, and by the child at every safe checkpoint | the first reading at or above 6,000,000,000 bytes |
+| Disk | free bytes on C: | by the orchestrator, once per second | the first reading below the requirement declared under (8), less what the run has written |
+
+Each orchestrator trigger fires at most once per run, and is evaluated only from the
+child's launch onward.
+
+- **The budget and the floor.** The 6,000,000,000-byte reservation of (7) is the
+  acquisition's commit budget; the margin is the floor left for the rest of the machine.
+  The budget trigger reads a lifetime peak, so once reached it stays reached.
+- **The budget is a trigger, not a cap.** Between the trigger and the next safe
+  checkpoint, commit may keep rising, so the run's actual peak can exceed 6,000,000,000
+  bytes, and the run record reports it.
+- **A hard cap was considered and rejected for the measured child.** A job-object commit
+  limit makes any allocation beyond it fail wherever it happens, including inside a
+  spill-file append or between `clear_corpus` and `write_manifest`, a sequence D27 makes
+  valid only as a whole.
+
+*(9.2) Safe checkpoints.*
+
+The safe checkpoints are:
+- `before_request`: before a request attempt is sent;
+- `between_pages`: between cached pages in the normalization pass;
+- `before_corpus_write`: before the corpus write begins;
+- `after_manifest`: after the manifest is written. This is the end checkpoint of a real
+  run or an offline rerun.
+- `end_of_replay`: after `read_archive`'s exit, before the exit stage. This is an archive
+  replay's only checkpoint and its end checkpoint.
+
+None lies inside a request, inside archive streaming, inside a non-atomic file write, or
+between `clear_corpus` and `write_manifest`. A trigger whose next safe checkpoint is the
+end checkpoint lets the run complete, and its outcome is classified under (12).
+
+*(9.3) Trigger delivery and the medium's lifecycle (D-3).*
+
+The delivery mechanism is not designed. Whatever is chosen must implement and validate the
+complete lifecycle below. Until it does, P-T4 cannot be established, and no measured
+execution may be authorized.
+
+**Two kinds of access, never confused.**
+- **The orchestrator's operations on the medium.** There are exactly three, and none is a
+  child visibility read:
+  - **M-op1, create.** At L3, the orchestrator creates a fresh medium unique to the
+    execution.
+  - **M-op2, verify empty.** At L4, immediately before launch, the orchestrator verifies
+    through its own read that the medium holds no request. A non-empty medium, or a failed
+    check, is a launch refusal.
+  - **M-op3, publish.** After launch, the orchestrator publishes trigger requests. Each is
+    one delivery action, bracketed as (10.2) specifies, and carrying a `request_id` (from
+    1, in firing order) and its `kind`.
+
+  No publication can occur between M-op2 and the child's launch (9.1). No operation
+  removes or alters a published request during a run.
+- **The child's read.** At each safe checkpoint, the child performs exactly one visibility
+  read, under B-1 and the steps of (9.4). It never performs any other access.
+
+**Lifecycle properties D-3 must provide and validate (MV-8):**
+
+| # | Property |
+|---|---|
+| (a) | A medium unique to the execution, created by M-op1. |
+| (b) | An orchestrator-side emptiness check (M-op2) that is distinct from the child's read and does not count as one. |
+| (c) | Writer exclusivity: no process other than the orchestrator, through M-op1 and M-op3, can write to the medium. |
+| (d) | Non-destructive reads: neither M-op2 nor the child's read removes, consumes or alters a request. |
+| (e) | A defined instant at which a delivery action completes (P-T3). |
+| (f) | Visibility at the governing boundary (P-T2\*). |
+| (g) | No premature visibility: a request becomes visible no earlier than its delivery action begins, and a read returns only requests visible during the call. Request IDs are unique within a run (P-T4). |
+
+If the chosen mechanism cannot provide any one of (a) to (g), the property it lacks
+remains an unresolved dependency under D-3, and P-T2\*, P-T3 or P-T4, as applicable, is
+unestablished.
+
+*(9.4) The checkpoint check.*
+
+At every safe checkpoint, the child performs these steps:
+
+| Step | Action |
+|---|---|
+| 0 | Allocate `read_ordinal`, the previous check event's ordinal plus 1, starting at 1, before any reading. Every check event carries exactly one ordinal. |
+| 1 | Take `check_started_qpc`. This is the **governing boundary** of (10.5). |
+| 2 | The read function: (2a) takes `read_started_qpc`; (2b) makes one call to the delivery medium — the child's single visibility read, B-1; (2c) takes `read_returned_qpc`; (2d) builds and validates `captured`. |
+| 3 | Perform the budget read (`budget_reading`, the child's `PeakPagefileUsage`). |
+| 4 | Take `check_completed_qpc`. |
+| 5 | Make the forced-action decision. |
+
+**The forced-action rule.** The child acts at a check if and only if `budget_reading` is
+at least 6,000,000,000 bytes, or `observed_request_ids` is non-empty. When it acts:
+- it acts on its own budget (source `child_checkpoint`) if the reading has reached the
+  threshold, and otherwise on the lowest observed ID;
+- at the run kind's end checkpoint, acting records the trigger and the run completes;
+- at any other checkpoint, the child raises the trigger-stop exception (4.5).
+
+**The binding invariant** (specified; established only through P-T6):
+- **B-1.** Within the child, exactly one function performs a visibility read. It is called
+  from exactly one place in the checkpoint routine, exactly once per check, at step 2b. No
+  other child code accesses the medium. The orchestrator's operations M-op1 to M-op3 lie
+  outside the child and outside B-1, and never supply, alter or substitute for the child's
+  captured result.
+- **B-2.** The read builds an immutable `tuple` of `int` directly from the medium's
+  response. The routine binds it once, to `captured`, and never rebinds, mutates, copies
+  or merges it.
+- **B-3.** `captured` is accepted only if it is a `tuple` of integers, each at least 1,
+  with no duplicates.
+- **B-4.** `observed_request_ids = tuple(sorted(captured))` is derived once. That same
+  object feeds the forced-action decision, the choice of the lowest ID, the event's list,
+  and `observed_digest` — the SHA-256 of the list's canonical serialization (11.3).
+- **B-5.** No check reads the medium twice.
+- **B-6.** On any failure at steps 1 to 2d, the routine performs neither step 3 nor step
+  4, makes no decision, records the failed-read event of (10.3) where logging works, and
+  raises the refusal exception. The run's terminal state is `refused`, and the read is
+  never retried.
+
+*(9.5) Latency and crashes.*
+
+For each trigger, the run record holds:
+- its firing reading;
+- the acting check's `check_started_qpc`;
+- the resulting latency, in counter ticks and in the recorded frequency.
+
+This latency is a measured result, because the longest stretch without a checkpoint has no
+fixed bound. If the child crashes, its peak is the last lifetime peak read before exit,
+which is a lower bound. All evidence is preserved, and nothing restarts automatically.
+
+*Now — (10) Ordering and observation evidence.*
+
+*(10.1) The counter.*
+
+- **The clock.** Every cross-process ordering uses `QueryPerformanceCounter`, read
+  directly through `ctypes` in both processes.
+- **Frequency.** Each process records its `QueryPerformanceFrequency`. Unequal frequencies
+  are E.
+- **Brackets.** Each action is bracketed by readings taken immediately before and after
+  it. No ordering finer than the brackets is claimed, and "immediately" is never taken to
+  mean simultaneous: another process may run inside any bracket.
+- **Status.** The counter's comparability across processes is P-T1, and is unverified.
+- **UTC** is never used to order events across processes.
+
+*(10.2) Orchestrator trigger entries (M-1, M-4).*
+
+The exit snapshot holds one entry per firing. Each entry has `request_id`, `kind`,
+`reading`, `threshold`, `fired_qpc`, `fired_at_utc`, `delivery_started_qpc` (immediately
+before the delivery action), `delivered_qpc` (immediately after its completion), and
+`delivered_at_utc`. Its shape requires `fired_qpc ≤ delivery_started_qpc ≤ delivered_qpc`.
+
+*(10.3) Child check events (M-2, M-3).*
+
+Every child event carries a contiguous `seq` from 1. On the ordinary path, the outermost
+frame's `terminal_begin` event, naming its state, is the child's last event, written
+immediately before the terminal artifact. Child evidence is **complete** only if every
+`seq` from 1 to `terminal_begin` is present.
+
+Each check event has these fields:
+- `seq`, `read_ordinal`, `checkpoint` and `checked_at_utc`;
+- `check_started_qpc`, `read_started_qpc`, `read_returned_qpc`, `read_raised_qpc` and
+  `check_completed_qpc`;
+- `observed_request_ids`, `observed_digest`, `budget_reading` and `acted`, where `acted`
+  is null or holds `kind`, `source` and `request_id`;
+- `capture_failed` and `capture_failure_kind`.
+
+**`observed_request_ids` records exactly what the check's single read returned.** It never
+claims what was visible at the checkpoint's start. A **captured check** has
+`capture_failed` false; a **failed check** has it true.
+
+| Event | Required present | Required null |
+|---|---|---|
+| Success (`capture_failed` false) | `check_started_qpc`, `read_started_qpc`, `read_returned_qpc`, `check_completed_qpc`, `observed_request_ids`, `observed_digest`, `budget_reading` | `read_raised_qpc`, `capture_failure_kind` |
+| Failure `check_timing_failed` (step 1) | — | every reading, plus the result fields |
+| Failure `read_timing_failed_before` (step 2a) | `check_started_qpc` | `read_started_qpc` onward, plus the result fields |
+| Failure `read_raised` (step 2b) | `check_started_qpc`, `read_started_qpc`, and `read_raised_qpc` unless that reading itself failed | `read_returned_qpc`, `check_completed_qpc`, the result fields |
+| Failure `read_timing_failed_after` (step 2c) | `check_started_qpc`, `read_started_qpc` | `read_returned_qpc`, `read_raised_qpc`, `check_completed_qpc`, the result fields |
+| Failure `result_invalid` (step 2d) | `check_started_qpc`, `read_started_qpc`, `read_returned_qpc` | `read_raised_qpc`, `check_completed_qpc`, the result fields |
+
+Here *the result fields* are `observed_request_ids`, `observed_digest`, `acted` and
+`budget_reading`.
+
+- **Shape.** Present readings must satisfy
+  `check_started_qpc ≤ read_started_qpc ≤ read_returned_qpc ≤ check_completed_qpc`, and
+  `read_started_qpc ≤ read_raised_qpc`. Each check must start no earlier than the previous
+  check completed.
+- **Malformed evidence is E (R-T6).** This covers a reversed order, a missing required
+  field, an unknown kind, and an unordered or duplicated `observed_request_ids`.
+- **Contradictory evidence:**
+  - a forbidden field that is present;
+  - an `observed_digest` that differs from the SHA-256 of its list;
+  - an ordinal gap;
+  - a failed check followed by a terminal state other than `refused` (exception kind
+    `harness_refusal`, clear latch, null trigger) or `integrity` (null trigger);
+  - a violation of failed-check sequencing, below.
+- **Failed-check sequencing.** After a failed check, no further checkpoint-check event may
+  appear. Between a failed check and the child's last event, the only child events
+  permitted are:
+  - **(P1)** the exit stage's final reading (4.4, 5.3), on the ordinary path;
+  - **(P2)** the cleanup, read-back, latch and terminal-marker events of (4.4), when the
+    failure occurred inside an active `fetch_day` context;
+  - **(P3)** `terminal_begin`, on the ordinary path.
+
+  Any other child event after a failed check is contradictory: a further check event, an
+  `acted` record, a request attempt, a stage-boundary reading of any stage other than
+  exit, or any H6 refusal event. On the integrity path, neither P1 nor P3 is written; the
+  missing `terminal_begin` makes child evidence incomplete, which is not a contradiction.
+- **A failed check is excluded from** the success digest, O1 to O3, V1 to V3, R-T3 points
+  4 to 6, and the "last captured check" of R-T4.
+
+*(10.4) What readings prove.*
+
+This holds under P-T1 and P-T3. Write `ds` and `dc` for an entry's `delivery_started_qpc`
+and `delivered_qpc`; `cs`, `rs` and `rr` for a check's `check_started_qpc`,
+`read_started_qpc` and `read_returned_qpc`.
+
+*The readings prove:*
+- `dc < rs`: delivery completed before the read call began;
+- `ds > rr`: the delivery action began after the read call returned;
+- `dc < cs`: delivery completed before the governing boundary;
+- `ds > cs`: delivery completed after the governing boundary.
+
+*They cannot prove:*
+- the instant within the read at which the medium was sampled;
+- for overlapping brackets, whether publication preceded that sampling;
+- that a recorded observation is genuine.
+
+*(10.5) Omissions: O1 to O3, against the governing boundary.*
+
+The guarantee is P-T2\* ((9.3)(f)): a request whose delivery completed before the child
+took `check_started_qpc` must be returned by that check's read. Nothing is required of a
+request that completes later, even before the read begins.
+
+| Relation | Condition | An unobserved T is |
+|---|---|---|
+| O1 | `dc < cs` | contradictory: a silent omission |
+| O2 | `ds > cs` | permitted |
+| O3 | `ds ≤ cs ≤ dc` | E |
+
+O1, O2 and O3 partition every pair of entry and check. A required return (O1) always
+satisfies V1, because `dc < cs ≤ rs`.
+
+*(10.6) Returns: V1 to V3, temporal compatibility only.*
+
+For each T returned at a check:
+
+| Relation | Condition | Temporal result |
+|---|---|---|
+| V1 | `dc < rs` | compatible, which includes a legitimate observation of a request that arrived mid-check |
+| V2 | `ds > rr` | contradictory: fabricated ((9.3)(g)) |
+| V3 | otherwise | E |
+
+A returned T is never treated as visible at the checkpoint's start.
+
+**Authenticity is separate from timing.** A returned request is a **valid observation**
+only under V1 together with authenticity. Authenticity requires both P-T6 established at
+the run's harness digest, and the event passing every check of (10.3). Timestamps never
+establish authenticity.
+- V1 with authenticity unavailable is E.
+- V1 with a demonstrated mismatch between the record and the read is contradictory.
+- P-T5 (a publication sequence number, or orchestrator-served reads) would resolve V3
+  causally. It is not adopted.
+
+*(10.7) Failed reads.*
+
+A failed read is represented and validated as in (10.3). Ordinals come from step 0. Every
+timestamp recorded is a real reading; none is invented. A consistent failure follows the
+refusal path of B-6.
+
+*(10.8) Trigger reconciliation.*
+
+This applies when child evidence is complete; otherwise R-T6 applies. K_act, the **acting
+check**, is the check whose `acted` is non-null.
+
+- **R-T1 (orchestrator evidence).** Each of these is E:
+  - more than one entry of a kind;
+  - a duplicate `request_id`;
+  - a missing field or `delivered_qpc`;
+  - a shape violation;
+  - unequal frequencies.
+- **R-T2 (artifact against snapshot).** If the artifact's `trigger.source` is
+  `orchestrator`, exactly one entry must have that kind. Otherwise the evidence is
+  contradictory.
+- **R-T3 (checks).** Any violation of the following is contradictory:
+  1. There is one acting check if the artifact has a trigger, and none otherwise. A failed
+     check never acts.
+  2. If an acting check exists, it is the last check event. An acting check and a failed
+     check cannot coexist.
+  3. K_act's checkpoint, `acted.kind` and `acted.source` equal the artifact's.
+  4. Every **captured** check before K_act — or every captured check, if there is no
+     acting check — returned nothing and had a reading below the threshold.
+  5. Across captured checks, in `seq` order, `budget_reading` never decreases.
+  6. At K_act, the child's own budget takes priority. Otherwise `acted.request_id` is the
+     lowest observed ID.
+- **R-T3a (`source` is `orchestrator`).** `acted.request_id` is non-null, matches exactly
+  one entry of the same kind, and is a valid observation at K_act. A null, absent or
+  wrong-kind request is contradictory.
+- **R-T3b (`source` is `child_checkpoint`).** `acted.request_id` is null, the kind is
+  `budget`, and K_act's `budget_reading` is at least the threshold. No snapshot entry is
+  required. A simultaneous orchestrator budget entry is reconciled by R-T4.
+- **R-T4 (other entries).** Every entry T other than the acted one is exactly one of:
+  - **Covered:** an acting check exists, and T is a valid observation at K_act. Without an
+    acting check, a trigger cannot be covered.
+  - **Late:** T was never returned, and O2 holds against the last captured check; or no
+    check was captured.
+  - **Contradictory:** V2, an O1 omission, or a forced-action violation.
+  - **E:** V3, an O3 omission, unavailable authenticity, or a shape or prerequisite
+    failure.
+- **R-T5 (budget claim on incomplete evidence).** When child evidence is incomplete, an
+  artifact's `child_checkpoint` budget claim is not contradictory for lack of
+  corroboration. The run is E, which gives the same outcomes as a budget trigger.
+- **R-T6 (insufficient evidence).** If the snapshot has any entry, or the artifact has a
+  trigger, the evidence is E when any one of these holds:
+  - child evidence is incomplete or malformed;
+  - any of M-1 to M-4 is absent;
+  - P-T1, P-T2\*, P-T3, P-T4 or P-T6 is not established at the run's harness digest.
+- **R-T7 (checkpoint against state).**
+  - `completed` permits a trigger only at the run kind's end checkpoint.
+  - `stopped_by_trigger` requires a trigger at any other checkpoint the run kind reaches.
+  - All other states require `trigger` to be null.
+  - The exit status depends on the state alone.
+
+*Now — (11) Run identifiers, the launch lifecycle and the terminal artifact.*
+
+*(11.1) The run identifier, the run directory, the launch file, and T0 to T2.*
+
+**The run identifier.**
+- **A newly authorized run identifier** must match `^[a-z0-9-]{1,64}$`: lowercase ASCII
+  letters, digits and hyphens only.
+- **It must not be a reserved Windows device name.** An identifier is rejected if it
+  equals `con`, `prn`, `aux`, `nul`, `com1` to `com9`, or `lpt1` to `lpt9`. Because an
+  identifier contains no dot, the whole identifier is the base name of both its run
+  directory and its claim file `<run-id>.claim`.
+- **Comparison is always ASCII case-insensitive.** Two identifiers are the same identifier
+  if they are equal after every ASCII letter `A` to `Z` is mapped to `a` to `z`. No other
+  folding or normalization is applied. This one rule is used for claim-file names (with
+  the `.claim` suffix removed); run-directory names; `run_id` in `launch.json`,
+  `preparing.json`, the claim and the terminal artifact; `continues.prior_run_id` in
+  `launch.json`; and `prior_run_id` in `continuation-eligibility.json`.
+- **A case-only collision is an already-used identifier,** whether the directory is
+  case-sensitive or case-insensitive, because uniqueness is decided by this comparison and
+  never by the filesystem's own name matching.
+- **Retained identifiers** that predate this rule are read under the wider pattern
+  `^[A-Za-z0-9-]{1,64}$` and compared by the same rule. No retained record is renamed or
+  rewritten.
+
+**The run directory.** Each execution has its own `data/run-records/<run-id>/`, which
+holds its run record and its `terminal/` directory. The terminal directory holds
+`launch.json`, `outcome.rec` and `outcome.rec.partial`, and nothing else uses it. No
+execution writes into another execution's run directory, except for the orchestrator's
+appended audit and evidence-status entries of (11.7).
+
+**The launch file.** `launch.json` is canonical JSON (11.3), with no BOM and no trailing
+newline, of at most 4,096 bytes. It holds exactly these keys:
+
+| Key | Value |
+|---|---|
+| `format` | `"sentinel-launch/1"` |
+| `run_id` | the run identifier, under the rules above |
+| `run_kind` | `real_run`, `offline_rerun` or `archive_replay` |
+| `authorization_ref` | **A_D**, the SHA-256 of the authorization document |
+| `harness_sha256` | the harness digest the authorization names |
+| `exit_statuses` | the six terminal states mapped to integers 0–255, pairwise distinct, with `completed` equal to 0, equal to the harness's pinned table, and avoiding 1, 2 and 3 |
+| `continues` | null for a first execution. For a continuation, an object with exactly `prior_run_id`, `prior_classification_sha256`, `prior_outcome` (`reviewed_interruption` or `ordinary_interruption`) and `owner_review_sha256` (non-null exactly for a reviewed interruption) |
+
+**T0 (phase L1).**
+1. The orchestrator confirms that it still owns the identifier claim (E1a step 5) and that
+   the identifier still passes E1a step 1. It then creates `data/run-records/<run-id>/`
+   with exclusive-create semantics. A failure here is F0-d or F0-e (11.1a).
+2. It writes the preparing record (11.1a). A failure here is F1.
+3. It creates `terminal/` inside the new directory.
+4. It records, from this execution's own authorization: `run_id`, `run_kind`, A_D, the
+   harness digest and the `continues` binding.
+5. It writes `terminal/launch.json` by exclusive create, flush, `fsync` and close.
+6. It re-reads all of the file's bytes, confirms they equal what it serialized, and
+   records their SHA-256, **D_L**.
+
+A failure at steps 2 to 6 is a launch refusal, recorded and classified by state as (11.1a)
+specifies.
+
+**T1 (at L4).** The orchestrator re-reads and re-hashes the launch file. A digest other
+than D_L is a launch refusal.
+
+**T2 (child startup).** The child reads all of the launch file's bytes and hashes them
+itself, giving **D_C**. It requires canonical form, the schema, and a table equal to its
+own pinned table. On any failure it exits with no artifact. Its first event records its
+PID, `sys.prefix` and the argument vector it received.
+
+*(11.1a) The launch lifecycle, the identifier claim and run-directory states.*
+
+**Phases.** Every launch goes through these phases in order. A phase that fails stops the
+lifecycle at that point.
+
+| Phase | Applies to | Action | If it fails |
+|---|---|---|---|
+| **L0** Continuation eligibility | continuations only; before T0 | Generates the lifecycle nonce. Evaluates E1a, steps 1 to 7 of (12.7.5), which reserves the identifier at step 4 and confirms ownership at step 5. If E1a passes, evaluates every one of E2 to E6, recording each that fails. It evaluates neither (7) nor (8). | A preflight-refusal record. No run directory is created. The claim, if created, remains, and the identifier is consumed. |
+| **L1** T0 | every execution | A first execution generates the lifecycle nonce and evaluates E1a, steps 1 to 7. Every execution then performs T0 (11.1). | F0 if no directory was created; otherwise F1 to F3. |
+| **L2** Persist eligibility | continuations only | Writes `continuation-eligibility.json` and `acquisition-manifest.l0.json` (11.9) into the new run directory, by exclusive create, flush, `fsync` and rename. The eligibility record is canonical JSON holding L0's inputs and results, including the fields `A_D`, `prior_run_id` and `prior_classification_sha256`, and every digest L0 read. Its SHA-256 is appended to the run record's audit section. | A launch-refusal record (F4). |
+| **L3** Preparation | every execution | The allowlist file (6.6); M-op1 (9.3); the contention check; then the ten-minute quiet period of (7), with every reading stored in the run record. | A launch-refusal record (F4). |
+| **L4** Fresh launch gate | every execution; immediately before launch | T1; M-op2; the final pre-launch headroom reading of (7); every condition of (8); E1b and the launch binding. For a continuation, E2 to E6 are repeated, and `acquisition-manifest.l4.json` is persisted. L4 never requires L4. | A launch-refusal record (F4). |
+| **L5** Launch | every execution | The orchestrator writes and `fsync`s the **launch-start record**, `launch-start.json`, in the run directory. It then creates the child (4.2) with exactly the recorded argument vector. | If the child cannot be created after the launch-start record exists, the run is an execution with no valid artifact: an unclassified termination (11.8). |
+
+**The lifecycle nonce** is 128 bits from a cryptographically secure random source,
+generated once per lifecycle. The raw nonce is held **only in the creating orchestrator's
+memory**. It is never written to any file, record, log, event or console output.
+
+**The identifier claim** is `data/run-records/_claims/<run-id>.claim`. The directory name
+starts with `_`, so it cannot collide with a run identifier.
+- **Reservation.** An identifier is reserved at the instant its claim file is created with
+  exclusive-create semantics (E1a step 4). That single create is the reservation, and
+  exclusive file creation is the only reservation mechanism.
+- **Existence is the authority.** An identifier has been used if its claim file exists,
+  whatever the file contains. A claim is never deleted, renamed, rewritten or reused by
+  the harness. If a second lifecycle attempts the same identifier, its exclusive create
+  fails, and it is refused. A preflight-refusal record never reserves or consumes an
+  identifier.
+- **Contents.** The claim is canonical JSON (11.3) with exactly these keys:
+
+| Key | Value |
+|---|---|
+| `format` | `"sentinel-claim/1"` |
+| `run_id` | the run identifier |
+| `A_D` | the authorization digest |
+| `nonce_sha256` | the SHA-256 of the lifecycle nonce's 16 raw bytes |
+| `claimed_at_utc` | the UTC time, for audit only |
+
+- **Ownership.** A lifecycle owns a claim only if the claim is canonical, matches this
+  schema, names its run identifier and A_D, and its `nonce_sha256` equals the SHA-256 of
+  the nonce the lifecycle holds in memory (E1a step 5).
+- **An incomplete claim.** If the claim file exists but its content is missing, partial or
+  invalid, the identifier is consumed, no lifecycle can own it, and no run directory may
+  be created for it. It is preserved as found.
+
+**What "consumed" is established against.**
+- **A process crash.** If the orchestrator or child crashes after the exclusive create
+  returns, the claim file is expected to remain, complete or not, and the identifier stays
+  consumed. This expectation is unverified and is established only by MV-W1 and MV-W10.
+- **An OS crash or sudden power loss.** Not established. `flush` and `fsync` are applied
+  to the claim's contents; D51 does not claim that they make the claim's directory entry
+  durable. After such an event a claim may be missing, or present and incomplete. No
+  specified test establishes this, and D51 defines no power-loss validation.
+
+**Fail-closed rules that do not depend on durability.**
+- An identifier is also treated as used if a directory `data/run-records/<run-id>/`
+  exists, or if a retained record names it (E1a step 6), whether or not a claim file
+  exists.
+- A run directory whose claim file is missing or incomplete is **indeterminate**.
+- **After any OS crash, forced restart or power loss during a lifecycle, the authorization
+  that lifecycle was using is spent.** Any further attempt needs a new explicit
+  authorization naming a new identifier, whatever survives on disk. This rule is applied
+  by the operator and the owner; the harness cannot verify it from records. Claims and run
+  records that survive remain subject to the normal fail-closed rules.
+
+**The preparing record** is `data/run-records/<run-id>/preparing.json`, written at L1 by
+exclusive create, flush, `fsync` and close. It is canonical JSON with exactly these keys:
+
+| Key | Value |
+|---|---|
+| `format` | `"sentinel-preparing/1"` |
+| `run_id` | the run identifier |
+| `A_D` | the authorization digest, 64 lowercase hexadecimal digits |
+| `nonce_sha256` | the SHA-256 of the nonce's 16 raw bytes |
+| `created_at_utc` | the UTC time of creation, for audit only |
+
+An orchestrator instance owns a preparing directory only if the SHA-256 of the nonce it
+holds in memory equals `nonce_sha256`. A restarted or different instance cannot recover
+ownership from the record. If the creator loses the nonce, no instance can satisfy E1b for
+that directory.
+
+This is not evidence of operating-system process liveness. It does not protect against a
+process that can read the orchestrator's memory, or one that can replace `preparing.json`.
+A replaced record makes the creator fail E1b, which is fail-closed for the creator.
+
+**The launch binding.** No authorization file or configuration is assumed to be immutable.
+1. At E1a step 1 — in L0 for a continuation, in L1 for a first execution — the
+   orchestrator reads all of the authorization file's bytes once, computes **A_D**, and
+   derives from that one read every launch field: `run_id` and run kind; the exact
+   argument vector of the command, including window and corpus root; the commit; the
+   harness digests; the allowlist digest; the `continues` binding. It records A_D in the
+   claim (field `A_D`), in `continuation-eligibility.json` (field `A_D`), in the preparing
+   record (field `A_D`) and in the launch file (field `authorization_ref`).
+2. At L4, the orchestrator:
+   - re-reads the authorization file, and requires its SHA-256 to equal A_D;
+   - re-derives every launch field, and requires each to equal the launch file's;
+   - requires that the repository is at the derived commit, the running harness has the
+     derived digests, and the allowlist file has the derived digest;
+   - captures the current package-freeze digest; for a continuation, it must equal the
+     prior execution's (E4).
+
+   Any mismatch is a launch refusal.
+3. At L5, the launch-start record names: the exact argument vector; the interpreter and
+   launch method of (4.2); `A_D`; the commit; the harness digests; the package-freeze
+   digest; and, for a continuation, the SHA-256 of the L4 fresh manifest.
+
+**Run-directory states.** The state of a run directory is decided by the records it holds:
+`preparing.json`, `launch-start.json`, `launch-refusal.json`, and the contents of
+`terminal/`.
+
+| State | Defined by the records present | Treatment |
+|---|---|---|
+| **Preparing** | a valid preparing record; no launch-start record; no launch-refusal record; no `outcome.rec` or `.partial` | The active pre-launch state, below. |
+| **Launched** | a launch-start record | An **execution**: TV0 to TV7 apply, and (11.8) governs a missing or invalid artifact. |
+| **Launch-refused** | a verified launch-refusal record; no launch-start record; no `outcome.rec` or `.partial` | **Not an execution.** No outcome under (12). Never continued. Not counted under E3. Its run identifier is consumed. Every partial state is preserved as found. |
+| **Indeterminate** | anything else, including: neither a preparing nor a launch-refusal record; a present but invalid preparing record; both a launch-start and a launch-refusal record; an `outcome.rec` or `.partial` without a launch-start record; a missing or incomplete claim; or a state that cannot be established | Blocks fail-closed, below. |
+
+**A preparing directory is active only for the orchestrator instance that holds its
+nonce.** That instance may take it through L2 to L5, and it is the only preparing
+directory permitted at L4. **To every other observer, a preparing directory is treated
+exactly as indeterminate.** The records cannot show whether its orchestrator is still
+running, was restarted, or crashed. D51 defines no process-liveness guarantee and infers
+none from elapsed time.
+
+**A foreign preparing or indeterminate directory:**
+- under E3, blocks every continuation that names the same prior run;
+- is never continued, adopted or completed by another instance;
+- under (8), blocks every other launch as well (interim rule, O-3);
+- is released only by the owner's review under a later decision, which D51 does not define
+  (O-1).
+
+**Failure cases before a run directory exists (F0).**
+
+| Case | What happened | The identifier |
+|---|---|---|
+| **F0-a** | A claim file for the identifier already exists: found by enumeration at E1a step 3, including a case-only collision, or shown by the exclusive create failing at step 4 | **Already consumed** by that claim. This lifecycle never owned it. The existing claim and any directory are untouched. |
+| **F0-b** | The claim create failed for another reason, and no claim file exists afterwards | **Not reserved.** The preflight-refusal record states that the reservation did not occur. |
+| **F0-c** | The claim file exists afterwards, but this lifecycle cannot confirm it owns it: the create returned ambiguously, the content could not be written, the read-back or ownership check failed, or the claim's final path differs from the expected one | **Consumed.** No run directory is created. |
+| **F0-d** | The lifecycle owns the claim, but a later check fails before any directory exists — the retained-record scan (E1a step 6), or E2 to E6 at L0 — or the directory create fails and no directory exists afterwards | **Consumed** by this lifecycle's claim, which remains. |
+| **F0-e** | The lifecycle owns the claim, the directory create failed or returned ambiguously, and a directory exists afterwards | **Consumed.** The directory is indeterminate and is never adopted. |
+| **F0-f** | The claims directory is absent while other records exist, cannot be opened in the required mode, fails a path-integrity check, or its enumeration is untrustworthy (11.1b) | **Not reserved.** No claim is created. |
+
+A refusal at E1a step 1 — an invalid authorization or identifier — attempts no
+reservation, so no F0 case applies; a preflight-refusal record is written where it can be.
+
+**Failure cases after the run directory exists (F1 to F4).**
+
+| Case | What happened | Recorded as |
+|---|---|---|
+| **F1** | Failure after the directory exists and before `launch.json` is attempted (T0 steps 2 and 3) | A launch-refusal record stating that the preparing record or `terminal/` is absent. |
+| **F2** | Failure while creating or writing `launch.json` (T0 step 5) | A launch-refusal record: `terminal/` empty, or `launch.json` partial or invalid, with its SHA-256 as found. |
+| **F3** | Failure of the read-back or digest check (T0 step 6) | A launch-refusal record: `launch.json`'s SHA-256 as found, and whether it equals the serialized bytes. |
+| **F4** | Failure at L2, L3 or L4 | A launch-refusal record naming the phase and check, and the state of `terminal/` as found. |
+
+In every F0 to F4 case nothing is launched, no outcome under (12) arises, and any further
+attempt needs a new explicit authorization naming a new identifier. No file is
+manufactured, repaired or deleted. A `launch.json` left by F2 or F3 is never used. If a
+launch-refusal record cannot be written, the directory is indeterminate.
+
+**Preflight-refusal records** live in `data/run-records/_preflight/`, whose name cannot
+collide with a run identifier. Each is canonical JSON holding the UTC time, `A_D`, the
+attempted run identifier, the prior run identifier if any, the phase and every check that
+failed, and every digest read. Its file name is the SHA-256 of its own bytes plus `.json`.
+It is written by exclusive create, flush, `fsync` and rename, is not an execution, and is
+never modified.
+
+**`_preflight/` uses the common traversal, not the claims policy.** Before a
+preflight-refusal record is written, `C:\sentinel`, `data` and `run-records` are traversed
+and verified exactly as in (11.1b), and `_preflight` is then opened the same way. If
+`_preflight` is absent, it is created by exclusive create relative to the verified
+`run-records` handle; its absence is never treated as lost evidence. The record is then
+created relative to the verified `_preflight` handle. The "absent while `run-records`
+holds records" refusal applies to `_claims` only.
+
+**If the record cannot be written safely** — because a component failed traversal,
+`run-records` is absent, or the write failed — the lifecycle stops. It writes nothing
+else, leaves any `.partial` as found, reports the refusal on its console, and states
+explicitly that **no durable refusal record exists**.
+
+*(11.1b) The claims directory.*
+
+**When.** Opening the claims directory is the **first filesystem action of every
+lifecycle, after nonce generation and authorization reading** (E1a step 2).
+
+**Trusted traversal, component by component.** The orchestrator walks four components in
+order: `C:\sentinel`, then `data`, then `run-records`, then `_claims`.
+- `C:\sentinel` is opened by its full path. Each later component is opened **by its single
+  name, relative to its parent's verified handle** — never by a full path string.
+- Every open is made without following a reparse point.
+- For each component, on its own handle, the orchestrator:
+  1. confirms it is a directory and not a symbolic link, junction or other reparse point;
+  2. resolves its final on-disk path and requires it to equal the expected path exactly;
+  3. keeps the handle open, in a mode that does not permit the directory to be renamed,
+     deleted or replaced.
+- All four handles stay open until the claim has been created and verified.
+- `C:\sentinel` and `data` must already exist. They are never created by the harness.
+
+The drive letter `C:` and the volume root are trusted and are not verified.
+
+**Provisioning.**
+
+| Situation | Action | Result |
+|---|---|---|
+| `_claims` exists and passes traversal | Proceed to enumeration | — |
+| `_claims` is absent, and `run-records` is absent or empty | Create the missing directories by exclusive create, each relative to its parent's verified handle; then verify them as above | Proceed. A lifecycle that loses a creation race opens what the winner created. |
+| `_claims` is absent, and `run-records` holds anything | **Refuse** (F0-f). Claims may have been lost. | Nothing is reserved. |
+| `_claims` exists but cannot be opened in the required mode | **Refuse** (F0-f) | Nothing is reserved. |
+| Any component fails a path-integrity check | **Refuse** (F0-f) | Nothing is reserved. |
+
+**The enumeration contract.** Enumeration is made through the verified `_claims` handle
+and covers every entry in the directory. Each entry is examined on its own handle, opened
+by name relative to `_claims` without following a reparse point.
+- **A valid claim entry** is a regular file — not a directory and not a reparse point —
+  named `<identifier>.claim`, where the suffix `.claim` is matched under the ASCII
+  case-insensitive rule and the identifier part matches the retained pattern
+  `^[A-Za-z0-9-]{1,64}$`.
+- **Every valid claim entry consumes its identifier,** whether its content is complete,
+  partial, empty or invalid. Content is never a reason to disregard a claim. The
+  identifier is compared under the rule of (11.1).
+- **No entry is ever silently ignored.** The enumeration is **untrustworthy**, and the
+  lifecycle refuses before creating a new claim (F0-f), if `_claims` contains any of: a
+  directory; a symbolic link, junction or other reparse point; a non-regular file; a name
+  that does not have the form above — a wrong or missing suffix, an identifier part
+  outside the retained pattern, or a reserved device name; or any entry that cannot be
+  opened or examined.
+- Two valid claims whose identifiers differ only in case both stand; each marks that
+  identifier as used. That is not by itself a refusal.
+- **Between enumeration and creation.** A newly created claim is always lowercase, so a
+  concurrent lifecycle attempting the same identifier is stopped by the exclusive create.
+  The enumeration exists to catch retained claims in another case.
+
+**Anchored creation.** The claim is created by exclusive create **relative to the verified
+`_claims` handle**, by its file name alone. It is therefore created in the directory that
+handle refers to, and a change to any path string cannot redirect it.
+
+**Protection must be established before any claim is created.** Two things are required,
+and neither substitutes for the other:
+- the anchored creation above;
+- the held handles actually preventing rename, deletion and replacement of all four
+  components.
+
+The second is unverified platform behaviour. It is established for a harness digest only
+by MV-W9(b). If MV-W9 has not established it, no measured execution may be authorized
+(D-5). Within a lifecycle, if any handle cannot be opened in the required mode, the
+lifecycle refuses **before creating the claim**. Detecting a swap afterwards is not an
+acceptable substitute.
+
+**Verification after creation — an additional safeguard, not the guarantee.** On the
+claim's own handle, the orchestrator confirms it is a regular file, not a reparse point,
+and that its final on-disk path is the expected `_claims` path joined with
+`<run-id>.claim`. A failure here refuses the lifecycle; the claim exists, so the
+identifier is consumed (F0-c).
+
+**Every later claim check** — at L1, L4 and TV2 — repeats the traversal and reads the
+claim relative to the verified `_claims` handle. No check relies on a path string alone.
+
+**Status.** The Windows calls, sharing modes and enumeration behaviour these steps need
+are unverified (D-5) and are established only by MV-W9 and MV-W11.
+
+*(11.2) Writer, timing and write protocol of the terminal artifact.*
+
+The outermost frame writes the artifact once, as its last act before exit (4.4). It:
+1. creates `outcome.rec.partial` exclusively (mode `xb`) in its **own** run's `terminal/`
+   directory;
+2. writes the envelope;
+3. flushes and calls `os.fsync`;
+4. closes it;
+5. renames it to `outcome.rec` with `os.rename`, which on Windows refuses an existing
+   destination (unverified, D-5).
+
+If any step fails, no `outcome.rec` exists, nothing is retried, and the child exits with
+the status it had determined. A leftover `.partial` is evidence, never an outcome. No
+other process writes the artifact; the orchestrator only reads it.
+
+*(11.3) The envelope.*
+
+The file is exactly 107 + L bytes, with 2 ≤ L ≤ 65,536, in three parts:
+- the magic: the 9 bytes of ASCII `SNTL-TO1` followed by LF;
+- the payload: L bytes;
+- the trailer: 98 bytes, consisting of LF, `LEN`, a space, L as exactly 20 zero-padded
+  ASCII decimal digits, a space, `SHA256`, a space, 64 lowercase hexadecimal digits, and
+  LF.
+
+The digest is the SHA-256 of the payload bytes only.
+
+**Canonical serialization** — used for the payload and every canonical JSON record in D51
+— means sorted keys, `,` and `:` as separators, ASCII-only escaping, no NaN or infinity,
+and integers as the only numbers.
+
+*(11.4) The payload.*
+
+It holds exactly these keys:
+- `format`: `"sentinel-terminal-outcome/1"`;
+- `run_id`: this execution's own run identifier;
+- `launch_sha256`: D_C;
+- `child_pid`;
+- `state`: `completed`, `stopped_by_trigger`, `refused`, `integrity`, `operator_interrupt`
+  or `crash`;
+- `exit_status`;
+- `latch`: exactly `cleanup_failed`, `cleanup_verified`, `reason` (null, `primary_raised`
+  or `primary_readback_failed`), `seq` (null or ≥ 1) and `day` (null or ISO date);
+- `integrity_reason`: null, `cleanup_recovered`, `cleanup_unverified`, `slot_occupied`,
+  `integrity_exception` or `checks_failed`;
+- `trigger`: null, or exactly `kind` (`system_floor`, `disk` or `budget`), `source`
+  (`orchestrator` or `child_checkpoint`) and `checkpoint` (one of the five values of
+  (9.2));
+- `exception`: null, or a descriptor (11.5).
+
+*(11.5) Exception descriptors.*
+
+- **What is never persisted.** No persisted record holds exception text. `str()`, `repr()`
+  and `format()` of an exception, its `args`, notes, cause or context are never persisted;
+  nor are `FetchFailed.url`, `params` or `reason`, `OSError.filename`, bodies, headers,
+  cookies, credentials or other request details.
+- **Why.** `TransportError`'s message embeds text from `requests` that can quote a header
+  value.
+
+**The descriptor** is built by one pure function from `type(exc)` and these type-checked
+attributes:
+- **`kind`** is the first that applies, in this order: `harness_refusal`, `trigger_stop`,
+  `fetch_failed`, `transport_error`, `typed_refusal`, `memory`, `os_error`,
+  `keyboard_interrupt`, `other`. `typed_refusal` means an `AcquisitionError`, or any class
+  defined in an `ingest` module (D-2). `kind` is `unknown` if any step of determining it
+  fails, and is `other` only when every earlier test has positively failed.
+- **`class`** is `module.qualname`: printable ASCII, at most 256 characters, matching
+  `^[A-Za-z_][A-Za-z0-9_]*(\.([A-Za-z_][A-Za-z0-9_]*|<locals>))*$`. Otherwise it is null.
+- **`harness_reason`** is always null (D-6).
+- **Kind-specific fields**, null otherwise: `fetch_status` and `fetch_attempts` for
+  `fetch_failed`; `transient` for `transport_error`; `errno` and `winerror` for
+  `os_error`.
+- **`identity_matches_exit_record`**: a boolean, or null.
+- **`complete`**: false if any field could not be produced safely.
+- **`cause` and `context`**: each null, or a link of the same fields minus
+  `harness_reason`, `identity_matches_exit_record`, `cause` and `context`, plus
+  `chain_continues`. The chain is kept to depth 1.
+
+**Failure handling.** Nothing is truncated. A field that cannot be produced is null, and
+`complete` becomes false; a `chain_continues` that cannot be produced is null and is
+treated as true. A descriptor that cannot be produced at all is
+`{"kind": "unknown", "complete": false}`, with every other field null.
+
+**The in-process exception is untouched** (4.4).
+
+*(11.6) Terminal verification (TV0 to TV7).*
+
+After the child exits:
+- **TV0.** The orchestrator observes the exit and its exit code.
+- **TV1.** It writes the **exit snapshot**: the trigger entries of (10.2); route and WARP
+  state; contention; the launched PID; whether its readings were complete; and the exit
+  code. It records the snapshot's SHA-256.
+- **TV2.** It reads all of `launch.json` and hashes it; the hash must equal D_L. The file
+  must be canonical and match the schema. `run_id`, `run_kind`, `harness_sha256` and
+  `continues` must equal the T0 values, and `exit_statuses` must equal the pinned table.
+  `claim.A_D`, `preparing_record.A_D`, `launch_file.authorization_ref` and
+  `launch-start record.A_D` must all equal the SHA-256 of the authorization file as
+  re-read, and `claim.nonce_sha256` must equal `preparing_record.nonce_sha256`. The
+  launch-start record's argument vector must equal the one re-derived from the
+  authorization and the one the child recorded as its first event. For a continuation, the
+  run record must contain `continuation-eligibility.json`, whose `prior_run_id` and
+  `prior_classification_sha256` equal the launch file's.
+- **TV3.** It checks the artifact's envelope: its size is 109 to 65,643 bytes; it starts
+  with the magic; its last 98 bytes match the trailer pattern exactly; 9 + L + 98 equals
+  its size; the payload's SHA-256 equals the trailer's.
+- **TV4.** It checks the payload: every byte is between `0x20` and `0x7F`; it is one JSON
+  object, with duplicate keys, floats, NaN and infinity rejected; canonical
+  re-serialization equals it byte for byte; keys and types are exactly as in (11.4) and
+  (11.5).
+- **TV5.** It checks the bindings: `run_id` equals the launch file's and names this
+  execution's own run directory; `launch_sha256` equals D_L; `exit_status` equals
+  `exit_statuses[state]` and the observed exit code; `child_pid` equals the snapshot's
+  PID.
+- **TV6.** It checks the invariants of (12.2), and that no child event contradicts the
+  artifact. Absent events are not a contradiction.
+- **TV7.** It records the result, with SHA-256 digests of: the artifact bytes as verified,
+  computed from the buffer actually checked; D_L; the exit snapshot; and the child-written
+  event portion as read at TV6. For a run kind that uses an acquisition directory, it
+  captures the acquisition manifest (11.9) and records its SHA-256; if the manifest cannot
+  be captured, TV7 records it as **unavailable**, which changes neither validity nor the
+  outcome mapping but makes the execution ineligible for continuation.
+
+A failure of TV2 to TV6 is governed by (11.8) and (12.3). Postflight begins only after
+TV7, and records the digest of its results.
+
+**Validity** depends only on the artifact's bytes, the launch file, the exit code, the
+exit snapshot and the child's events. Post-exit readings and postflight results never
+affect validity; they enter only the outcome mapping. Nothing appends to the artifact, and
+it need not be the last of anything in the event log.
+
+*(11.7) Validity, classification and acceptance.*
+
+**Three layers, kept distinct.**
+- **Validity** (TV0 to TV7) establishes whether the terminal artifact is valid and binds
+  it to the launch file, exit code, exit snapshot and child events.
+- **Classification** (12.3 to 12.5) maps the verified evidence to one outcome.
+- **Acceptance** is the owner's later review, which decides whether the evidence may be
+  relied on.
+
+**The classification record.** The first outcome mapping is computed only from the
+evidence verified at TV0 to TV7, together with the recorded postflight results. It is
+written **once**, as the classification record, which names the outcome, the mapping rule
+applied, every digest the mapping relied on, and — as bound but not mapped — the
+acquisition manifest's digest. It is never re-derived from files read later. Its own
+digest is recorded in the run record, in the event log and in the stage-review report.
+
+**Re-checks.** At each point below, each recorded digest is recomputed from a fresh read
+of its file, and compared with the recorded digest and size. The result is appended to the
+run record's audit section.
+
+| # | When | Covers |
+|---|---|---|
+| 1 | Immediately before the first outcome mapping | Artifact, launch file, exit snapshot, child-event portion, postflight results |
+| 2 | When the run record is closed | All of the above, plus the classification record, the acquisition manifest, the identifier claim, `continuation-eligibility.json`, the L0 and L4 fresh manifests, and any launch-refusal record |
+| 3 | At the owner's stage review | As 2 |
+| 4 | Before any decision that relies on the outcome: prerequisite use, a continuation's authorization, or a continuation's launch (L0 and L4) | As 2 |
+
+- **E-pre, "terminal-evidence mismatch found before classification."** Found at
+  re-check 1. It establishes that a file's bytes differed from its recorded digest when
+  re-check 1 ran. Under (12.3) it is a contradiction: the first mapping records an
+  unclassified termination, and the classification record names the mismatch.
+- **E-post, "terminal-evidence mismatch found after classification."** Found at re-checks
+  2 to 4. It establishes only that the bytes differed when that check ran, and that the
+  last matching check — or the original recording — preceded it. Each event records both
+  check times. It does not establish when the change happened.
+  - The classification record stands as written.
+  - The modified file is preserved as found.
+  - A separate **evidence-status record** marks the evidence **compromised**.
+  - While compromised, the execution cannot be accepted, cannot satisfy any prerequisite,
+    and cannot be continued, without the owner's review and new explicit authorization.
+
+**Limits.** A digest detects a change only when it is checked. A change reverted between
+checks, or a consistent change to both a file and its recorded digest, is not detected. No
+tamper-proofing is claimed. The TV7 record and the classification record stand only as
+records of what was verified and classified then.
+
+**A continuation never alters the prior execution's evidence.** The prior `terminal/`
+directory is never written. Its run record receives only the appended audit entries and
+evidence-status updates of this clause.
+
+*(11.8) A missing or invalid artifact.*
+
+A missing or invalid artifact is an **unclassified termination**, whatever the exit
+status. That covers no `outcome.rec`, a `.partial` only, a TV2 failure, an envelope or
+payload failure, and a failed binding or invariant. Nothing assumes that an artifact could
+have been written.
+
+*(11.9) The acquisition manifest.*
+
+**Where it is stored.** `data/run-records/<run-id>/acquisition-manifest.json`, written by
+the orchestrator at TV7 by exclusive create, flush, `fsync` and rename. It is detached
+from the terminal artifact, whose schema and 65,536-byte payload bound are unchanged. The
+child never writes or reads it, and D51 sets it no size bound.
+
+**Contents.** Canonical JSON with exactly these keys:
+
+| Key | Value |
+|---|---|
+| `format` | `"sentinel-acquisition-manifest/1"` |
+| `run_id` | the identifier of the execution that captured it |
+| `acquisition_dir` | the acquisition directory's path relative to `C:\sentinel` |
+| `entries` | a list of entries, each with exactly `path`, `type` (`file` or `dir`), `size` and `sha256` |
+| `entry_count` | the number of entries |
+| `file_bytes` | the total size of the files |
+
+**Canonical paths.** A path is one or more segments joined by `/`, with no leading or
+trailing `/`, no empty segment, and no `\`. A segment is valid only if:
+
+| Rule | Rejects |
+|---|---|
+| Every character is ASCII `0x20` to `0x7E`, excluding `< > : " / \ \| ? *` | control characters; non-ASCII names; `:` and with it drive-qualified paths, drive-relative paths and alternate data streams; UNC, `\\?\` and `\\.\` forms |
+| It is not `.` or `..` | relative traversal |
+| It does not end in `.` or a space | names Windows silently alters |
+| Its base name — the part before the first `.`, compared without regard to ASCII case — is not `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, `CONIN$` or `CONOUT$` | reserved device names |
+
+Production writes only ASCII names into an acquisition directory: digests, ISO dates and
+export names matching `[A-Za-z0-9_]+` (`ingest/fetch/cfpb.py`). Admitting other names
+would need normalization and case-folding rules D51 does not define, so a non-ASCII name
+makes the manifest unavailable. No ordinary ASCII filename is rejected.
+
+**The validator.** A manifest is valid only if:
+1. it is canonical JSON with exactly the keys above, the stated `format`, and a `run_id`
+   matching the retained identifier pattern of (11.1);
+2. `acquisition_dir` obeys the path rules and its first segment is `data`;
+3. each entry's `path` obeys the path rules; a file has an integer `size` of at least 0
+   and a `sha256` of 64 lowercase hexadecimal digits; a directory has null for both;
+4. paths are unique and strictly ascending, compared byte by byte as recorded; no two
+   paths are equal after ASCII lower-casing; every proper parent of an entry is itself a
+   `dir` entry, and empty directories are entries;
+5. `entry_count` equals the number of entries, and `file_bytes` equals the sum of the
+   files' sizes.
+
+**Capture by handle.** Every check is made on an opened object, never on a path string
+followed by a separate open. For the acquisition directory and every entry, the capturing
+code:
+1. opens the object once, without following a reparse point, and keeps that handle open;
+2. reads the object's attributes from the handle, and rejects a symbolic link, junction or
+   any other reparse point;
+3. resolves the final on-disk path from the handle, and requires it to lie strictly below
+   the resolved acquisition directory and to equal that directory joined with the recorded
+   path;
+4. for a file, reads its size and hashes its content through the same handle;
+5. for a directory, enumerates its children through the same handle, recording each name
+   exactly as enumeration returns it.
+
+The acquisition directory itself must resolve strictly below `C:\sentinel\data\`, with no
+reparse point at any component.
+
+**Change during capture.** Each file's identity, size and last-write time are read from
+the handle before and after hashing. Each directory is enumerated before and after its
+children are processed. Any difference, or any entry that appears, disappears or cannot be
+opened, makes the manifest **unavailable**. Capture never retries until it "settles".
+
+**Comparison.** Two manifests are compared on `acquisition_dir`, `entries`, `entry_count`
+and `file_bytes`, byte for byte. A missing entry, an added entry, a rename (one missing
+and one added) and a changed `size` or `sha256` are each a mismatch.
+
+**Binding.** The manifest's SHA-256 is recorded at TV7 and bound by the classification
+record, whose digest a continuation's authorization binds as
+`prior_classification_sha256`.
+
+**Fresh manifests.**
+
+| Captured at | Where its bytes are kept | Where its SHA-256 is recorded |
+|---|---|---|
+| L0, and L0 passes | Held in memory until L2, then `acquisition-manifest.l0.json` in the new run directory | `continuation-eligibility.json` |
+| L0, and L0 fails | `_preflight/<sha256>.manifest.json`, if it was captured and can be written | The preflight-refusal record, with whether E5's comparison matched |
+| L4, pass or fail | `acquisition-manifest.l4.json` in the run directory, before the launch-start or launch-refusal record | That record |
+
+If a fresh manifest cannot be persisted, the lifecycle stops at that phase, and the
+refusal record says the bytes were not kept.
+
+**What a match establishes, and what it does not.** A match establishes only that the
+directory's names, types, sizes and contents are the same as when TV7 captured them. It
+does **not** establish: that the directory was unchanged between the child's exit and TV7,
+an interval that rests only on (8) and the operator (O-2); that the acquisition's contents
+are correct; its `acquisition_id`; its immutable start state or pins; or that D46 to D49
+will accept the resume. Those remain production's own checks inside the child.
+
+**Status.** The Windows behaviours these rules rely on fall under D-5 and are established
+only by class MV-W.
+
+*Now — (12) Classification and outcomes.*
+
+*(12.1) Refusal-class events.*
+
+Each of these is a refusal-class event:
+- any typed source, join, roster, identity or acquisition refusal;
+- HTTP 403;
+- `FetchFailed`, including after retries are exhausted and on any 3xx;
+- a guard refusal under (6), including:
+  - a pin mismatch;
+  - an export outside the stage's roster;
+  - a request outside its permitted context or day;
+  - a by-ID request the guard refuses: no context; a malformed, nested, foreign or
+    stale-archive context; an active day outside the window; a non-canonical or
+    out-of-range ID; an absent or repeated ID; an unset inclusion bit; or a different
+    archive date;
+  - a disallowed header or header value, such as an outgoing `Cookie`, a credential, an
+    explicit `Host`, or an unexpected value of a permitted header;
+  - a refusal while the terminal marker is set;
+- a harness-integrity failure of H3's context handling — a refused ownership, overwrite or
+  archive-identity check, or a cleanup failure, recovered or unverified;
+- a child exit with the integrity status;
+- a capture failure (B-6);
+- any failure of the exact-day audit (6.9);
+- a failed count or reconciliation invariant;
+- an integrity failure;
+- the acquisition commit budget reached;
+- a change of route or WARP state;
+- a write outside the execution's authorized `data/` roots; any write by a child to
+  another execution's run directory; any change by the orchestrator to another execution's
+  run directory beyond (11.7)'s appended entries; any change to `data/recon/`; or any
+  change to a tracked file;
+- a continuation whose own TV7 manifest has an `acquisition_dir` other than the prior
+  execution's;
+- E-pre, which (12.3) treats as a contradiction;
+- E-post, which marks the evidence compromised;
+- a measurement that cannot be completed as specified, which includes every E condition of
+  (12.4);
+- an unclassified termination.
+
+A refusal's record names a refused header and keeps its presence and the refusal, never
+its value or any cookie value.
+
+*(12.2) Invariants.*
+
+These are checked at TV6, and any violation is contradictory.
+- **I1.** If `cleanup_failed` is false, then `cleanup_verified` is false and `reason`,
+  `seq` and `day` are null. If it is true, they are all non-null.
+- **I2.** If `cleanup_failed` is true, the state is `integrity`, with `integrity_reason`
+  `cleanup_recovered` (if verified) or `cleanup_unverified` (if not).
+- **I3.** The state is `integrity` exactly when `integrity_reason` is non-null.
+- **I4.** `exit_status` equals `exit_statuses[state]`, which equals the exit code.
+- **I5.** `completed` requires `exception` to be null, and `trigger` to be null or at the
+  run kind's end checkpoint.
+- **I6.** `stopped_by_trigger` requires a `trigger` at a non-end checkpoint the run kind
+  reaches, and an exception of kind `trigger_stop`.
+- **I7.** `refused` requires `trigger` to be null, a clear latch, a null
+  `integrity_reason`, and an exception of kind `harness_refusal`, `fetch_failed`,
+  `transport_error` or `typed_refusal`.
+- **I8.** `crash` requires `trigger` to be null and an exception of kind `memory`,
+  `os_error`, `other` or `unknown`.
+- **I9.** `operator_interrupt` requires `trigger` to be null and an exception of kind
+  `keyboard_interrupt`.
+- **I10.** `integrity` requires `trigger` to be null, and permits any exception, or none.
+- **I11.** Trigger kind and source agree with R-T2, R-T3a, R-T3b and R-T7.
+- **I12.** An `identity_matches_exit_record` of false requires `integrity`.
+- **I13.** Kind-specific descriptor fields are non-null only for their own kind, and
+  `harness_reason` is null.
+
+*(12.3) Precedence.*
+
+Every applicable check is evaluated in full before classification, and an E finding never
+stops evaluation of any other check. The order is then:
+1. **An invalid artifact** (11.8) is an **unclassified termination**.
+2. **Any demonstrated contradiction**, anywhere, is an **unclassified termination**,
+   regardless of any E. Contradictions include V2, an O1 omission, a forced-action or R-T3
+   violation, an invariant violation, a digest or ordinal inconsistency, a field-presence
+   conflict, a failed-check sequencing violation, and E-pre.
+3. **Otherwise, E** leads to mapping rule 1 or 2.
+4. **Otherwise,** mapping rules 3 to 13 apply.
+
+V3 alone is E. V3 with any contradiction is an unclassified termination. Unavailable
+authenticity is E unless a contradiction exists. A continuation is classified from its own
+evidence alone, under the same precedence.
+
+*(12.4) Terms used by the mapping.*
+
+- **E** is any of: an evidence defect from (10) or (11); a postflight refusal-class event;
+  a live refusal-class event in the snapshot; incomplete orchestrator readings; R-T6.
+- **B** means a budget trigger in the snapshot or in the artifact.
+- **FD** means a system-floor or disk trigger in the snapshot.
+- **IU** holds when `complete` is false and `identity_matches_exit_record` is null.
+- **R\*** holds when any of these holds: the exception's kind is `unknown`; any link's
+  kind is refusal-class (`harness_refusal`, `fetch_failed`, `transport_error` or
+  `typed_refusal`) or `unknown`; any link's `chain_continues` is true or null.
+
+**Descriptor completeness.** Classification reads only `kind`,
+`identity_matches_exit_record` and each link's `kind` and `chain_continues`. All other
+descriptor fields are classification-neutral. An incomplete descriptor therefore never
+yields a more permissive outcome than a complete one.
+
+*(12.5) The outcome mapping.*
+
+It is applied only to a valid artifact with no contradiction. The first matching rule
+decides.
+
+| # | Condition | Outcome |
+|---|---|---|
+| 1 | E, with state `completed` | Completion, not compliant |
+| 2 | E, with any other state | Refused |
+| 3 | `integrity` or `refused` | Refused |
+| 4 | B, with `completed` | Completion, not compliant |
+| 5 | B, with any other state | Refused |
+| 6 | `stopped_by_trigger`, `crash` or `operator_interrupt`, with R\* or IU | Refused |
+| 7 | `stopped_by_trigger` | Reviewed interruption |
+| 8 | `completed`, with no FD | Compliant completion |
+| 9 | `completed`, with FD | Completion after a reviewed trigger |
+| 10 | `crash`, with FD | Reviewed interruption |
+| 11 | `crash`, kind `memory` or `os_error` | Reviewed interruption (D-4) |
+| 12 | `crash`, kind `other` | Ordinary interruption |
+| 13 | `operator_interrupt` | Reviewed interruption (D-1) |
+
+**Totality.** `integrity` and `refused` end at rule 2 or 3. `stopped_by_trigger` ends at
+rule 2, 5, 6 or 7. `completed` ends at rule 1, 4, 8 or 9; under rule 8, R-T2 forces
+`trigger` to be null, and under rule 9 every FD entry was acted on, covered or late.
+`crash` ends at rule 2, 5, 6 or 10 to 12. `operator_interrupt` ends at rule 2, 5, 6 or 13.
+Taking the first match makes the outcome unique. A `completed` run with FD is never
+compliant.
+
+*(12.6) Outcomes.*
+
+| Outcome | Status |
+|---|---|
+| Compliant completion | Eligible for the owner's stage review. Satisfies no prerequisite until the review accepts it. |
+| Completion after a reviewed trigger | Eligible for stage review only after the owner reviews the trigger. The review decides whether its measurements stand. |
+| Completion, not compliant | A refusal: not accepted as the stage's result. Never eligible for continuation. |
+| Refused | A refusal. Never eligible for continuation. |
+| Reviewed interruption | Eligible for continuation after the owner's review, **only** by a new execution under a fresh explicit authorization and a new run identifier (12.7). Eligibility is not permission. |
+| Ordinary interruption | Eligible for continuation **only** by a new execution under a fresh explicit authorization and a new run identifier (12.7). Eligibility is not permission. |
+| Unclassified termination | An integrity refusal. Never eligible for continuation. Any further execution is a new, non-continuing execution, under new explicit authorization after the owner's review. |
+
+An execution whose evidence-status record shows it compromised (11.7) cannot be accepted,
+used as a prerequisite or continued under any outcome.
+
+*(12.7) Continuation, refusal and disposition.*
+
+**(12.7.1) No resumption under an existing authorization.** No execution is ever resumed
+under its own authorization or run identifier. A continuation is a new execution in every
+respect: its own fresh explicit authorization, run identifier, identifier claim, run
+record, terminal directory, launch file, delivery medium, terminal artifact,
+classification record and evidence-status record. **Without a fresh authorization there is
+no continuation.**
+
+**(12.7.2) Eligibility.** An execution's outcome makes it eligible for continuation only
+if it is a reviewed interruption whose owner's review is recorded, or an ordinary
+interruption. These block continuation:
+- a refusal of any kind, including Completion, not compliant;
+- an unclassified termination;
+- compromised evidence;
+- a classification or evidence status that cannot be verified;
+- an unavailable acquisition manifest;
+- a prior run already continued, or blocked, under E3;
+- a prior run with no classification record.
+
+**(12.7.3) What a continuation's authorization must contain.** Everything (13) requires,
+plus the continuation binding of (11.1). A continuation has the prior execution's run
+kind. Its command is identical, argument for argument, to the prior execution's command.
+
+**(12.7.4) Acquisition continuity is unchanged.** For a real run, a continuation continues
+the prior execution's acquisition **under D46 to D49 unchanged**: the same command,
+acquisition directory, `acquisition_id`, immutable start state and pins, and journal
+continuity, with D27's corpus-replacement semantics. D51 neither redefines nor weakens
+those rules, and production's own refusals still apply inside the child. A continuation of
+an offline rerun reuses the same completed acquisition. A continuation of an archive
+replay uses newly copied, pin-verified exports.
+
+**(12.7.5) The checks E1 to E6.**
+
+| Phase | First execution | Continuation |
+|---|---|---|
+| L0 | not run | E1a; then, if E1a passes, every one of E2 to E6, each failure recorded |
+| L1 (start) | E1a | ownership of the claim confirmed again (T0 step 1) |
+| L4 | E1b and the launch binding | E1b, E2, E3, E4, E5, E6 repeated, and the launch binding |
+
+E2 to E6 apply to continuations only, so first executions are unaffected by E6. Any
+failure is a refusal before launch.
+
+**E1a. Reservation and authorization, before the run directory exists.** The steps run in
+this order, after the lifecycle nonce has been generated, and the lifecycle proceeds only
+if all seven pass.
+1. **Validate before any filesystem operation.** The authorization is present and
+   complete, and A_D is computed from one read. Its run identifier matches the lowercase
+   pattern and is not a reserved device name (11.1).
+2. **Open and verify `_claims`** by the trusted traversal and provisioning rules of
+   (11.1b).
+3. **Enumerate the existing claims** through the verified handle, under the contract of
+   (11.1b). If the enumeration is untrustworthy, refuse. If any claim's identifier equals
+   this identifier under the ASCII case-insensitive rule, the identifier is already used.
+4. **Create the claim** by exclusive create, relative to the verified `_claims` handle.
+5. **Write and confirm ownership.** The lifecycle writes canonical claim JSON with exactly
+   the schema of (11.1a); flushes, `fsync`s and closes it; reads it back through a
+   verified handle; confirms it is canonical and matches the schema; and confirms that its
+   `run_id`, `A_D` and `nonce_sha256` equal the identifier, A_D and the SHA-256 of the
+   nonce the lifecycle holds in memory. Only then does the lifecycle own the claim.
+6. **Scan retained records** under `data/run-records/`, as specified below.
+7. **Proceed** only if steps 1 to 6 all passed. No run directory is created otherwise.
+
+| Step | Failure | Case | The identifier |
+|---|---|---|---|
+| 1 | Authorization or identifier invalid | No F0 case; no reservation was attempted | Not reserved |
+| 2 | `_claims` absent with other records present, cannot be opened, or fails path integrity | F0-f | Not reserved |
+| 3 | Enumeration untrustworthy | F0-f | Not reserved |
+| 3 | A case-insensitive collision with an existing claim | F0-a | Already consumed |
+| 4 | The create fails because the claim exists | F0-a | Already consumed |
+| 4 | The create fails otherwise, and no claim exists afterwards | F0-b | Not reserved |
+| 4 | The create returns ambiguously, and a claim exists afterwards | F0-c | Consumed |
+| 5 | The claim exists, but writing, read-back or ownership confirmation fails | F0-c | **Consumed.** No run directory is created. |
+| 6 | A retained record marks the identifier as used, or the scan refuses | F0-d | Consumed by this lifecycle's claim |
+
+**The retained-record scan (E1a step 6).** Working through the verified `run-records`
+handle, the orchestrator enumerates every entry directly under `data/run-records/` and
+classifies each:
+
+| Entry | Treatment |
+|---|---|
+| The directories `_claims` and `_preflight` | Skipped by this scan; each is verified by its own rules. |
+| A directory whose name matches the retained pattern | A run directory. Its **name** marks that identifier as used, and it is examined by state, below. |
+| Anything else: a non-directory entry, a directory with any other name, or a reparse point | **Its significance cannot be established. The lifecycle refuses** (F0-d). |
+
+If any entry cannot be enumerated, opened or read safely, the lifecycle refuses (F0-d).
+
+*Fields examined*, all under the comparison rule of (11.1), and no others:
+
+| Location | Field |
+|---|---|
+| `<run-dir>/preparing.json` | `run_id` |
+| `<run-dir>/terminal/launch.json` | `run_id` and `continues.prior_run_id` |
+| `<run-dir>/continuation-eligibility.json` | `prior_run_id` |
+
+*Binding-bearing records.* Two records carry a continuation binding, and no other does:
+`terminal/launch.json`, in `continues.prior_run_id`; and `continuation-eligibility.json`,
+in `prior_run_id`. The launch-start record carries no continuation binding under its
+schema, so it is not examined for one. **A record is valid** only if it can be read
+safely, is canonical, and matches its schema. Anything else that is present — malformed,
+non-canonical, incomplete or unreadable — is **invalid**, and is never read as "no
+binding".
+
+*Launched directories.* `launch.json` must be present and valid. If its `continues` is
+null, the directory is a first execution, and `continuation-eligibility.json` must be
+absent. If its `continues` is an object, `continuation-eligibility.json` must be present
+and valid, and its `prior_run_id` must equal `continues.prior_run_id`. Otherwise the
+lifecycle **refuses** (F0-d).
+
+*Launch-refused directories.* Nothing is required. The records may be absent, partial or
+invalid, exactly as F1 to F4 left them. This is not a refusal.
+
+*Preparing and indeterminate directories.* The two records are judged together:
+
+| `terminal/launch.json` | `continuation-eligibility.json` | Treatment |
+|---|---|---|
+| Absent | Absent | A legitimately incomplete state. No binding is established. (Case A) |
+| Valid, `continues` null | Absent | A valid first-execution state. No binding. |
+| Valid, `continues` null | Present | **Refuse** (F0-d): inconsistent. |
+| Valid, `continues` an object | Absent | An incomplete continuation state. The binding in `launch.json` is an observed reference and blocks under E3. (Case B) |
+| Valid, `continues` an object | Valid, with `prior_run_id` equal to `continues.prior_run_id` | A valid continuation state. It blocks under E3. |
+| Valid, `continues` an object | Valid, with a different `prior_run_id` | **Refuse** (F0-d): contradictory binding. |
+| Absent | Present | **Refuse** (F0-d): the write order makes this impossible. |
+| Present but invalid | Either | **Refuse** (F0-d). |
+| Valid | Present but invalid | **Refuse** (F0-d). |
+
+*When the scanning lifecycle is a continuation:*
+- **Case A — both records absent.** The directory's prior-run binding is unknown.
+  Exclusivity cannot be established, so the lifecycle **refuses** (F0-d).
+- **Case B — `launch.json` valid with `continues.prior_run_id` naming P, and
+  `continuation-eligibility.json` absent.** The prior run is known from the valid launch
+  file. P is recorded as an observed reference, and E3 is applied normally: a continuation
+  naming P is refused under E3; a continuation naming a different prior run Q is **not**
+  refused by this directory. The missing eligibility record changes nothing about the
+  `prior_run_id` the valid launch file already records, and no other binding is assumed.
+
+*When the scanning lifecycle is a first execution,* it does not refuse merely because a
+preparing or indeterminate directory is incomplete. The interim rule of (8) and O-3 still
+blocks its launch at L4.
+
+*Discovery and eligibility are separate.*
+- **Discovery.** Any valid `continues.prior_run_id` or `prior_run_id`, in a directory of
+  any state, is recorded as an **observed reference** to that prior identifier, and marks
+  that identifier as used. An observed reference decides nothing about E3 on its own.
+- **Eligibility.** A binding counts as a continuation of its prior run **only if its
+  directory is Launched**. A valid binding in a preparing or indeterminate directory
+  counts as a **blocking** reference. A valid binding in a launch-refused directory is an
+  observed historical reference only and does **not** count under E3; that directory's own
+  run identifier remains permanently consumed.
+- `launch.json`.`run_id`, `preparing.json`.`run_id` and each run directory's name mark
+  their identifier as used. A valid `continues: null` contributes no binding.
+
+**The launch block is separate.** Passing E1a does not permit a launch. Under (8) and the
+interim rule O-3, a foreign preparing or indeterminate directory blocks every launch at
+L4.
+
+**E1b. Identity of this execution's own directory, at L4.** All of these hold:
+- the directory exists and its name equals the run identifier;
+- the claim file exists, is canonical, and names this run identifier and A_D;
+- `preparing.json` is canonical, matches its schema, and its `run_id` equals the run
+  identifier;
+- `claim.nonce_sha256 == preparing_record.nonce_sha256 == SHA-256(in-memory nonce)`;
+- the authorization file, re-read now, hashes to A_D;
+- `claim.A_D == preparing_record.A_D == A_D`;
+- `launch_file.authorization_ref == A_D`;
+- `launch.json` hashes to D_L;
+- every launch field re-derived from the authorization equals the launch file's;
+- for a continuation, `continuation-eligibility.json` matches its recorded digest and its
+  `A_D` field equals A_D.
+
+No pre-existing directory is ever adopted or reused.
+
+**E2. The prior evidence.** The prior run directory is in the launched state. Its
+classification record's SHA-256 equals `prior_classification_sha256`. Re-check 4 of (11.7)
+matches over all of the prior evidence. The prior evidence is not compromised. The prior
+outcome equals the binding and is eligible. For a reviewed interruption, the owner's
+review record exists and its SHA-256 equals `owner_review_sha256` (G-2).
+
+**E3. Exclusivity.** No other run directory in the launched, preparing or indeterminate
+state has a valid `launch.json` whose `continues.prior_run_id` names the same prior run.
+Launch-refused directories do not count. E3 relies on the bindings established by E1a step
+6; where step 6 refused, E3 is not reached.
+
+**E4. Same command and identity.** The run kind, command, window, corpus root, commit,
+harness digests and package freeze equal the prior execution's (G-1).
+
+**E5. The acquisition directory.** For run kinds that use one:
+- the prior manifest is valid and not unavailable; its `run_id` is the prior run's; its
+  `acquisition_dir` equals the path recorded in the prior run record at TV7; its SHA-256
+  equals both the digest recorded at the prior TV7 and the digest bound by the prior
+  classification record;
+- a fresh manifest, captured now by handle with `run_id` set to the continuation's, is
+  valid and not unavailable, and its `acquisition_dir`, `entries`, `entry_count` and
+  `file_bytes` are byte-identical to the prior manifest's (G-3).
+
+**E6. Acceptance of the exit-to-TV7 interval.** A later decision recorded in the addendum
+explicitly accepts the limitation stated in (11.9), and the continuation's authorization
+cites that decision. **No such decision exists.** D51 does not define how a decision
+expresses that acceptance, nor how an authorization cites it and the orchestrator verifies
+the citation (O-2). Until a later decision defines them, E6 cannot be satisfied, and
+**every continuation is refused at L0**. No continuation reaches L1 or L4.
+
+**(12.7.6) Classification and memory.** A continuation is classified from its own evidence
+alone. The prior execution's classification record is never altered. A continuation's
+memory figures describe its own process only, and are never presented as an uninterrupted
+run's peak.
+
+**(12.7.7) Stage acceptance.** A stage review considers the completed execution together
+with every execution it continues. Each is identified by its own run identifier, and they
+are linked only by the prior-run reference in each authorization. Compromised evidence in
+any of them blocks acceptance.
+
+**(12.7.8) Disposition.**
+- **After any refusal,** including an unclassified termination, any further execution
+  requires the owner's review and new explicit authorization.
+- **No bypass.** No other outcome may be reclassified as an interruption. An operator
+  interrupt counts only when delivered so that the child records it; a forced kill or a
+  power loss is an unclassified termination.
+- **Preservation.** For an unclassified termination, every artifact is preserved exactly
+  as found. No partial record, missing event or unread latch is taken as evidence that
+  cleanup succeeded, that the child stopped at a safe checkpoint, or that any write
+  completed.
+- **Completion, not compliant.** The corpus and its manifest are technically complete
+  under D27 and are left exactly as written. The harness modifies, moves and deletes
+  nothing, and compliance is recorded only in the run record. The corpus is not the
+  stage's result, and no stage may treat it as a prerequisite. Its disposition —
+  including, for Stage B, an authoritative manifest at `data/corpus/` — is decided by the
+  owner under a new authorization.
+- **Acquisition directories.** A complete acquisition directory may be reused by a later
+  stage's offline rerun only as that stage's own authorization specifies, subject to D46's
+  verification; such reuse is not a continuation. An incomplete acquisition left by an
+  ineligible outcome is never continued; it is preserved as evidence.
+
+*Now — (13) The stage sequence, frozen and not authorized.*
+
+The order is frozen: A, A′, A2, the further measurement, B, then C. No two executions run
+concurrently. **A stage may be authorized only after every earlier stage in the frozen
+order has been accepted.** A refused or unaccepted stage blocks every later stage until it
+is accepted under a new authorization. **A prerequisite stage counts only when the owner's
+review has accepted a compliant completion, or a completion after a reviewed trigger whose
+measurements the review accepts.** Offline reruns and archive replays contact no source
+and are never acquisitions.
+
+**Every execution, including every continuation, has its own explicit authorization.** It
+names its run kind, command, window, corpus root, commit, harness digests and allowlist
+digest; its own new run identifier; and, for a continuation, the continuation binding. A
+continuation belongs to the stage of the execution it continues, and never advances the
+frozen order.
+
+| Stage | Run | Prerequisite |
+|---|---|---|
+| A | CFPB bounded validation: `python -m ingest.cli --source cfpb --start 2024-01-08 --end 2024-01-14 --fetch --corpus-root data/corpus-validation`, through the harness, as a real run; no `--limit`; never `data/corpus/` | Before execution, every authorization prerequisite in (16) must be met; Stage A must then have its own explicit authorization, sought only after those prerequisites are met; and the applicable requirements of (4) to (11), with A's allowlist, must be satisfied. All launch conditions must be rechecked immediately before execution. |
+| A′ | Offline rerun of A's completed acquisition into `data/corpus-validation-rerun`, through the harness under A′'s allowlist, with no source contact, measuring verification and every later stage without fetch-stage allocations and verifying records, outcomes and `acquisition_id` | A accepted; (4) to (11) with A′'s allowlist; its own authorization |
+| A2 | CFPB bounded validation over January 2024 into `data/corpus-validation-january`, through the harness, as a new acquisition | A and A′ accepted; (4) to (11) with A2's allowlist; its own authorization |
+| Further measurement | Designed after A2's review, using the offline rerun of (13.8) and the archive replay of (13.9): offline reruns of A2's and of any later completed acquisition whose stages are projected, each into a corpus root its authorization names (never `data/corpus/` and never an existing root), and archive replays of two windows comparable under C1-X, on pin-verified reconnaissance copies, with no source contact. It supplies exact values for every component those procedures can measure, and cannot supply the API-day or finishing excesses. | A, A′ and A2 accepted; its own design decision, allowlists and authorizations under every rule of D51 |
+| B | CFPB full D37.2 window into `data/corpus/`, whose unbounded manifest becomes the authoritative roster lock (D24, D26) | A, A′, A2 and the further measurement accepted; every Rule C model supported; a later decision establishing exact measurement of the API-day and finishing transient excesses, which no method D51 proposes can provide; B's peak-memory and disk projections then found supported and fitting at B's review; (4) to (11) with B's allowlist; a new authorization naming every permitted host, the eleven exports and their pins, the window dates and the allowlist digest. **Under D51 alone, Stage B cannot be authorized.** |
+| C | NYC 311 bounded validation over New York civil days 2024-11-02 to 2024-11-04 into `data/corpus-validation-nyc311/`, exercising D50's ambiguous-local-time exclusion on the 2024-11-03 fold | Every preceding stage accepted, including B; NYC 311's stage list under (5.3); its own resource, disk and network readiness reviewed; (4) to (11) with C's allowlist; its own authorization. **Under the frozen order, Stage C cannot be authorized under D51, because Stage B cannot.** |
+
+*(13.1) Retained and peak memory are distinct.*
+
+Retained memory is commit still held when a stage ends; peak memory is the highest commit
+a run reaches. A linear retained model does not imply a linear peak model, and per-page
+current-commit increments are no evidence of transient peaks.
+
+*(13.2) The recurrence.*
+
+B's peak commit is projected by carrying the recurrence of (5.5) through B's own stage
+sequence, each repeated stage instance counting as a stage:
+- `Ŝ_1` is the larger interpreter-start commit measured in A and A2.
+- `Ŝ_(s+1) = Ŝ_s + Δ̂_s`, where `Δ̂_s` is always the incremental retained change of stage
+  `s` alone.
+- `P̂_s = Ŝ_s + X̂_s`.
+- The projected run peak is the largest `P̂_s` over all of B's stages.
+
+The recurrence covers the measured child only. Each `Δ̂_s` and `X̂_s` falls into exactly
+one class:
+- **carried:** the same stage at the same driver value as measured; its exact value is
+  used, or an interval's upper bound;
+- **projected:** the driver differs; it is computed only from exact measured values, by
+  Rule P or Rule C, under assumptions a later decision must accept;
+- **unknown:** an extrapolated component measured only as an interval, or a structure no
+  run has measured.
+
+A retained decrease is credited only for a carried stage. A projected decrease is credited
+as zero.
+
+*(13.3) Rule P, the proportional bound.*
+
+For a quantity measured exactly as values `v_j` at driver values `r_j`:
+`v̂(r) = max(max_j v_j⁺, r · max_j (v_j⁺ / r_j))`, with `v⁺ = max(v, 0)`.
+- If the quantity is non-negative, non-decreasing in its driver, and grows no faster than
+  in proportion to it beyond the measured range — the assumption a later decision must
+  accept — then `v̂` is never below the true value.
+- Observations at a single driver value cannot test that assumption.
+- Rule P gives every transient excess, the retained change of every single stage, and the
+  retained change of each instance of a repeated stage type that has no Rule C model.
+
+*(13.4) Rule C, the cumulative envelope.*
+
+- **RC-1, the form.** At every instance boundary `k ≥ 1`, the true cumulative retained
+  change is `C_k = α + γ·k + β·R_k`, with `γ ≥ 0` and `β ≥ 0`. RC-1 does not apply at
+  `k = 0`, where `C_0 = 0` by definition; the once-per-observation cost `α` enters at the
+  first instance. So `Q = C_m = α + γ·m + β·R`, and the retained increment of every
+  non-first instance `i` is `γ + β·r_i`, which is non-negative and non-decreasing in
+  `r_i`. RC-1 is the only assumption that requires a non-decreasing relationship with the
+  driver.
+- **The envelope.** Two observations cannot separate `γ` from `β`. With `ΔQ`, `Δm` and
+  `ΔR` taken between them:
+  - `β_R = ΔQ / ΔR`;
+  - `γ_m = ΔQ / Δm`;
+  - `α̂ = max(Q_2 − β_R·R_2, Q_2 − γ_m·m_2, 0)`.
+
+  `γ_m` and `β_R` are the extreme slopes the observations allow, **not estimates** of `γ`
+  and `β`.
+- **Conversion to increments, before the recurrence uses it:**
+  - `Δ̂_1 = α̂ + max(β_R·r_1, γ_m)` for the first instance;
+  - `Δ̂_i = max(β_R·r_i, γ_m)` for every later instance;
+  - so `Ĉ_k = Ŝ_T + α̂ + Σ_(i≤k) max(β_R·r_i, γ_m)`, where `Ŝ_T` is the projected start of
+    the type's first instance.
+- **Why it is an upper envelope.** Every `(γ, β)` the two observations allow is a convex
+  combination of `(γ_m, 0)` and `(0, β_R)`. So `γ + β·r ≤ max(β_R·r, γ_m)`, and `α ≤ α̂`.
+- **Requirements.** Two observations suffice, provided they differ in both `m` and `R`.
+
+**Model kinds.**
+- **A shared-archive model** — normalization pages and API days — compares A and A2. Both
+  read the same pinned export #5, at the same commit and freeze. **Their page and API-day
+  inputs are not identical:** A's window is a subset of A2's, and the live API records for
+  shared days may differ between the runs.
+- **The export model** compares two archive replays: `Q` is the sum of `Δ` over their
+  "each export but the last" stages, `m` is the number of those stages, and `R` is their
+  summed archive rows.
+
+| | Criterion | Applies to | Evidence |
+|---|---|---|---|
+| C1-S | Shared archive and freeze: both runs used the same pinned exports, read the same archive rows, and ran at the same commit, package freeze and harness digests, each a fresh process. This establishes identity of the archive-phase inputs only. | shared-archive models | equality of recorded values |
+| C1-X | Export comparability: the same commit, package freeze, harness digests and interpreter, each run a fresh process; every replayed export verified against its pin; shared exports with the same pin, byte count and row count; at least one shared export in the same "each export but the last" position | the export model | equality of recorded values; archive facts |
+| C2 | Count audit: driver values sum to the run's recorded totals (the manifest's `record_count`, the acquisition's API rows, or the archive facts' rows, equal to reconnaissance) | all | readings, manifest, record, archive facts |
+| C3 | Positivity: `m_2 > m_1`, `R_2 > R_1`, `Q_2 > Q_1` | all | retained readings |
+| C4 | Envelope audit: at every instance boundary `k ≥ 1`, `α̂ + Σ_(i≤k) max(β_R·r_i, γ_m) ≥ C_k` | all | per-instance readings |
+| C5 | No absorption: for pages, `H_A ≥ H_A′`, where `H = C_m`; for API days, the assumption AD-2; for the export model, satisfied by construction in a replay | all | A's and A′'s readings; a later decision; the replay's stage list |
+
+Each criterion is a comparison of recorded values, or a named assumption, and needs no
+tolerance. **The export model's criteria can be met.** A window from 2024-10-31 to
+2025-01-01 selects #7, #8 and #9, whose two exports before the last hold 1,415,572 rows. A
+window from 2024-10-31 to 2025-03-01 selects #7 to #10, whose three exports before the
+last hold 2,226,591 rows. These windows are illustrations, not authorizations.
+
+**Model assumptions.** Each must be accepted explicitly by a later decision. None is
+evidence.
+- **PG-1 (pages, driver sufficiency):** a page's retained change depends on the page only
+  through `p_k`, plus a per-instance cost.
+- **AD-1 (API days, driver sufficiency):** a day's retained change depends on the day only
+  through `r_d`, plus a per-instance cost.
+- Driver sufficiency alone implies nothing about monotonicity; that follows only from
+  RC-1.
+- **AD-2:** no absorption by memory a preceding stage freed. Not testable: no run executes
+  API days without a preceding archive phase.
+- **AD-3:** drift neutrality between A's and A2's live API responses. No procedure D51
+  proposes can test it.
+- **AD-4:** representativeness up to the full window's largest day (34,091 rows, against
+  A2's 6,958). No procedure D51 proposes can test it.
+
+**Falsifiers.**
+- **F-1:** C4 fails in either observation. This falsifies the envelope as an upper bound
+  for that observation, and so RC-1 as fitted to it.
+- **F-2:** within one observation, two non-first instances `i` and `j` with `r_i ≤ r_j`
+  have measured retained increments `Δ_i > Δ_j`. This falsifies RC-1 for that observation.
+  It cannot show whether driver sufficiency or the linear form failed.
+
+Any falsifier that holds makes the model unsupported.
+
+*(13.5) Repeated stage types.*
+
+| Type | Instances in B | Driver | Observations | Retained increments | Transient excess | Status |
+|---|---|---|---|---|---|---|
+| Normalization page `k` | 731 pages, 2,036,435 records | `p_k` | A and A2: 7 and 31 pages; 10,050 and 43,920 records | shared-archive envelope from `Ŝ_N0`, the projected commit at verification's end; `Δ̂_1 = α̂ + max(β_R·p_1, γ_m)`, `Δ̂_k = max(β_R·p_k, γ_m)` | Rule P on page rows from exact page excesses in offline reruns; page peak `Ĉ_(k−1) + X̂(p_k)` | retained: supported, in Rule C's sense, only if C1-S and C2 to C5 hold, F-1 and F-2 do not, and a later decision accepts PG-1 and RC-1; transient: supported if at least one page excess is exact |
+| API day `d` | 733 days, 8,188,022 rows | `r_d` | A and A2: 9 and 33 days; 37,422 and 150,837 rows | shared-archive envelope from `Ŝ_API`, the projected commit at the start snapshot's end; `Δ̂_1 = α̂ + max(β_R·r_1, γ_m)`, `Δ̂_d = max(β_R·r_d, γ_m)` | unknown: no procedure proposed in D51 measures it exactly | retained: **not supportable under D51**; a later decision could support it only after C1-S and C2 to C4 hold, F-1 and F-2 do not, and it accepts AD-1 to AD-4 and RC-1; transient: unknown |
+| Each export but the last | 10 exports, 8,643,971 rows | `e_j` | two archive replays comparable under C1-X | export envelope from the projected commit at `read_archive`'s entry | Rule P on export rows from the replays' exact excesses | unknown on A, A′ and A2; supported only if the replays satisfy C1-X and C2 to C5, F-1 and F-2 do not hold, and a later decision accepts RC-1 |
+| Export download | 11 | the export's bytes | A and A2, for export #5 | Rule P; every B export is no larger than #5 | Rule P, equal to #5's exact excess | supported if #5's values are exact |
+| Partition write (record or outcome) | 2 of each | the partition's records | offline reruns | Rule P per instance; 814,385 and 1,222,050 records | Rule P per instance | supported if exact |
+
+*(13.6) Single stages.*
+
+| Stage | Driver | Rule | Measured exactly in | B |
+|---|---|---|---|---|
+| Imports, setup, discovery, start snapshot, exit | none | carried | A, A′, A2 | carried |
+| Last export and merge, where the merged key array is built | all archive rows of the selected exports | P | archive replays: 945,532; 2,226,591; 3,029,664 | 9,682,354 |
+| Finishing | API days, and the largest page | — | no procedure proposed in D51 measures this exactly | unknown |
+| Verification | pages, and the largest page | P on each, the larger | offline reruns | 731 pages; 20,524 |
+| Post-normalization checks | held records `n` | P | offline reruns: 10,050 and 43,920 | 2,036,435 |
+| Clearing the corpus; the manifest | `n` | P | offline reruns | 2,036,435 |
+
+*(13.7) Masked transient peaks.*
+
+`PeakPagefileUsage` and `PeakWorkingSetSize` never reset, so a stage whose peak stays
+below an earlier one yields only an interval.
+
+| Component | Masked in a fetch run by | Procedure | Result |
+|---|---|---|---|
+| Verification; normalization pages; post-normalization checks; clearing the corpus; partition writes; the manifest | the fetch stages | **Offline rerun** (13.8) | exact where a stage sets a new lifetime high; otherwise an interval, and unknown when extrapolated |
+| Each export but the last; the last export and the merge | the downloads | **Archive replay** (13.9) | exact where a stage sets a new lifetime high |
+| API days | the archive phase, in every process that can reach one | **None.** `fetch_day` needs the archive the production `read_archive` builds in the same process; a resumed fetch re-reads every pinned export first; a replay of `fetch_day` alone would need a harness-built archive and a fake transport, and would omit the transport's handling of the body and the page's caching and journaling | unknown |
+| Finishing | the archive phase | **None.** Completion needs the fetcher's archive and every journaled slice in the same process | unknown |
+
+*(13.8) Offline rerun.*
+
+Production `ingest.cli.main` with `--fetch` on a completed acquisition reuses it with zero
+requests, with the network refused. It reproduces the production code of every stage from
+verification to exit, on the run's own retained pages and record. No fetch stage precedes
+it, so its excesses are applied to B's projected starts under the assumption that memory
+freed by earlier stages can only absorb a transient, never enlarge it.
+
+*(13.9) Archive replay.*
+
+- **Inputs.** The orchestrator copies the window's pinned exports from `data/recon/` into
+  the replay's directory under its run record, and verifies each against its pin.
+- **The child.** A fresh child calls the production `select_exports` on the retained
+  reading-room page, and the production `read_archive` of a `_Run` built with the
+  production constructor. That `_Run`'s context has an HTTP client that refuses every
+  request, and a directory that is the replay's.
+- **What it reproduces.** `read_export`, each sort, the spill and the merge, on
+  byte-identical exports, for the same window and spill days.
+- **What it does not run.** No acquisition is opened, and no API day, finishing or later
+  stage runs.
+- **The audit.** Its spill files and archive facts must equal a fetch run's on the same
+  exports where one exists, and the reconnaissance row counts otherwise.
+- **Its checkpoint** is `end_of_replay` only.
+
+*(13.10) Supportability and composition.*
+
+- **Stage B's projection is unsupported.** The API-day and finishing transient excesses
+  cannot be measured exactly by any procedure D51 proposes, so they remain unknown, and a
+  projection with any unknown component is unsupported. The API-day retained model is also
+  unsupportable under D51. **Stage B cannot be authorized under D51**, and nothing (13.4)
+  allows a later decision to accept weakens that. Only a later decision adopting a method
+  able to observe those peaks could change it — for example a trace of the process's
+  commit charge over time, or instrumentation inside the fetcher, which would be a code
+  change. D51 proposes neither, and assumes neither would succeed.
+- **The further measurement** still serves the retained models and every component its
+  procedures can measure. It establishes nothing beyond its observed range.
+- **Composition rules:** the recurrence receives only increments; every Rule C envelope is
+  converted before use, and Rule P is applied to each stage's or instance's own change;
+  every retained change enters later stages' starts exactly once; a transient enters only
+  its own stage's peak; a projected release enters as zero.
+- **If every component were known,** `P̂` would be an upper projection that fits only
+  below the 6,000,000,000-byte budget, and the same treatment would apply to the working
+  set against B's preflight available memory.
+- **The protections are not projections.** The budget trigger and the system floor protect
+  a run; they never substitute for a supported projection.
+
+*(13.11) B's disk projection.*
+
+It scales each component measured in A and A2 by its own driver: exports by the pinned
+bytes of B's roster (773,033,865); API responses by API rows (8,188,022 over 733 days);
+and spill files, pages and corpus by records. It must fit the free disk at launch, and is
+decided at B's review. If the memory or disk projection, once supportable, does not fit,
+D44's redesign decision comes first. C does not exercise a spring gap, and whether one
+must be validated before NYC 311's full window is left open. NYC 311's full window needs
+its own go/no-go on its measured memory and disk. The sequence is CFPB first, then
+NYC 311.
+
+*Now — (14) Stop conditions.*
+
+A run stops, and its evidence is preserved, on every trigger of (9) and every
+refusal-class event of (12.1), with no fix-forward and no automatic rerun. Its outcome
+under (12) alone decides whether it is eligible for continuation. A continuation, if any,
+needs its own fresh authorization (12.7).
+
+*Now — (15) Retention.*
+
+All of the following is kept under the gitignored `data/` tree.
+
+- **The acquisition directory, complete as produced:** its journal, start state, record,
+  rewinds, pages, archive exports, API responses, spill files and quarantine.
+- **Each validation corpus,** with its outcome sidecar and version-4 manifest, left as
+  written whatever the outcome.
+- **`data/run-records/<run-id>/`, one per execution, holding:**
+  - the command, commit, environment and package freeze, and the network path;
+  - `preparing.json`; the launch-start or launch-refusal record; and every partial or
+    invalid `launch.json` or `.partial`, exactly as found;
+  - the allowlist file and its digest;
+  - a replay's copied exports, spill output and audit;
+  - the preflight and quiet-period readings;
+  - every orchestrator reading and every child reading of (5), with their counter
+    brackets;
+  - every prepared request's sanitized representation — never the raw request, and no
+    request-header value except one of H6's exact permitted pairs;
+  - each response's harness response metadata, including each `Set-Cookie`'s name, domain
+    and path, never its value;
+  - attempt, status, retry and wait evidence;
+  - every refusal event;
+  - every by-ID guard decision, with its context sequence number, active API day, the
+    number of keys carrying the ID, and the matched key's inclusion bit and archive date;
+  - every successful logical request's `response_sha256`;
+  - every child check event, including failed reads;
+  - every stage's boundaries, start, retained change, peak and excess, for commit and
+    working set;
+  - every instance's driver value;
+  - each trigger's entry, acting check and latency;
+  - the exact-day audit's result for each by-ID request;
+  - the disk breakdown by subdirectory and the longest created path;
+  - the exit status;
+  - the `terminal/` directory as found;
+  - the exit snapshot, the verification result and its digests;
+  - the acquisition manifest; for a continuation, `continuation-eligibility.json` and the
+    L0 and L4 fresh manifests;
+  - the classification record and its digest, the evidence-status record, and the audit
+    section of every re-check;
+  - the harness copies and digests, and the authorization's reference.
+- **`data/run-records/_claims/`,** holding every identifier claim, permanently and
+  unmodified, including incomplete ones.
+- **`data/run-records/_preflight/`,** holding every preflight-refusal record and any
+  `<sha256>.manifest.json`, unmodified.
+
+**No run identifier, claim or run directory is ever reused**, including a launch-refused
+one. A prior execution's run directory is preserved as found, apart from (11.7)'s appended
+entries, and its `terminal/` directory is never written.
+
+**No retained artifact, harness or production, holds a cookie value, the value of any
+credential or other secret-bearing header, any exception text, or the raw lifecycle
+nonce.** Production acquisition evidence keeps only the response-header fields of (6.3),
+and no request header. The projection worksheets of (13) are retained alongside, every
+value traced to a run record. Nothing under `data/` is committed, and `data/recon/` is
+only ever read, never modified.
+
+*Now — (16) The order of work, authorization prerequisites and launch conditions.*
+
+1. D51 was conditionally approved on 2026-11-16. Its entry is committed as a
+   documentation-only change, under its own separate authorization.
+2. The trigger-delivery mechanism (D-3) and the child launch method (U6) are then
+   designed.
+3. Building the harness, and running its validation activities (4.6a), are each a separate
+   authorized step. Neither contacts a source or touches `data/`. A validation
+   authorization permits validation activities only; it permits no measured execution.
+
+**A first execution's authorization may be sought only when all of these hold:**
+- the test gate is green at the commit to be authorized;
+- every mock-validation class of (4.6) has passed at that commit and at the harness
+  digests the authorization will name, except the E6-dependent cases, which cannot yet be
+  built. Every continuation refusal case is included;
+- the Windows filesystem integration tests (MV-W1 to MV-W11) have passed, with no case
+  unestablished, at that commit and those digests, and their evidence has been reviewed;
+- the child-identity requirement of (4.2) is met and validated (U6 resolved);
+- M-1 to M-4 are implemented, and D-3's mechanism has been validated;
+- for the stage concerned, every earlier stage has been accepted (13).
+
+**A continuation's authorization may be sought only when, in addition:**
+- its prior execution has been classified as an eligible interruption, with the owner's
+  review recorded where required;
+- the later decision required by E6 exists;
+- the E6-dependent cases of (4.6) have passed.
+
+None of these exists.
+
+**Separately, the launch lifecycle** of (11.1a), L0 to L5 — including the quiet-period
+gate of (7) and the conditions of (8) — is mandatory for every launch, whatever an
+authorization says. No phase waives any prerequisite, integrity check or launch gate.
+
+**Neither gate is met now:**
+- the harness does not exist, so its validation has not passed;
+- U6 and D-3 are unresolved;
+- the launch gate has not been evaluated by any quiet period, and the only headroom
+  evidence is two 2026-10-10 snapshots below 6,000,000,000 bytes (1);
+- D51 authorizes no execution.
+
+**A fresh ten-minute quiet-period evaluation immediately before launch remains
+mandatory.**
+
+*Now — (17) What the conditional approval of D51 covers, and what it does not authorize.*
+
+**D51 was conditionally approved by the owner on 2026-11-16, as a specification only.
+Nothing in it is implemented by appearing in it or by being approved, and the approval
+authorizes no activity.**
+
+**What is approved, conditionally.** The **resource-readiness framework** is approved
+conditionally, as a specification for a future external harness and for the conduct of
+separately authorized executions. It covers:
+- the environment record (1);
+- the harness requirements of (4), including the child-identity requirement and the
+  validation rules of (4.6a);
+- the memory readings, stages and counter-based attribution (5);
+- the guard specifications, the active-day by-ID guard and the exact-day audit (6);
+- the launch gate and conditions (7, 8);
+- the triggers, checkpoints, forced-action rule, delivery-medium lifecycle and binding
+  invariant (9);
+- the ordering and observation-evidence rules (10);
+- the run-identifier rules, the identifier claim, the launch lifecycle, the terminal
+  artifact and the acquisition manifest (11);
+- the classification, precedence, outcome and continuation rules (12);
+- the stage sequence and the authorization gates;
+- the recurrence, Rules P and C with their stated assumptions, the offline-rerun and
+  archive-replay procedures, and the further-measurement requirement (13);
+- the stop conditions and retention rules (14, 15).
+
+Conditional approval means: the harness, once built, becomes usable only after its
+validation passes; usability authorizes no execution; every execution, including a
+continuation, needs its own explicit authorization; and the prerequisites and dependencies
+of (18) remain unestablished until shown.
+
+**Not authorized by D51 or by its conditional approval:**
+- any measured execution;
+- the building of the harness, which needs its own authorization;
+- any validation activity, which needs its own validation authorization;
+- any repository change other than appending D51's own entry, which itself requires
+  separate authorization;
+- any request to, or download from, either source;
+- ingestion, model training, threshold fitting or real-corpus evaluation;
+- README metrics;
+- Phase 3 wiring.
+
+**Stage B cannot be authorized under D51**, and under the frozen order, neither can Stage
+C.
+
+*Now — (18) Register of prerequisites, dependencies, owner decisions and blockers.*
+
+None is established. "Blocked" below means that no measured execution may be authorized; a
+validation activity under its own validation authorization is never blocked by this
+register.
+
+| Item | Statement | Interim consequence |
+|---|---|---|
+| **U6** | The measured child must be the interpreter process, not the venv launcher (4.2) | Blocked |
+| P-T1 | `QueryPerformanceCounter` is one counter, comparable across both processes, non-decreasing, at equal frequency | Blocked; attribution (5.4) unavailable |
+| P-T2\* | A delivery completed before `check_started_qpc` is returned by that check's read ((9.3)(f)) | Blocked; R-T6 makes any trigger evidence E |
+| P-T3 | The counter readings bracket their actions and the visibility-read call; delivery completion is defined by the mechanism | As P-T2\* |
+| P-T4 | No premature or stale return. Mechanism part: (9.3)(c), (d) and (g). Per-run part: M-op2 at each launch | Blocked until the mechanism part is established; a failed per-run check is a launch refusal |
+| P-T6 | The binding invariant B-1 to B-6 holds at the harness digest | Authenticity unavailable, so any trigger evidence is E |
+| P-T5 (option, not adopted) | A publication sequence number, or orchestrator-served reads | V3 remains E; authenticity remains procedural |
+| M-1 to M-4 | Delivery brackets; check events at every safe checkpoint; contiguous `seq` with `terminal_begin`; trigger entries with `request_id`, `reading` and `threshold` | Any run with a trigger is E |
+| D-1 | No orchestrator record of an operator's interrupt request | `operator_interrupt` maps only to a reviewed interruption |
+| D-2 | Typed-refusal classes not enumerated from source | Every `ingest`-defined exception is refusal-class |
+| D-3 | The delivery mechanism, which must implement and validate (9.3)(a) to (g) | Blocked |
+| D-4 | Windows disk-full error codes unverified | Every `os_error` crash is a reviewed interruption |
+| D-5 | Untested platform semantics. The filesystem parts are established only by MV-W1 to MV-W11: exclusive creation of files and directories; reserved names; trailing dots and spaces; case-insensitive matching; reparse points; handle-relative opens and creates; handle-based final paths; the hold protection of MV-W9(b); handle-based enumeration; behaviour under concurrent change; rename without overwrite; `fsync`; persistence of a created file across a process crash. The remainder — the counter definitions, CPython weak references, exception identity, `os._exit` — is established only by the other validation classes. Resolved only when every required case has passed, with none unestablished, and the evidence has been reviewed | Blocked |
+| D-6 | No authoritative `harness_reason` enumeration | `harness_reason` stays null |
+| O-1 | How a foreign preparing or indeterminate directory is released | It stays blocking |
+| O-2 / E6 | The owner's acceptance of the exit-to-TV7 limitation, and the form of its decision and citation | Every continuation is refused at L0; first executions are unaffected |
+| O-3 | Whether a foreign preparing or indeterminate directory blocks non-conflicting launches | It blocks every launch |
+| O-4 | Whether a symbolic-link fixture may be built if it needs a privilege | That case is unestablished; D-5 stays open |
+| G-1 | Whether a continuation may change commit, harness digests or package freeze | Equality is required |
+| G-2 | The format of the owner's review record | A record referenced by digest is required |
+| G-3 | Production's D46 acquisition-identity fields were not re-read | Byte equality of the whole acquisition directory is required |
+| RC-1, PG-1, AD-1 to AD-4 | Rule C's form and model assumptions | No Rule C model is supported until a later decision accepts them; the API-day retained model is unsupportable under D51 |
+| Disk basis | The ~17 GB figure is an owner estimate | It remains the declared lower bound of (8) |
+| C's stage list | NYC 311 stages are undefined (5.3) | A prerequisite of C's authorization |
+| Launch gate | Not evaluated; two historical snapshots below the minimum | A fresh quiet period is mandatory |
+
+**Platform limitations that no specified test can remove.**
+- **Durability of a directory entry across an OS crash or power loss is unestablished.**
+  If a claim, its run directory and every record naming an identifier were all lost in
+  such an event, the harness could not detect reuse. Only the spent-authorization rule of
+  (11.1a) covers that case, and it is not machine-verifiable.
+- The drive letter `C:` and the volume root are trusted, not verified.
+- The lifecycle nonce does not establish process liveness, and does not defend against a
+  process that can read the orchestrator's memory or replace its records.
+
+*D42 is preserved.*
+
+Plan Tasks 23 to 25 implemented the fetchers of D42's first deferred item. Its formal
+closure is left to a separate decision entry, and D51 closes none of D42's items. Items 2
+to 7 remain open. **Phase 2 is not complete, and no document may describe it as
+complete.**
+
+*Scope:* D51 is a documentation-only decision, conditionally approved by the owner on
+2026-11-16 as a specification. Approval of the framework is not authorization to implement
+or execute it. Its only repository change is its own entry in the addendum, which is
+appended only under a separate authorization. **D1–D50 are unaltered**, and every existing
+repository requirement — code, tests, `requirements/`, CI and other documents — is
+unchanged. The requirements D51 states apply to a future external harness, kept outside
+the repository, and to the conduct of future authorized executions. They are approved as a
+specification only. None of them is implemented by appearing in D51 or by its approval.
+Building the harness, running any validation activity and conducting any execution each
+require their own explicit authorization, and none is authorized.
